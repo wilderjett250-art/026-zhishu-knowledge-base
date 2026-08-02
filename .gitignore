@@ -1,0 +1,40 @@
+# Local configuration and credentials
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+
+# Personal and generated knowledge data
+data/raw/
+data/normalized/
+data/knowledge/
+data/self/
+data/distill/
+data/index/
+data/runs/
+
+# Databases, indexes, caches, and logs
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.log
+.cache/
+tmp/
+
+# Python and Node build state
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+dist/
+build/
+
+# Windows and editor state
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
