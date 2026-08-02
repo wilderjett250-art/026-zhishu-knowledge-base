@@ -1,4 +1,4 @@
-# 系统架构
+# 系统架构与安全边界
 
 ## 一、总体分层
 
@@ -55,15 +55,37 @@ PKAS 采用一个逻辑知识库、多层物理存储的设计。
 
 开放任务由一个总控 Agent 起步。总控 Agent 负责识别任务、选择知识域、调用工具和工作流、验证输出，并在必要位置请求确认。系统稳定后再按真实负载拆分工作、研究、学习、自我理解和蒸馏 Agent。
 
-## 六、Codex 接入
+## 六、已实现技术栈
 
-Codex 通过项目级规则和本地 MCP 服务调用知识库能力。初始工具边界规划为：
+- Python 3.11、FastAPI、Typer 和 Pydantic：服务、命令行和参数契约。
+- SQLite、FTS5 和本地文件系统：元数据、全文检索和哈希原件库。
+- Model Context Protocol Python SDK v2：Codex stdio 工具服务。
+- React 19、TypeScript 和 Vite：本地管理界面。
+- PyMuPDF、python-docx、openpyxl、Beautiful Soup：多格式资料解析。
+- pytest、Pyright、Ruff 和 TypeScript build：自动化验证。
+
+当前采用模块化单体，数据库是元数据和状态的正式来源，原件库是资料内容的正式来源。全文索引可以重建。语义向量库、OCR、音频转写和外部连接器可以作为适配器加入，不替换当前正式来源。
+
+## 七、Codex 接入
+
+Codex 通过本地 MCP 服务调用知识库能力。当前工具边界为：
 
 - search_knowledge：按关键词、领域、时间、权限和状态检索。
-- read_source：读取已授权的原始资料或正式知识。
-- list_topics：浏览主题、项目和时间线。
-- save_candidate：保存候选知识、反馈或蒸馏样本。
-- approve_candidate：将经过确认的候选提升为正式内容。
-- explain_provenance：返回结论对应的来源和推导关系。
+- read_document：读取已授权的原文和来源定位。
+- list_sources：查看资料来源及其隐私属性。
+- inspect_import_path：只读检查明确路径。
+- import_confirmed_path：在用户确认后导入同一路径。
+- prepare_agent_context：自动路由知识领域并准备证据。
+- save_persona_candidate：保存待审核的个人观察。
+- save_distillation_candidate：保存待审核的蒸馏样本。
 
-所有写入工具保留审计记录，涉及长期自我模型和蒸馏提升时要求明确确认。
+所有长期写入保留审计记录。MCP 不提供批准画像或批准训练数据的工具，避免智能体自行提升关于用户的推断。
+
+## 八、安全与恢复
+
+- 每次导入都要求准确的绝对路径，拒绝磁盘根目录和知识系统自身目录。
+- `.env`、私钥、证书和常见凭证文件按名称或后缀强制跳过。
+- `restricted` 资料只有调用方显式授权时才能进入检索结果。
+- 原始资料复制后再次计算 SHA-256，索引与原件分离。
+- 候选画像和蒸馏样本必须由用户批准，并保留批准或驳回记录。
+- 索引损坏时可以执行重建；长期运行前还应配置加密备份和恢复演练。

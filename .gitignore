@@ -1,6 +1,7 @@
 # Local configuration and credentials
 .env
 .env.*
+!.env.example
 *.key
 *.pem
 *.p12
@@ -32,6 +33,9 @@ __pycache__/
 node_modules/
 dist/
 build/
+*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
 
 # Windows and editor state
 Thumbs.db
