@@ -15,6 +15,7 @@ mcp = MCPServer(
         "先检索再回答；重要结论保留 source_id、document_id、locator 和 original_uri。"
         "不要猜测未检索到的个人事实。导入资料必须先调用 inspect_import_path，"
         "只有用户明确批准完全相同的路径、领域和隐私范围后，才调用 import_confirmed_path。"
+        "WeFlow 导出也必须先发现并检查；只有用户明确批准同一批会话后才允许确认导入。"
         "个人画像和蒸馏样本只能创建候选，批准操作由用户在管理台完成。"
         "微信客户聊天默认是 restricted；只有任务明确需要且用户授权时才读取。"
         "回复客户时只生成草稿，不直接发送微信消息。"
@@ -122,6 +123,7 @@ def inspect_import_path(path: str, recursive: bool = True) -> dict[str, Any]:
 )
 def import_confirmed_path(
     path: str,
+    inspection_token: str = "",
     domain: str = "work",
     privacy: str = "private",
     recursive: bool = True,
@@ -134,6 +136,13 @@ def import_confirmed_path(
             status="warning",
             next_actions=["先调用 inspect_import_path，并取得用户对完整范围的明确确认"],
         )
+    if len(inspection_token) != 64:
+        return envelope(
+            "未执行导入：缺少有效的检查令牌",
+            {"path": path, "domain": domain, "privacy": privacy},
+            status="warning",
+            next_actions=["重新调用 inspect_import_path，并传入其返回的 inspection_token"],
+        )
     if domain not in {"work", "self", "shared", "distill"}:
         return envelope("领域参数无效", {"domain": domain}, status="error")
     if privacy not in {"public", "private", "restricted"}:
@@ -143,6 +152,7 @@ def import_confirmed_path(
         recursive=recursive,
         domain=domain,
         privacy=privacy,
+        inspection_token=inspection_token,
     )
     status = "success" if result["status"] != "failed" else "error"
     summary = (
@@ -151,6 +161,163 @@ def import_confirmed_path(
         else "导入工作流未完成"
     )
     return envelope(summary, result, status=status, artifacts=result.get("artifacts", []))
+
+
+@mcp.tool(
+    description=(
+        "只读发现 WeFlow 已完成并仍存在的 XLSX 导出。不会访问数据库密钥、WCDB 或 HTTP API，"
+        "也不会导入聊天正文。"
+    )
+)
+def discover_weflow_exports(
+    records_path: str | None = None,
+    keyword: str = "",
+    limit: int = 500,
+) -> dict[str, Any]:
+    try:
+        result = system().weflow.discover_exports(
+            records_path=records_path,
+            keyword=keyword,
+            limit=max(1, min(limit, 1000)),
+        )
+    except (OSError, ValueError) as exc:
+        return envelope(
+            "WeFlow 导出发现失败",
+            {"error": str(exc)},
+            status="error",
+            next_actions=["确认 WeFlow 导出记录文件和 XLSX 仍然存在"],
+        )
+    return envelope(
+        f"发现 {result['existing_sessions']} 个有现存 XLSX 的 WeFlow 会话",
+        result,
+        next_actions=["选择明确会话，或在用户批准全部现有会话后执行只读检查"],
+    )
+
+
+def _resolve_weflow_selection(
+    knowledge_system: KnowledgeSystem,
+    *,
+    records_path: str | None,
+    session_ids: list[str] | None,
+    all_existing: bool,
+) -> tuple[str | None, list[str]]:
+    if all_existing:
+        catalog = knowledge_system.weflow.discover_exports(
+            records_path=records_path,
+            limit=1000,
+        )
+        return catalog["records_path"], [item["session_id"] for item in catalog["items"]]
+    return records_path, list(dict.fromkeys(session_ids or []))
+
+
+@mcp.tool(
+    description=(
+        "只读检查明确选择的 WeFlow XLSX，计算哈希、消息数和检查令牌，不导入正文。"
+        "all_existing=true 只适用于用户明确要求全部现有导出时。"
+    )
+)
+def inspect_weflow_exports(
+    session_ids: list[str] | None = None,
+    records_path: str | None = None,
+    all_existing: bool = False,
+) -> dict[str, Any]:
+    knowledge_system = system()
+    try:
+        resolved_path, resolved_ids = _resolve_weflow_selection(
+            knowledge_system,
+            records_path=records_path,
+            session_ids=session_ids,
+            all_existing=all_existing,
+        )
+        if not resolved_ids:
+            return envelope(
+                "没有可检查的 WeFlow 会话",
+                {"records_path": resolved_path, "session_ids": []},
+                status="warning",
+            )
+        result = knowledge_system.weflow.inspect_export_selection(
+            records_path=resolved_path,
+            session_ids=resolved_ids,
+        )
+    except (OSError, ValueError) as exc:
+        return envelope(
+            "WeFlow 导出检查失败",
+            {"error": str(exc)},
+            status="error",
+            next_actions=["重新发现导出并确认相同的会话范围"],
+        )
+    result["session_ids"] = resolved_ids
+    return envelope(
+        f"已检查 {result['selected_sessions']} 个 WeFlow 会话，尚未导入聊天",
+        result,
+        next_actions=["向用户展示总会话、消息和字节数，并取得对完全相同范围的明确批准"],
+    )
+
+
+@mcp.tool(
+    description=(
+        "导入已经检查且由用户明确批准的 WeFlow XLSX，会保存哈希原始快照并建立 restricted 客户索引。"
+        "必须传入检查令牌并设置 confirmed=true；部分失败可安全重试。"
+    )
+)
+def import_confirmed_weflow_exports(
+    inspection_token: str,
+    session_ids: list[str] | None = None,
+    records_path: str | None = None,
+    all_existing: bool = False,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    if not confirmed:
+        return envelope(
+            "未执行 WeFlow 导入：缺少用户明确确认",
+            {"records_path": records_path, "session_ids": session_ids or []},
+            status="warning",
+            next_actions=["先调用 inspect_weflow_exports，并取得用户对完全相同会话范围的明确批准"],
+        )
+    if len(inspection_token) != 64:
+        return envelope(
+            "未执行 WeFlow 导入：检查令牌无效",
+            None,
+            status="warning",
+            next_actions=["重新调用 inspect_weflow_exports"],
+        )
+    knowledge_system = system()
+    try:
+        resolved_path, resolved_ids = _resolve_weflow_selection(
+            knowledge_system,
+            records_path=records_path,
+            session_ids=session_ids,
+            all_existing=all_existing,
+        )
+        result = knowledge_system.customer_workflows.import_weflow_exports(
+            records_path=resolved_path,
+            session_ids=resolved_ids,
+            inspection_token=inspection_token,
+            privacy="restricted",
+        )
+    except (OSError, ValueError) as exc:
+        return envelope(
+            "WeFlow 导入未执行",
+            {"error": str(exc)},
+            status="error",
+            next_actions=["重新发现并检查同一批导出"],
+        )
+    status = {"completed": "success", "warning": "warning", "failed": "error"}.get(
+        result["status"],
+        "error",
+    )
+    imported = result.get("result", {}).get("imported", 0)
+    return envelope(
+        f"WeFlow 批量导入完成，新增 {imported} 条客户消息",
+        result,
+        status=status,
+        artifacts=result.get("artifacts", []),
+        next_actions=(
+            ["查看失败会话后重试；成功消息会自动去重"]
+            if result["status"] == "warning"
+            else []
+        ),
+    )
 
 
 @mcp.tool(

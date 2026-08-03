@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+from openpyxl import Workbook
 
 import pkas.mcp_server as mcp_server
 from pkas.system import KnowledgeSystem
@@ -17,8 +20,10 @@ def test_mcp_guard_and_search(
     assert blocked["status"] == "warning"
     assert knowledge_system.repository.stats()["counts"]["sources"] == 0
 
+    inspection = mcp_server.inspect_import_path(str(note), recursive=False)
     imported = mcp_server.import_confirmed_path(
         str(note),
+        inspection_token=inspection["data"]["inspection_token"],
         domain="work",
         privacy="private",
         recursive=False,
@@ -76,3 +81,66 @@ def test_mcp_customer_context_tools(
         confidence="high",
     )
     assert signal["data"]["approval_status"] == "candidate"
+
+
+def test_mcp_weflow_export_inspection_and_confirmed_import(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(mcp_server, "system", lambda: knowledge_system)
+    xlsx = source_root / "weflow-mcp.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["微信聊天记录"])
+    sheet.append(["昵称", "MCP 测试客户", "微信ID", "wxid_mcp_customer"])
+    sheet.append([])
+    sheet.append(
+        ["序号", "时间", "发送者昵称", "发送者微信ID", "发送者身份", "消息类型", "内容"]
+    )
+    sheet.append(
+        [1, "2026-08-03 09:00:00", "客户", "wxid_mcp_customer", "客户", "文本消息", "测试需求"]
+    )
+    workbook.save(xlsx)
+    records = source_root / "weflow-export-records.json"
+    records.write_text(
+        json.dumps(
+            {
+                "wxid_mcp_customer": [
+                    {
+                        "exportTime": 1785720000000,
+                        "format": "xlsx",
+                        "messageCount": 1,
+                        "outputPath": str(xlsx.resolve()),
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    inspection = mcp_server.inspect_weflow_exports(
+        records_path=str(records),
+        all_existing=True,
+    )
+    assert inspection["status"] == "success"
+    assert inspection["data"]["selected_sessions"] == 1
+
+    blocked = mcp_server.import_confirmed_weflow_exports(
+        inspection["data"]["inspection_token"],
+        records_path=str(records),
+        all_existing=True,
+    )
+    assert blocked["status"] == "warning"
+    assert knowledge_system.repository.stats()["counts"]["customer_messages"] == 0
+
+    imported = mcp_server.import_confirmed_weflow_exports(
+        inspection["data"]["inspection_token"],
+        records_path=str(records),
+        all_existing=True,
+        confirmed=True,
+    )
+    assert imported["status"] == "success"
+    assert imported["data"]["result"]["imported"] == 1
