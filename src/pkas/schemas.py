@@ -33,6 +33,12 @@ class ImportRunRequest(ImportInspectRequest):
     inspection_token: str = Field(min_length=64, max_length=64)
 
 
+class CatalogSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    root_id: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
 class AgentContextRequest(BaseModel):
     task: str = Field(min_length=2, max_length=2000)
     domain: Domain | None = None

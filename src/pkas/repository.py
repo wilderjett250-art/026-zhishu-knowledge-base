@@ -207,6 +207,22 @@ class Repository:
     def stats(self) -> dict[str, Any]:
         with self.database.connect() as connection:
             counts = {}
+            active_count_queries = {
+                "sources": "SELECT COUNT(*) AS count FROM sources WHERE status = 'indexed'",
+                "documents": (
+                    "SELECT COUNT(*) AS count FROM documents d "
+                    "JOIN sources s ON s.id = d.source_id WHERE s.status = 'indexed'"
+                ),
+                "chunks": (
+                    "SELECT COUNT(*) AS count FROM chunks c "
+                    "JOIN sources s ON s.id = c.source_id WHERE s.status = 'indexed'"
+                ),
+                "messages": (
+                    "SELECT COUNT(*) AS count FROM messages m "
+                    "JOIN documents d ON d.id = m.document_id "
+                    "JOIN sources s ON s.id = d.source_id WHERE s.status = 'indexed'"
+                ),
+            }
             for table in (
                 "sources",
                 "documents",
@@ -224,13 +240,18 @@ class Repository:
                 "sync_roots",
                 "sync_items",
             ):
-                counts[table] = connection.execute(
-                    f"SELECT COUNT(*) AS count FROM {table}"
-                ).fetchone()["count"]
+                statement = active_count_queries.get(
+                    table,
+                    f"SELECT COUNT(*) AS count FROM {table}",
+                )
+                counts[table] = connection.execute(statement).fetchone()["count"]
             domains = {
                 row["domain"]: row["count"]
                 for row in connection.execute(
-                    "SELECT domain, COUNT(*) AS count FROM sources GROUP BY domain"
+                    """
+                    SELECT domain, COUNT(*) AS count
+                    FROM sources WHERE status = 'indexed' GROUP BY domain
+                    """
                 ).fetchall()
             }
             recent_sources = [
@@ -238,7 +259,9 @@ class Repository:
                 for row in connection.execute(
                     """
                     SELECT id, original_name, source_type, domain, privacy, ingested_at
-                    FROM sources ORDER BY ingested_at DESC LIMIT 8
+                    FROM sources
+                    WHERE status = 'indexed'
+                    ORDER BY ingested_at DESC LIMIT 8
                     """
                 ).fetchall()
             ]
@@ -258,16 +281,25 @@ class Repository:
             "recent_runs": recent_runs,
         }
 
-    def list_sources(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_sources(
+        self,
+        limit: int = 100,
+        *,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if status not in {None, "indexed", "superseded"}:
+            raise ValueError(f"Unsupported source status: {status}")
+        where_clause = " WHERE status = ?" if status else ""
+        params: tuple[Any, ...] = (status, limit) if status else (limit,)
         with self.database.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, original_uri, original_name, vault_path, source_type,
                        content_hash, byte_size, mime_type, domain, privacy,
                        status, created_at, ingested_at
-                FROM sources ORDER BY ingested_at DESC LIMIT ?
+                FROM sources{where_clause} ORDER BY ingested_at DESC LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 

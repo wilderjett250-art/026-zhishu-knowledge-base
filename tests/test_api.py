@@ -6,6 +6,7 @@ from openpyxl import Workbook
 
 from pkas.api import create_app
 from pkas.config import Settings
+from pkas.system import KnowledgeSystem
 
 WEFLOW_FIXTURE = Path(__file__).parent / "fixtures" / "weflow_chatlab_private.json"
 
@@ -117,6 +118,36 @@ def test_api_end_to_end(test_settings: Settings, source_root: Path) -> None:
         assert dashboard["counts"]["sources"] == 1
         assert dashboard["counts"]["workflow_runs"] == 1
         assert dashboard["counts"]["agent_runs"] == 1
+
+
+def test_sync_root_api_lists_refreshes_and_searches_catalog(
+    test_settings: Settings,
+    source_root: Path,
+) -> None:
+    (source_root / "existing-project.md").write_text("现成项目资料", encoding="utf-8")
+    system = KnowledgeSystem.create(test_settings)
+    root = system.sync.register_root(
+        name="现成项目目录",
+        root_path=str(source_root),
+        connector_type="local_files",
+        sync_mode="catalog",
+    )
+
+    with TestClient(create_app(test_settings)) as client:
+        refreshed = client.post(f"/api/sync/roots/{root['id']}/scan")
+        assert refreshed.status_code == 200
+        assert refreshed.json()["data"]["files_seen"] == 1
+
+        roots = client.get("/api/sync/roots").json()["data"]
+        assert roots[0]["active_count"] == 1
+        assert roots[0]["last_result"]["cataloged"] == 1
+
+        searched = client.post(
+            "/api/sync/catalog/search",
+            json={"query": "existing-project", "root_id": root["id"], "limit": 20},
+        )
+        assert searched.status_code == 200
+        assert searched.json()["data"][0]["relative_path"] == "existing-project.md"
 
 
 def test_api_rejects_knowledge_project_as_import_source(test_settings: Settings) -> None:

@@ -33,6 +33,7 @@ function App() {
   const [dashboard, setDashboard] = useState<Json | null>(null);
   const [health, setHealth] = useState<Json | null>(null);
   const [sources, setSources] = useState<Json[]>([]);
+  const [syncRoots, setSyncRoots] = useState<Json[]>([]);
   const [workflowDefs, setWorkflowDefs] = useState<Json[]>([]);
   const [workflowRuns, setWorkflowRuns] = useState<Json[]>([]);
   const [agentRuns, setAgentRuns] = useState<Json[]>([]);
@@ -46,12 +47,13 @@ function App() {
   const [evidence, setEvidence] = useState<Json | null>(null);
 
   const refresh = useCallback(async () => {
-    const [dashboardResult, healthResult, sourcesResult, definitionsResult, runsResult,
+    const [dashboardResult, healthResult, sourcesResult, syncRootsResult, definitionsResult, runsResult,
       agentResult, personaResult, distillationResult, auditResult, customersResult,
       customerSignalsResult] = await Promise.allSettled([
       api<Json>("/api/dashboard"),
       api<Json>("/api/health"),
       api<Json[]>("/api/sources?limit=100"),
+      api<Json[]>("/api/sync/roots"),
       api<Json[]>("/api/workflows"),
       api<Json[]>("/api/workflows/runs?limit=50"),
       api<Json[]>("/api/agent/runs?limit=50"),
@@ -64,6 +66,7 @@ function App() {
     if (dashboardResult.status === "fulfilled") setDashboard(dashboardResult.value.data);
     if (healthResult.status === "fulfilled") setHealth(healthResult.value.data);
     if (sourcesResult.status === "fulfilled") setSources(sourcesResult.value.data);
+    if (syncRootsResult.status === "fulfilled") setSyncRoots(syncRootsResult.value.data);
     if (definitionsResult.status === "fulfilled") setWorkflowDefs(definitionsResult.value.data);
     if (runsResult.status === "fulfilled") setWorkflowRuns(runsResult.value.data);
     if (agentResult.status === "fulfilled") setAgentRuns(agentResult.value.data);
@@ -72,7 +75,7 @@ function App() {
     if (auditResult.status === "fulfilled") setAudit(auditResult.value.data);
     if (customersResult.status === "fulfilled") setCustomers(customersResult.value.data);
     if (customerSignalsResult.status === "fulfilled") setCustomerSignals(customerSignalsResult.value.data);
-    if ([dashboardResult, healthResult, sourcesResult, definitionsResult, runsResult,
+    if ([dashboardResult, healthResult, sourcesResult, syncRootsResult, definitionsResult, runsResult,
       agentResult, personaResult, distillationResult, auditResult, customersResult,
       customerSignalsResult].some((result) => result.status === "rejected")) {
       setNotice({ status: "warning", text: "部分系统数据暂时未能读取，请确认后端已启动。" });
@@ -139,7 +142,7 @@ function App() {
           {notice && <div className={`notice ${notice.status}`}><span>{notice.text}</span><button onClick={() => setNotice(null)}>×</button></div>}
 
           {page === "home" && <Home dashboard={dashboard} setPage={setPage} setEvidence={setEvidence} />}
-          {page === "knowledge" && <Knowledge sources={sources} run={run} setEvidence={setEvidence} />}
+          {page === "knowledge" && <Knowledge sources={sources} syncRoots={syncRoots} run={run} setEvidence={setEvidence} busy={busy} />}
           {page === "customers" && <CustomersPanel customers={customers} signals={customerSignals} run={run} setEvidence={setEvidence} busy={busy} />}
           {page === "import" && <ImportPanel run={run} busy={busy} />}
           {page === "workflows" && <Workflows definitions={workflowDefs} runs={workflowRuns} run={run} busy={busy} />}
@@ -187,13 +190,18 @@ function Home({ dashboard, setPage, setEvidence }: { dashboard: Json | null; set
   </>;
 }
 
-function Knowledge({ sources, run, setEvidence }: { sources: Json[]; run: Runner; setEvidence: (data: Json) => void }) {
+function Knowledge({ sources, syncRoots, run, setEvidence, busy }: { sources: Json[]; syncRoots: Json[]; run: Runner; setEvidence: (data: Json) => void; busy: boolean }) {
   const [query, setQuery] = useState("");
   const [domain, setDomain] = useState("");
   const [restricted, setRestricted] = useState(false);
   const [results, setResults] = useState<Json[]>([]);
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogRoot, setCatalogRoot] = useState("");
+  const [catalogResults, setCatalogResults] = useState<Json[]>([]);
   const submit = (event: FormEvent) => { event.preventDefault(); if (!query.trim()) return; void run(() => post<Json[]>("/api/search", { query, domain: domain || null, limit: 20, include_restricted: restricted }), setResults); };
   const openDocument = (item: Json) => void run(() => api<Json>(`/api/documents/${item.document_id}`), setEvidence);
+  const searchCatalog = (event: FormEvent) => { event.preventDefault(); if (!catalogQuery.trim()) return; void run(() => post<Json[]>("/api/sync/catalog/search", { query: catalogQuery, root_id: catalogRoot || null, limit: 50 }), setCatalogResults); };
+  const scanRoot = (rootId: string) => void run(() => api<Json>(`/api/sync/roots/${rootId}/scan`, { method: "POST" }));
   return <>
     <form className="search-console" onSubmit={submit}>
       <span className="search-glyph">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入项目、人物、决策、聊天内容或问题…" aria-label="知识检索" />
@@ -207,6 +215,27 @@ function Knowledge({ sources, run, setEvidence }: { sources: Json[]; run: Runner
       </Panel>
       <Panel title={`资料来源 · ${sources.length}`} code="SOURCE REGISTRY">
         <ItemList items={sources} empty="尚未导入资料。" render={(item) => <button className="source-card" onClick={() => setEvidence(item)}><span className="file-mark">{String(item.source_type).toUpperCase()}</span><span><strong>{item.original_name}</strong><small>{compactPath(item.original_uri)}</small></span><b>{formatBytes(item.byte_size)}</b></button>} />
+      </Panel>
+    </section>
+    <div className="section-divider"><span>CONTINUOUS KNOWLEDGE SOURCES</span><b>现成资料地图与增量同步</b></div>
+    <section className="sync-overview">
+      <Panel title={`持续资料源 · ${syncRoots.length}`} code="AUTO REFRESH / 03:30">
+        <div className="sync-root-list">
+          {syncRoots.length ? syncRoots.map((root) => <article className="sync-root-card" key={root.id}>
+            <header><span className={`status-dot ${root.error_count ? "warning" : "completed"}`} /><div><strong>{root.name}</strong><small>{root.connector_type === "codex_sessions" ? "CODEX TASK STREAM" : root.sync_mode === "index" ? "FULL TEXT INDEX" : "FILE CATALOG"}</small></div><button disabled={busy} onClick={() => scanRoot(root.id)}>增量刷新</button></header>
+            <code title={root.root_uri}>{compactPath(root.root_uri)}</code>
+            <div className="sync-root-metrics"><span><b>{formatNumber(root.active_count)}</b><small>有效项</small></span><span><b>{formatNumber(root.indexed_count)}</b><small>已索引</small></span><span><b>{formatNumber(root.skipped_count)}</b><small>安全跳过</small></span><span><b>{formatNumber(root.error_count)}</b><small>不可读取</small></span></div>
+            <footer><span>{root.domain} / {root.privacy}</span><time>上次同步 {formatTime(root.last_scan_at)}</time></footer>
+          </article>) : <Empty text="尚未注册持续资料源。" />}
+        </div>
+      </Panel>
+      <Panel title={`现成文件定位 · ${catalogResults.length}`} code="PATH CATALOG">
+        <form className="catalog-search" onSubmit={searchCatalog}>
+          <input value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="输入文件名或路径片段，例如 project.config.json" />
+          <select value={catalogRoot} onChange={(event) => setCatalogRoot(event.target.value)}><option value="">全部资料源</option>{syncRoots.filter((root) => root.connector_type === "local_files").map((root) => <option key={root.id} value={root.id}>{root.name}</option>)}</select>
+          <button disabled={busy || !catalogQuery.trim()} type="submit">搜索资料地图</button>
+        </form>
+        <ItemList items={catalogResults} empty="这里可以定位尚未抽取正文的现成项目文件。" render={(item) => <button className="source-card" onClick={() => setEvidence(item)}><span className="file-mark">MAP</span><span><strong>{item.relative_path}</strong><small>{item.root_name} · {item.state}</small></span><b>{formatBytes(item.byte_size)}</b></button>} />
       </Panel>
     </section>
   </>;
@@ -443,6 +472,7 @@ function Detail({ label, value }: { label: string; value: unknown }) { return <>
 function formatTime(value?: string) { if (!value) return "—"; return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function formatUnixTime(value?: number) { if (!value) return "—"; return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value * 1000)); }
 function formatBytes(value?: number) { if (!value) return "0 B"; const units = ["B", "KB", "MB", "GB"]; const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1); return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
+function formatNumber(value?: number) { return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value ?? 0); }
 function compactPath(value?: string) { if (!value) return "—"; return value.length > 48 ? `…${value.slice(-47)}` : value; }
 function statusLabel(value: string) { return ({ completed: "完成", warning: "警告", failed: "失败", running: "运行中" } as Record<string, string>)[value] ?? value; }
 function workflowName(value: string) { return ({ import_path: "资料导入与索引", rebuild_search_index: "全文索引重建", persona_review: "个人观察审核", weflow_xlsx_import: "WeFlow XLSX 客户导入", weflow_chatlab_import: "WeFlow ChatLab 导入" } as Record<string, string>)[value] ?? value; }

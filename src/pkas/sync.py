@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pkas.codex_capture import build_codex_turn, redact_secrets
+from pkas.codex_capture import build_codex_turn, is_internal_codex_turn, redact_secrets
 from pkas.config import Settings, get_settings
 from pkas.db import Database
 from pkas.ingest import SKIP_DIRECTORIES, IngestionService, is_sensitive_path
@@ -135,12 +135,15 @@ class SyncService:
             rows = connection.execute(
                 """
                 SELECT r.*,
-                       COUNT(i.id) AS item_count,
-                       SUM(CASE WHEN i.state = 'indexed' THEN 1 ELSE 0 END) AS indexed_count,
-                       SUM(CASE WHEN i.state = 'missing' THEN 1 ELSE 0 END) AS missing_count
+                       COALESCE(s.item_count, 0) AS item_count,
+                       COALESCE(s.active_count, 0) AS active_count,
+                       COALESCE(s.indexed_count, 0) AS indexed_count,
+                       COALESCE(s.missing_count, 0) AS missing_count,
+                       COALESCE(s.skipped_count, 0) AS skipped_count,
+                       COALESCE(s.error_count, 0) AS error_count,
+                       COALESCE(s.last_result_json, '{}') AS last_result_json
                 FROM sync_roots r
-                LEFT JOIN sync_items i ON i.root_id = r.id
-                GROUP BY r.id
+                LEFT JOIN sync_root_stats s ON s.root_id = r.id
                 ORDER BY r.created_at ASC
                 """
             ).fetchall()
@@ -151,8 +154,12 @@ class SyncService:
             item["enabled"] = bool(item["enabled"])
             item["config"] = json.loads(item.pop("config_json"))
             item["item_count"] = int(item["item_count"] or 0)
+            item["active_count"] = int(item["active_count"] or 0)
             item["indexed_count"] = int(item["indexed_count"] or 0)
             item["missing_count"] = int(item["missing_count"] or 0)
+            item["skipped_count"] = int(item["skipped_count"] or 0)
+            item["error_count"] = int(item["error_count"] or 0)
+            item["last_result"] = json.loads(item.pop("last_result_json"))
             items.append(item)
         return items
 
@@ -204,7 +211,59 @@ class SyncService:
             )
             Repository._audit(connection, "sync_root_scanned", "sync_root", root_id, result)
             connection.commit()
+        self.refresh_root_stats(root_id, result=result, updated_at=now)
         return result
+
+    def refresh_root_stats(
+        self,
+        root_id: str,
+        *,
+        result: dict[str, Any] | None = None,
+        updated_at: str | None = None,
+    ) -> None:
+        now = updated_at or utc_now()
+        with self.database.connect() as connection:
+            counts = connection.execute(
+                """
+                SELECT COUNT(*) AS item_count,
+                       SUM(CASE WHEN state <> 'missing' THEN 1 ELSE 0 END) AS active_count,
+                       SUM(CASE WHEN state = 'indexed' THEN 1 ELSE 0 END) AS indexed_count,
+                       SUM(CASE WHEN state = 'missing' THEN 1 ELSE 0 END) AS missing_count,
+                       SUM(CASE WHEN state = 'skipped' THEN 1 ELSE 0 END) AS skipped_count,
+                       SUM(CASE WHEN state = 'error' THEN 1 ELSE 0 END) AS error_count
+                FROM sync_items WHERE root_id = ?
+                """,
+                (root_id,),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO sync_root_stats(
+                    root_id, item_count, active_count, indexed_count, missing_count,
+                    skipped_count, error_count, last_result_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(root_id) DO UPDATE SET
+                    item_count = excluded.item_count,
+                    active_count = excluded.active_count,
+                    indexed_count = excluded.indexed_count,
+                    missing_count = excluded.missing_count,
+                    skipped_count = excluded.skipped_count,
+                    error_count = excluded.error_count,
+                    last_result_json = excluded.last_result_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    root_id,
+                    int(counts["item_count"] or 0),
+                    int(counts["active_count"] or 0),
+                    int(counts["indexed_count"] or 0),
+                    int(counts["missing_count"] or 0),
+                    int(counts["skipped_count"] or 0),
+                    int(counts["error_count"] or 0),
+                    json.dumps(result or {}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            connection.commit()
 
     @staticmethod
     def _external_id(relative_path: str) -> str:
@@ -585,7 +644,10 @@ class SyncService:
                     if not turn_id:
                         seed = f"{path}:{payload.get('completed_at')}:{handle.tell()}"
                         turn_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-                    if pending_user or assistant:
+                    if (pending_user or assistant) and not is_internal_codex_turn(
+                        user_text=pending_user,
+                        cwd=str(cwd) if cwd else None,
+                    ):
                         turn = build_codex_turn(
                             thread_id=session_id,
                             turn_id=turn_id,

@@ -11,6 +11,11 @@ from pkas.ingest import IngestionService
 
 MAX_CAPTURE_CHARS = 200_000
 
+_AMBIENT_PROMPT_MARKER = (
+    "you are an expert at upholding safety and compliance standards "
+    "for codex ambient suggestions"
+)
+
 _SECRET_PATTERNS = (
     (
         re.compile(
@@ -58,6 +63,15 @@ def redact_secrets(text: str) -> tuple[str, int]:
         redacted, count = pattern.subn(replacement, redacted)
         replacements += count
     return redacted, replacements
+
+
+def is_internal_codex_turn(*, user_text: str, cwd: str | None) -> bool:
+    """Identify hidden Codex desktop ambient-suggestion runs, not user tasks."""
+    normalized_cwd = (cwd or "").replace("/", "\\").lower()
+    return (
+        _AMBIENT_PROMPT_MARKER in user_text[:2_000].lower()
+        and "\\windowsapps\\openai.codex_" in normalized_cwd
+    )
 
 
 def _text_from_value(value: Any) -> str:
@@ -166,15 +180,18 @@ def capture_notification(
     assistant_text = _text_from_value(
         payload.get("last-assistant-message") or payload.get("last_assistant_message")
     )
+    cwd = _text_from_value(payload.get("cwd"))
     if not user_text.strip() and not assistant_text.strip():
         return {"status": "ignored", "reason": "empty_turn"}
+    if is_internal_codex_turn(user_text=user_text, cwd=cwd):
+        return {"status": "ignored", "reason": "internal_codex_turn"}
 
     turn = build_codex_turn(
         thread_id=thread_id,
         turn_id=turn_id,
         user_text=user_text,
         assistant_text=assistant_text,
-        cwd=_text_from_value(payload.get("cwd")),
+        cwd=cwd,
         capture_mode="notify",
     )
     service = ingestion or IngestionService(settings=settings)

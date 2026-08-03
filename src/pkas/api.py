@@ -12,6 +12,7 @@ from pkas.config import Settings, get_settings
 from pkas.ingest import ImportBoundaryError
 from pkas.schemas import (
     AgentContextRequest,
+    CatalogSearchRequest,
     ChatLabImportRequest,
     ChatLabInspectRequest,
     CustomerReplyContextRequest,
@@ -120,8 +121,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         limit: int = Query(default=100, ge=1, le=500),
     ) -> Envelope:
-        items = system_from(request).repository.list_sources(limit)
+        items = system_from(request).repository.list_sources(limit, status="indexed")
         return success(f"已读取 {len(items)} 个资料来源", items)
+
+    @app.get("/api/sync/roots", response_model=Envelope)
+    def sync_roots(request: Request) -> Envelope:
+        items = system_from(request).sync.list_roots()
+        return success(f"已读取 {len(items)} 个持续资料源", items)
+
+    @app.post("/api/sync/roots/{root_id}/scan", response_model=Envelope)
+    def scan_sync_root(root_id: str, request: Request) -> Envelope:
+        try:
+            result = system_from(request).sync.scan_root(root_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if result.get("errors"):
+            return warning("资料源刷新完成，部分正文未能索引", result)
+        return success("资料源增量刷新完成", result)
+
+    @app.post("/api/sync/catalog/search", response_model=Envelope)
+    def search_source_catalog(payload: CatalogSearchRequest, request: Request) -> Envelope:
+        items = system_from(request).sync.search_catalog(
+            payload.query,
+            root_id=payload.root_id,
+            limit=payload.limit,
+        )
+        return success(f"在资料地图中找到 {len(items)} 个文件", items)
 
     @app.get("/api/documents/{document_id}", response_model=Envelope)
     def document(

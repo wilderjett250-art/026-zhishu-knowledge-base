@@ -346,6 +346,18 @@ CREATE TABLE IF NOT EXISTS codex_session_cursors (
     PRIMARY KEY(root_id, source_uri)
 );
 
+CREATE TABLE IF NOT EXISTS sync_root_stats (
+    root_id TEXT PRIMARY KEY REFERENCES sync_roots(id) ON DELETE CASCADE,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    active_count INTEGER NOT NULL DEFAULT 0,
+    indexed_count INTEGER NOT NULL DEFAULT 0,
+    missing_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    last_result_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sources_domain ON sources(domain);
 CREATE INDEX IF NOT EXISTS idx_sources_privacy ON sources(privacy);
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id);
@@ -398,7 +410,20 @@ class Database:
             tokenizer = self._ensure_fts(connection)
             customer_tokenizer = self._ensure_customer_fts(connection)
             connection.execute(
-                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', '3')"
+                """
+                UPDATE sources
+                SET status = 'superseded'
+                WHERE source_type = 'codex-turn'
+                  AND status = 'indexed'
+                  AND instr(lower(original_name), 'codex ambient suggestions') > 0
+                  AND instr(
+                      lower(COALESCE(json_extract(metadata_json, '$.cwd'), '')),
+                      '\\windowsapps\\openai.codex_'
+                  ) > 0
+                """
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', '5')"
             )
             connection.execute(
                 "INSERT OR REPLACE INTO app_meta(key, value) VALUES('fts_tokenizer', ?)",

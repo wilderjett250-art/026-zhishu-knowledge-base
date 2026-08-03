@@ -31,6 +31,34 @@ def test_codex_notify_capture_redacts_and_deduplicates(
     assert document["text"].count("[REDACTED]") >= 2
 
 
+def test_codex_notify_capture_ignores_desktop_ambient_suggestion(
+    knowledge_system: KnowledgeSystem,
+) -> None:
+    payload = {
+        "type": "agent-turn-complete",
+        "thread-id": "ambient-thread",
+        "turn-id": "ambient-turn",
+        "cwd": (
+            "C:\\Program Files\\WindowsApps\\"
+            "OpenAI.Codex_26.727.6591.0_x64__2p2nqsd0c76g0\\app"
+        ),
+        "input-messages": [
+            {
+                "content": (
+                    "You are an expert at upholding safety and compliance standards "
+                    "for Codex ambient suggestions."
+                )
+            }
+        ],
+        "last-assistant-message": "Internal suggestion output",
+    }
+
+    result = capture_notification(payload, ingestion=knowledge_system.ingestion)
+
+    assert result == {"status": "ignored", "reason": "internal_codex_turn"}
+    assert knowledge_system.repository.list_sources() == []
+
+
 def _event(event_type: str, payload: dict[str, object]) -> str:
     return json.dumps({"type": event_type, "payload": payload}, ensure_ascii=False)
 
@@ -131,6 +159,9 @@ def test_local_sync_catalogs_skips_secrets_and_supersedes_changed_content(
     assert len(knowledge_system.repository.search("当前证据并验证", domain="work")) == 1
     statuses = {item["status"] for item in knowledge_system.repository.list_sources()}
     assert statuses == {"indexed", "superseded"}
+    stats = knowledge_system.repository.stats()
+    assert stats["counts"]["sources"] == 1
+    assert stats["counts"]["chunks"] == 1
 
 
 def test_mcp_sync_requires_confirmation(
