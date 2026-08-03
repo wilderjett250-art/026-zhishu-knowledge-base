@@ -16,6 +16,8 @@ PKAS 采用一个逻辑知识库、多层物理存储的设计。
 
 WeFlow 属于数据源适配层。知枢读取 WeFlow 的导出记录索引，定位用户明确选择的现存 XLSX；它不读取数据库密钥、不直接打开 WCDB，也不依赖 HTTP API。原始 XLSX 保存为哈希快照，标准化消息进入客户消息表和独立全文索引。
 
+本地现成资料通过 SyncRoot 统一登记。`catalog` 模式只维护可搜索的文件目录，`index` 模式对安全且受支持的正文建立版本化索引。Codex 历史会话使用字节游标流式抽取每轮用户请求与最终回答；新任务通过 `agent-turn-complete` 通知即时写回，并继续调用原有桌面通知程序。
+
 ## 二、核心数据流
 
 资料进入系统后依次经过：
@@ -77,6 +79,10 @@ Codex 通过本地 MCP 服务调用知识库能力。当前工具边界为：
 - list_sources：查看资料来源及其隐私属性。
 - inspect_import_path：只读检查明确路径。
 - import_confirmed_path：在用户确认后导入同一路径。
+- list_sync_roots：查看持续资料源和同步覆盖率。
+- register_sync_root：注册明确目录、模式、领域和隐私范围。
+- scan_sync_root：对已完成一次性授权的资料源按指纹或字节游标增量同步。
+- search_source_catalog：定位已盘点但尚未抽取正文的文件。
 - prepare_agent_context：自动路由知识领域并准备证据。
 - save_persona_candidate：保存待审核的个人观察。
 - save_distillation_candidate：保存待审核的蒸馏样本。
@@ -98,4 +104,5 @@ Codex 通过本地 MCP 服务调用知识库能力。当前工具边界为：
 - WeFlow 接入只读取导出记录和用户明确勾选的 XLSX，不接触 `decryptKey` 或 WCDB。
 - 微信聊天默认 `restricted`，检查令牌与文件哈希一致后才允许导入。
 - 系统只准备客户回复草稿和证据，不直接调用微信发送动作。
+- Codex 自动写回不保存推理、工具输出或附件二进制，常见凭证在落盘前脱敏。
 - 索引损坏时可以执行重建；长期运行前还应配置加密备份和恢复演练。

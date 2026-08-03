@@ -69,6 +69,10 @@
 
 Connector 记录 WeFlow 等本地数据源的类型、接入方式和状态。ConnectorSnapshot 保存用户确认导入的原始 XLSX 或 ChatLab JSON 哈希、私有仓路径、来源 URI 和采集时间；不保存密钥内容。
 
+### SyncRoot、SyncItem 与 CodexSessionCursor
+
+SyncRoot 记录持续资料源的绝对路径、连接器类型、领域、隐私级别和 `catalog/index` 模式。SyncItem 保存文件目录项、大小、修改时间、指纹、当前状态以及对应 Source。CodexSessionCursor 按原始会话文件记录已读取字节位置和未完成任务的最小状态，使后续同步只读取新增内容。
+
 ### Customer 与 CustomerConversation
 
 Customer 表示用户明确选择进入业务系统的微信客户私聊或客户群。CustomerConversation 保存微信会话 ID、会话类型、消息范围、隐私级别、增量游标和最近同步时间。

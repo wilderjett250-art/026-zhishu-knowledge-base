@@ -29,6 +29,29 @@ class Repository:
             ).fetchone()
         return dict(row) if row else None
 
+    def source_by_uri(self, original_uri: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM sources
+                WHERE original_uri = ?
+                ORDER BY ingested_at DESC
+                LIMIT 1
+                """,
+                (original_uri,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_source_status(self, source_id: str, status: str) -> None:
+        if status not in {"indexed", "superseded"}:
+            raise ValueError(f"不支持的资料状态：{status}")
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE sources SET status = ? WHERE id = ?",
+                (status, source_id),
+            )
+            connection.commit()
+
     def add_document(
         self,
         *,
@@ -198,6 +221,8 @@ class Repository:
                 "customer_conversations",
                 "customer_messages",
                 "customer_signals",
+                "sync_roots",
+                "sync_items",
             ):
                 counts[table] = connection.execute(
                     f"SELECT COUNT(*) AS count FROM {table}"
@@ -264,7 +289,7 @@ class Repository:
         query = query.strip()
         if not query:
             return []
-        clauses = []
+        clauses = ["s.status = 'indexed'"]
         params: list[Any] = [self._fts_expression(query)]
         if domain:
             clauses.append("c.domain = ?")
@@ -294,7 +319,7 @@ class Repository:
         if rows:
             return [dict(row) for row in rows]
 
-        like_clauses = ["c.text_content LIKE ?"]
+        like_clauses = ["c.text_content LIKE ?", "s.status = 'indexed'"]
         like_params: list[Any] = [f"%{query}%"]
         if domain:
             like_clauses.append("c.domain = ?")

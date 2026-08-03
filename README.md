@@ -9,6 +9,8 @@
 - 明确路径的只读检查、敏感文件跳过、SHA-256 原件留存和内容去重。
 - TXT、Markdown、代码、JSON/JSONL 聊天、CSV、HTML、PDF、DOCX、XLSX 解析。
 - SQLite FTS5 中文全文检索、工作/自我/共享/蒸馏领域过滤和 restricted 隔离。
+- 持期资料源目录：可先盘点现成文件，再按目录选择 catalog 或 index 增量同步。
+- Codex 历史任务流式抽取和新任务完成后自动写回；不采集推理、工具输出或附件二进制。
 - 检索结果到原文件、仓内原件、文档和段落定位的证据链。
 - 可记录步骤、状态、输出和失败信息的资料导入与索引工作流。
 - Codex MCP 工具：检索、读原文、列来源、检查/确认导入、准备智能体上下文、提交画像与蒸馏候选。
@@ -34,6 +36,15 @@ uv run pkas serve --open-browser
 管理台地址为 `http://127.0.0.1:8765`，API 文档为 `http://127.0.0.1:8765/api/docs`。服务默认只监听本机。
 
 首次导入资料时，在“资料接入”中填写一个准确的绝对路径，先执行只读检查，再选择领域和隐私级别并确认导入。系统不会自行扫描整块磁盘，也不会自动导入任何个人资料。
+
+## 现成数据与持续同步
+
+“一个知识库”是统一的检索和权限入口，不是把所有原始文件复制成一个巨型数据库。系统提供两种持续资料源模式：
+
+- `catalog`：保存文件路径、大小、修改时间和状态，让 Codex 先知道资料在哪里；不复制正文。
+- `index`：对受支持且非敏感的文件抽取正文、保存哈希原件并建立检索索引；再次扫描只处理变化。
+
+Codex 会话使用专用 `codex_sessions` 连接器。首次同步会流式读取历史 JSONL，只保留每轮的用户请求、最终回答、任务 ID、时间和工作目录；推理、工具调用输出、图片/音频二进制不进入知识库。之后由 Codex `agent-turn-complete` 通知即时写入新任务，同一 turn 重复通知不会重复入库，常见密钥会在落盘前脱敏。
 
 ## WeFlow 微信客户接入
 
@@ -64,6 +75,10 @@ uv --directory E:\codex-kb run pkas-mcp
 - `list_sources`：查看最近资料来源。
 - `inspect_import_path`：只读检查用户给出的路径。
 - `import_confirmed_path`：在用户明确批准后导入同一路径。
+- `list_sync_roots`：查看持续资料源及同步状态。
+- `register_sync_root`：在用户确认后注册目录或 Codex 历史会话源。
+- `scan_sync_root`：增量盘点或索引已完成一次性授权的资料源。
+- `search_source_catalog`：按文件名和路径定位尚未抽取的现成资料。
 - `prepare_agent_context`：按任务选择领域并准备证据上下文。
 - `save_persona_candidate`：提交待用户审核的个人观察。
 - `save_distillation_candidate`：提交待用户审核的蒸馏样本。
@@ -98,6 +113,7 @@ uv run pkas mcp
 - `data/index/pkas.sqlite`：元数据、全文索引、运行记录和审计记录。
 - `data/distill/exports`：经过批准后导出的蒸馏 JSONL。
 - 密码、令牌、私钥、证书和常见密钥文件名不会导入。
+- Codex 自动写回只保存用户请求和最终回答，并在写入前执行常见凭证脱敏。
 - 私人聊天和第三方内容建议标记为 `restricted`。
 - 原始资料、数据库、运行记录和导出数据均被 Git 忽略。
 

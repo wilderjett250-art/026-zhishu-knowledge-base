@@ -6,16 +6,36 @@ from pathlib import Path
 from typing import Any
 
 from pkas.config import Settings, get_settings
-from pkas.parsers import SUPPORTED_EXTENSIONS, ParseError, parse_file
+from pkas.parsers import SUPPORTED_EXTENSIONS, ParsedDocument, ParseError, parse_file
 from pkas.repository import Repository
 
 SKIP_DIRECTORIES = {
+    ".angular",
+    ".cache",
+    ".dart_tool",
     ".git",
+    ".gradle",
     ".idea",
+    ".mypy_cache",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".terraform",
+    ".tox",
     ".venv",
     ".vscode",
+    ".yarn",
     "__pycache__",
+    "build",
+    "dist",
+    "env",
     "node_modules",
+    "obj",
+    "out",
+    "target",
+    "vendor",
+    "venv",
 }
 SENSITIVE_EXACT_NAMES = {
     ".env",
@@ -131,7 +151,7 @@ class IngestionService:
         for path in iterator:
             if not path.is_file() or path.is_symlink():
                 continue
-            if any(part in SKIP_DIRECTORIES for part in path.parts):
+            if any(part.casefold() in SKIP_DIRECTORIES for part in path.parts):
                 continue
             files.append(path)
             if len(files) > self.settings.max_import_files:
@@ -292,6 +312,83 @@ class IngestionService:
             "status": "imported",
             "path": str(resolved),
             "content_hash": content_hash,
+            "vault_path": str(vault_path),
+            **stored,
+        }
+
+    def import_text(
+        self,
+        *,
+        text: str,
+        title: str,
+        original_uri: str,
+        source_type: str,
+        domain: str,
+        privacy: str,
+        metadata: dict[str, Any] | None = None,
+        event_time: str | None = None,
+        source_created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Store normalized text without materializing an intermediate source file."""
+        clean = text.replace("\x00", "").strip()
+        if not clean:
+            raise ParseError("文本中没有可索引内容。")
+        existing_uri = self.repository.source_by_uri(original_uri)
+        if existing_uri:
+            return {
+                "status": "duplicate",
+                "source_id": existing_uri["id"],
+                "content_hash": existing_uri["content_hash"],
+                "original_uri": original_uri,
+            }
+
+        raw = clean.encode("utf-8")
+        if len(raw) > self.settings.max_source_bytes:
+            raise ValueError(
+                f"文本大小 {len(raw)} 字节，超过单资料上限 {self.settings.max_source_bytes}。"
+            )
+        content_hash = hashlib.sha256(raw).hexdigest()
+        existing_hash = self.repository.source_by_hash(content_hash)
+        if existing_hash:
+            return {
+                "status": "duplicate",
+                "source_id": existing_hash["id"],
+                "content_hash": content_hash,
+                "original_uri": original_uri,
+            }
+
+        chunks = chunk_text(clean)
+        vault_dir = self.settings.vault_root / content_hash[:2]
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        vault_path = vault_dir / f"{content_hash}.md"
+        if not vault_path.exists():
+            vault_path.write_bytes(raw)
+
+        parsed = ParsedDocument(
+            title=title.strip() or "未命名文本",
+            text=clean,
+            parser_name="normalized-text",
+            mime_type="text/markdown",
+            event_time=event_time,
+            metadata=metadata or {},
+        )
+        stored = self.repository.add_document(
+            original_uri=original_uri,
+            original_name=f"{title.strip() or '未命名文本'}.md",
+            vault_path=str(vault_path),
+            source_type=source_type,
+            content_hash=content_hash,
+            byte_size=len(raw),
+            domain=domain,
+            privacy=privacy,
+            parsed=parsed,
+            chunks=chunks,
+            source_created_at=source_created_at or event_time,
+        )
+        return {
+            "status": "imported",
+            "content_hash": content_hash,
+            "original_uri": original_uri,
             "vault_path": str(vault_path),
             **stored,
         }

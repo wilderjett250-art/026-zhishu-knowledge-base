@@ -9,6 +9,7 @@ from pkas.db import Database
 from pkas.distillation import DistillationService
 from pkas.ingest import IngestionService
 from pkas.repository import Repository
+from pkas.sync import SyncService
 from pkas.weflow import WeFlowService
 from pkas.workflows import WorkflowService
 
@@ -26,6 +27,7 @@ class KnowledgeSystem:
     customer_service: CustomerService
     weflow: WeFlowService
     customer_workflows: CustomerWorkflowService
+    sync: SyncService
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> "KnowledgeSystem":
@@ -44,6 +46,12 @@ class KnowledgeSystem:
         )
         customer_service = CustomerService(customers=customers, knowledge=repository)
         customer_workflows = CustomerWorkflowService(repository=repository, weflow=weflow)
+        sync = SyncService(
+            settings=resolved_settings,
+            database=database,
+            repository=repository,
+            ingestion=ingestion,
+        )
         return cls(
             settings=resolved_settings,
             database=database,
@@ -56,4 +64,5 @@ class KnowledgeSystem:
             customer_service=customer_service,
             weflow=weflow,
             customer_workflows=customer_workflows,
+            sync=sync,
         )

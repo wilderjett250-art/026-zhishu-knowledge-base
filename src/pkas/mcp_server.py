@@ -15,6 +15,8 @@ mcp = MCPServer(
         "先检索再回答；重要结论保留 source_id、document_id、locator 和 original_uri。"
         "不要猜测未检索到的个人事实。导入资料必须先调用 inspect_import_path，"
         "只有用户明确批准完全相同的路径、领域和隐私范围后，才调用 import_confirmed_path。"
+        "已注册的 sync root 是用户持续授权的资料范围；任务需要最新文件地图时可直接增量扫描，"
+        "再调用 search_source_catalog 定位文件。"
         "WeFlow 导出也必须先发现并检查；只有用户明确批准同一批会话后才允许确认导入。"
         "个人画像和蒸馏样本只能创建候选，批准操作由用户在管理台完成。"
         "微信客户聊天默认是 restricted；只有任务明确需要且用户授权时才读取。"
@@ -161,6 +163,80 @@ def import_confirmed_path(
         else "导入工作流未完成"
     )
     return envelope(summary, result, status=status, artifacts=result.get("artifacts", []))
+
+
+@mcp.tool(
+    description=(
+        "列出已注册的资料源、同步模式、最近扫描时间和索引数量。"
+        "catalog 只建立文件目录；index 会抽取受支持正文。"
+    )
+)
+def list_sync_roots() -> dict[str, Any]:
+    items = system().sync.list_roots()
+    return envelope(f"已读取 {len(items)} 个资料源", items)
+
+
+@mcp.tool(
+    description=(
+        "注册一个用户明确指定的本地目录为持续资料源。必须 confirmed=true。"
+        "local_files 支持目录盘点或正文索引；codex_sessions 只抽取用户请求与最终回答，"
+        "不会收集推理、工具输出或附件二进制。"
+    )
+)
+def register_sync_root(
+    name: str,
+    root_path: str,
+    connector_type: str = "local_files",
+    domain: str = "work",
+    privacy: str = "private",
+    sync_mode: str = "catalog",
+    recursive: bool = True,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    if not confirmed:
+        return envelope(
+            "未注册资料源：缺少用户明确确认",
+            {"name": name, "root_path": root_path, "sync_mode": sync_mode},
+            status="warning",
+        )
+    try:
+        item = system().sync.register_root(
+            name=name,
+            root_path=root_path,
+            connector_type=connector_type,
+            domain=domain,
+            privacy=privacy,
+            sync_mode=sync_mode,
+            recursive=recursive,
+        )
+    except (OSError, ValueError) as exc:
+        return envelope("资料源注册失败", {"error": str(exc)}, status="error")
+    return envelope("资料源已注册，尚未扫描内容", item)
+
+
+@mcp.tool(
+    description=(
+        "扫描一个已经由用户确认注册的持续资料源并增量更新，不需要重复确认。"
+        "catalog 模式只保存文件路径、大小和修改时间；index 模式还会抽取正文。"
+    )
+)
+def scan_sync_root(root_id: str) -> dict[str, Any]:
+    try:
+        result = system().sync.scan_root(root_id)
+    except (OSError, ValueError) as exc:
+        return envelope("资料源同步失败", {"error": str(exc)}, status="error")
+    status = "warning" if result.get("errors") else "success"
+    return envelope("资料源增量同步完成", result, status=status)
+
+
+@mcp.tool(description="按文件名或相对路径搜索资料目录；catalog 模式下也可定位尚未抽取的现成文件。")
+def search_source_catalog(
+    query: str,
+    root_id: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    items = system().sync.search_catalog(query, root_id=root_id, limit=limit)
+    return envelope(f"在资料目录中找到 {len(items)} 个文件", items)
 
 
 @mcp.tool(

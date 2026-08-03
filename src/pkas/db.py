@@ -299,6 +299,53 @@ CREATE TABLE IF NOT EXISTS customer_signals (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_roots (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    root_uri TEXT NOT NULL,
+    connector_type TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    privacy TEXT NOT NULL,
+    sync_mode TEXT NOT NULL,
+    recursive INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    last_scan_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(connector_type, root_uri)
+);
+
+CREATE TABLE IF NOT EXISTS sync_items (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL REFERENCES sync_roots(id) ON DELETE CASCADE,
+    external_id TEXT NOT NULL,
+    source_uri TEXT NOT NULL,
+    relative_path TEXT,
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    modified_ns INTEGER NOT NULL DEFAULT 0,
+    fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT,
+    source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    indexed_at TEXT,
+    UNIQUE(root_id, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS codex_session_cursors (
+    root_id TEXT NOT NULL REFERENCES sync_roots(id) ON DELETE CASCADE,
+    source_uri TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL DEFAULT 0,
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    modified_ns INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    last_scan_at TEXT NOT NULL,
+    PRIMARY KEY(root_id, source_uri)
+);
+
 CREATE INDEX IF NOT EXISTS idx_sources_domain ON sources(domain);
 CREATE INDEX IF NOT EXISTS idx_sources_privacy ON sources(privacy);
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id);
@@ -318,6 +365,10 @@ CREATE INDEX IF NOT EXISTS idx_customer_messages_conversation_time
 CREATE INDEX IF NOT EXISTS idx_customer_messages_sender ON customer_messages(sender_platform_id);
 CREATE INDEX IF NOT EXISTS idx_customer_signals_customer ON customer_signals(customer_id);
 CREATE INDEX IF NOT EXISTS idx_customer_signals_status ON customer_signals(approval_status, status);
+CREATE INDEX IF NOT EXISTS idx_sync_roots_type ON sync_roots(connector_type, enabled);
+CREATE INDEX IF NOT EXISTS idx_sync_items_root_state ON sync_items(root_id, state);
+CREATE INDEX IF NOT EXISTS idx_sync_items_source ON sync_items(source_id);
+CREATE INDEX IF NOT EXISTS idx_sync_items_relative_path ON sync_items(relative_path);
 """
 
 
@@ -347,7 +398,7 @@ class Database:
             tokenizer = self._ensure_fts(connection)
             customer_tokenizer = self._ensure_customer_fts(connection)
             connection.execute(
-                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', '2')"
+                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', '3')"
             )
             connection.execute(
                 "INSERT OR REPLACE INTO app_meta(key, value) VALUES('fts_tokenizer', ?)",

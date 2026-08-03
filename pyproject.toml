@@ -35,6 +35,7 @@ dev = [
 [project.scripts]
 pkas = "pkas.cli:app"
 pkas-mcp = "pkas.mcp_server:main"
+pkas-codex-notify = "pkas.codex_capture:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pkas"]
