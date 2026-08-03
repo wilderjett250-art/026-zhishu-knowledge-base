@@ -46,6 +46,8 @@ uv run pkas serve --open-browser
 
 Codex 会话使用专用 `codex_sessions` 连接器。首次同步会流式读取历史 JSONL，只保留每轮的用户请求、最终回答、任务 ID、时间和工作目录；推理、工具调用输出、图片/音频二进制不进入知识库。之后由 Codex `agent-turn-complete` 通知即时写入新任务，同一 turn 重复通知不会重复入库，常见密钥会在落盘前脱敏。
 
+已注册资料源可以通过 `uv run --no-sync pkas-sync-worker` 一次完成增量刷新。正式环境使用 Codex 本地自动化每日调用该入口，自动化只处理已经完成一次性授权的范围。
+
 ## WeFlow 微信客户接入
 
 先由 WeFlow 使用它已保存的数据库连接打开微信记录并导出 XLSX。知枢不读取 `decryptKey`、不直接打开 WCDB，也不依赖 WeFlow HTTP API；它只读取 WeFlow 自己维护的 `weflow-export-records.json`，再处理用户明确选择的现存导出文件。

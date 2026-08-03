@@ -8,7 +8,7 @@ from pkas.codex_capture import build_codex_turn, redact_secrets
 from pkas.config import Settings, get_settings
 from pkas.db import Database
 from pkas.ingest import SKIP_DIRECTORIES, IngestionService, is_sensitive_path
-from pkas.parsers import SUPPORTED_EXTENSIONS
+from pkas.parsers import SUPPORTED_EXTENSIONS, ParseError
 from pkas.repository import Repository, new_id, utc_now
 
 CONNECTOR_TYPES = {"local_files", "codex_sessions"}
@@ -346,6 +346,7 @@ class SyncService:
             "duplicates": 0,
             "unchanged": 0,
             "skipped": 0,
+            "unreadable": 0,
             "errors": 0,
             "bytes_seen": 0,
         }
@@ -353,11 +354,33 @@ class SyncService:
         pending_items: list[dict[str, Any]] = []
         for path in self._walk_files(root_path, root["recursive"]):
             counts["files_seen"] += 1
+            relative = str(path.relative_to(root_path))
             try:
                 stat = path.stat()
-                relative = str(path.relative_to(root_path))
-            except OSError:
-                counts["errors"] += 1
+            except OSError as exc:
+                counts["unreadable"] += 1
+                external_id = self._external_id(relative)
+                error_code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+                pending_items.append(
+                    {
+                        "root_id": root["id"],
+                        "external_id": external_id,
+                        "source_uri": str(path),
+                        "relative_path": relative,
+                        "byte_size": 0,
+                        "modified_ns": 0,
+                        "fingerprint": f"unreadable:{error_code or 'unknown'}",
+                        "state": "error",
+                        "reason": f"os_error_{error_code or 'unknown'}",
+                        "source_id": None,
+                        "metadata": {"extension": path.suffix.lower()},
+                        "scan_time": scan_time,
+                        "indexed_at": None,
+                    }
+                )
+                if len(pending_items) >= 1000:
+                    self._upsert_items(pending_items)
+                    pending_items.clear()
                 continue
             counts["bytes_seen"] += stat.st_size
             external_id = self._external_id(relative)
@@ -395,6 +418,10 @@ class SyncService:
                         state = "indexed"
                         indexed_at = scan_time
                         counts["indexed" if imported["status"] == "imported" else "duplicates"] += 1
+                    except ParseError:
+                        state = "skipped"
+                        reason = "no_indexable_text"
+                        counts["skipped"] += 1
                     except (OSError, ValueError) as exc:
                         state = "error"
                         reason = type(exc).__name__

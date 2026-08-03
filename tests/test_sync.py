@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pkas.mcp_server as mcp_server
 from pkas.codex_capture import capture_notification
+from pkas.sync_worker import run_sync
 from pkas.system import KnowledgeSystem
 
 
@@ -155,3 +156,23 @@ def test_mcp_sync_requires_confirmation(
     assert scanned["status"] == "success"
     results = mcp_server.search_source_catalog("catalog")
     assert len(results["data"]) == 1
+
+
+def test_sync_worker_refreshes_authorized_roots_and_writes_report(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    (source_root / "worker.txt").write_text("后台增量同步", encoding="utf-8")
+    knowledge_system.sync.register_root(
+        name="后台同步测试",
+        root_path=str(source_root),
+        connector_type="local_files",
+        sync_mode="catalog",
+    )
+
+    report = run_sync(knowledge_system, connector_type="local_files")
+
+    assert report["status"] == "completed"
+    assert report["selected_roots"] == 1
+    assert Path(report["report_path"]).is_file()
+    assert knowledge_system.sync.search_catalog("worker.txt")
