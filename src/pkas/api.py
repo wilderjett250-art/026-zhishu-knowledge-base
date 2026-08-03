@@ -368,6 +368,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 next_actions=[result["error"]["safe_retry"]],
             )
         imported = result["result"]["imported"]
+        if result["status"] == "warning":
+            failed_sessions = result["result"]["failed_sessions"]
+            return warning(
+                f"已导入 {imported} 条客户消息，{failed_sessions} 个会话需要重试",
+                result,
+                artifacts=result["artifacts"],
+                next_actions=["查看失败会话并重试；已经成功导入的消息会自动去重。"],
+            )
         return success(
             f"已从 WeFlow XLSX 导入 {imported} 条客户消息",
             result,

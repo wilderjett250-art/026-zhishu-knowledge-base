@@ -208,6 +208,116 @@ def test_weflow_xlsx_inspection_token_detects_file_change(
     assert "发生了变化" in result["error"]["message"]
 
 
+def test_weflow_xlsx_supports_more_than_one_hundred_sessions(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    records, xlsx = create_xlsx_export_fixture(source_root)
+    session_ids = [f"wxid_customer_{index:03d}" for index in range(101)]
+    records.write_text(
+        json.dumps(
+            {
+                session_id: [
+                    {
+                        "exportTime": 1738713900000,
+                        "format": "xlsx",
+                        "messageCount": 3,
+                        "outputPath": str(xlsx.resolve()),
+                    }
+                ]
+                for session_id in session_ids
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    inspection = knowledge_system.weflow.inspect_export_selection(
+        records_path=str(records),
+        session_ids=session_ids,
+    )
+
+    assert inspection["selected_sessions"] == 101
+    assert inspection["total_messages"] == 303
+
+
+def test_weflow_batch_import_continues_after_one_session_failure(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+    monkeypatch,
+) -> None:
+    records, xlsx = create_xlsx_export_fixture(source_root)
+    session_ids = ["wxid_customer_ok", "wxid_customer_failure"]
+    records.write_text(
+        json.dumps(
+            {
+                session_id: [
+                    {
+                        "exportTime": 1738713900000,
+                        "format": "xlsx",
+                        "messageCount": 3,
+                        "outputPath": str(xlsx.resolve()),
+                    }
+                ]
+                for session_id in session_ids
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    inspection = knowledge_system.weflow.inspect_export_selection(
+        records_path=str(records),
+        session_ids=session_ids,
+    )
+    original_import = knowledge_system.weflow._import_xlsx_export
+
+    def import_with_one_failure(*, connector_id, item, privacy):
+        if item["session_id"] == "wxid_customer_failure":
+            raise OSError("simulated session failure")
+        return original_import(connector_id=connector_id, item=item, privacy=privacy)
+
+    monkeypatch.setattr(knowledge_system.weflow, "_import_xlsx_export", import_with_one_failure)
+    result = knowledge_system.customer_workflows.import_weflow_exports(
+        records_path=str(records),
+        session_ids=session_ids,
+        inspection_token=inspection["inspection_token"],
+        privacy="restricted",
+    )
+
+    assert result["status"] == "warning"
+    assert result["result"]["imported"] == 3
+    assert result["result"]["failed_sessions"] == 1
+    assert result["result"]["session_errors"][0]["session_id"] == "wxid_customer_failure"
+
+
+def test_weflow_batch_import_reports_when_every_session_fails(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+    monkeypatch,
+) -> None:
+    records, _ = create_xlsx_export_fixture(source_root)
+    inspection = knowledge_system.weflow.inspect_export_selection(
+        records_path=str(records),
+        session_ids=["wxid_customer_demo"],
+    )
+
+    def fail_import(*, connector_id, item, privacy):
+        raise OSError("simulated complete failure")
+
+    monkeypatch.setattr(knowledge_system.weflow, "_import_xlsx_export", fail_import)
+    result = knowledge_system.customer_workflows.import_weflow_exports(
+        records_path=str(records),
+        session_ids=["wxid_customer_demo"],
+        inspection_token=inspection["inspection_token"],
+        privacy="restricted",
+    )
+
+    assert result["status"] == "failed"
+    assert result["result"]["failed_sessions"] == 1
+    assert result["error"]["type"] == "WeFlowBatchImportError"
+    assert result["error"]["safe_retry"]
+
+
 def test_offline_chatlab_import_remains_supported(
     knowledge_system: KnowledgeSystem,
     source_root: Path,

@@ -288,17 +288,30 @@ class WeFlowService:
             config={"transport": "xlsx-export", "api_required": False, "key_accessed": False},
         )
         results: list[dict[str, Any]] = []
+        session_errors: list[dict[str, Any]] = []
         for item in inspection["items"]:
-            results.append(
-                self._import_xlsx_export(
-                    connector_id=connector_id,
-                    item=item,
-                    privacy=privacy,
+            try:
+                results.append(
+                    self._import_xlsx_export(
+                        connector_id=connector_id,
+                        item=item,
+                        privacy=privacy,
+                    )
                 )
-            )
+            except Exception as exc:
+                session_errors.append(
+                    {
+                        "session_id": item["session_id"],
+                        "display_name": item["display_name"],
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
         return {
             "connector_id": connector_id,
             "sessions": results,
+            "failed_sessions": len(session_errors),
+            "session_errors": session_errors,
             "imported": sum(item["imported"] for item in results),
             "duplicates": sum(item["duplicates"] for item in results),
             "snapshot_paths": [item["snapshot_path"] for item in results],
@@ -547,8 +560,8 @@ class WeFlowService:
         unique_ids = list(dict.fromkeys(session_ids))
         if not unique_ids:
             raise WeFlowFormatError("至少选择一个 WeFlow 导出会话。")
-        if len(unique_ids) > 100:
-            raise WeFlowFormatError("单次最多导入 100 个 WeFlow 导出会话。")
+        if len(unique_ids) > 1000:
+            raise WeFlowFormatError("单次最多导入 1000 个 WeFlow 导出会话。")
         selected: list[tuple[str, dict[str, Any], Path]] = []
         for session_id in unique_ids:
             raw_records = payload.get(session_id)

@@ -75,7 +75,7 @@ class WeFlowExportDiscoverRequest(BaseModel):
 
 class WeFlowExportInspectRequest(BaseModel):
     records_path: str | None = None
-    session_ids: list[str] = Field(min_length=1, max_length=100)
+    session_ids: list[str] = Field(min_length=1, max_length=1000)
 
 
 class WeFlowExportImportRequest(WeFlowExportInspectRequest):

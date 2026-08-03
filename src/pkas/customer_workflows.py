@@ -56,14 +56,22 @@ class CustomerWorkflowService:
                 inspection_token=inspection_token,
                 privacy=privacy,
             )
+            failed_sessions = result["failed_sessions"]
+            if failed_sessions == 0:
+                final_status = "completed"
+            elif result["sessions"]:
+                final_status = "warning"
+            else:
+                final_status = "failed"
             self.repository.finish_workflow_step(
                 import_step,
-                status="completed",
+                status=final_status,
                 summary=(
                     f"导入 {len(result['sessions'])} 个会话，新增 {result['imported']} 条消息，"
-                    f"识别 {result['duplicates']} 条重复消息"
+                    f"识别 {result['duplicates']} 条重复消息，失败 {failed_sessions} 个会话"
                 ),
                 artifacts=result["snapshot_paths"],
+                error={"sessions": result["session_errors"]} if failed_sessions else None,
             )
 
             verify_step = self.repository.add_workflow_step(run_id, 3, "verify_customer_index")
@@ -74,13 +82,29 @@ class CustomerWorkflowService:
                 summary=f"客户消息索引现有 {stats['counts']['customer_messages']} 条消息",
             )
             output = {"inspection": inspection, "result": result, "stats": stats}
-            self.repository.finish_workflow_run(run_id, status="completed", output=output)
-            return {
+            run_error = None
+            if final_status == "failed":
+                run_error = {
+                    "type": "WeFlowBatchImportError",
+                    "message": f"{failed_sessions} 个 WeFlow 会话均未能导入。",
+                    "safe_retry": "查看失败会话原因，修复文件后重新检查并重试。",
+                    "stop_condition": "导出文件缺失、损坏或会话范围发生变化时停止。",
+                }
+            self.repository.finish_workflow_run(
+                run_id,
+                status=final_status,
+                output=output,
+                error=run_error,
+            )
+            response = {
                 "run_id": run_id,
-                "status": "completed",
+                "status": final_status,
                 "artifacts": result["snapshot_paths"],
                 **output,
             }
+            if run_error:
+                response["error"] = run_error
+            return response
         except Exception as exc:
             error = {
                 "type": type(exc).__name__,
