@@ -12,6 +12,12 @@ from pkas.config import Settings, get_settings
 from pkas.ingest import ImportBoundaryError
 from pkas.schemas import (
     AgentContextRequest,
+    ChatLabImportRequest,
+    ChatLabInspectRequest,
+    CustomerReplyContextRequest,
+    CustomerSearchRequest,
+    CustomerSignalRequest,
+    CustomerUpdateRequest,
     DistillationCandidateRequest,
     DistillationExportRequest,
     Envelope,
@@ -20,6 +26,9 @@ from pkas.schemas import (
     PersonaCandidateRequest,
     ReviewRequest,
     SearchRequest,
+    WeFlowConnectionRequest,
+    WeFlowSessionsRequest,
+    WeFlowSyncRequest,
 )
 from pkas.system import KnowledgeSystem
 
@@ -303,6 +312,215 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> Envelope:
         items = system_from(request).repository.audit_events(limit)
         return success(f"已读取 {len(items)} 条审计记录", items)
+
+    @app.post("/api/weflow/health", response_model=Envelope)
+    def weflow_health(payload: WeFlowConnectionRequest, request: Request) -> Envelope:
+        try:
+            result = system_from(request).weflow.check_connection(
+                base_url=payload.base_url,
+                access_token=payload.access_token.get_secret_value(),
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return success("WeFlow 本地 API 连接正常，Token 未被保存", result)
+
+    @app.post("/api/weflow/sessions", response_model=Envelope)
+    def weflow_sessions(payload: WeFlowSessionsRequest, request: Request) -> Envelope:
+        try:
+            items = system_from(request).weflow.list_sessions(
+                base_url=payload.base_url,
+                access_token=payload.access_token.get_secret_value(),
+                keyword=payload.keyword,
+                limit=payload.limit,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return success(f"已读取 {len(items)} 个 WeFlow 会话，尚未同步聊天内容", items)
+
+    @app.post("/api/weflow/sync", response_model=Envelope)
+    def weflow_sync(payload: WeFlowSyncRequest, request: Request) -> Envelope:
+        result = system_from(request).customer_workflows.sync_weflow(
+            base_url=payload.base_url,
+            access_token=payload.access_token.get_secret_value(),
+            session_ids=payload.session_ids,
+            incremental=payload.incremental,
+            privacy=payload.privacy,
+            max_messages_per_session=payload.max_messages_per_session,
+        )
+        if result["status"] == "failed":
+            return warning(
+                "WeFlow 客户会话同步未完成",
+                result,
+                next_actions=[result["error"]["safe_retry"]],
+            )
+        sync = result["sync"]
+        return success(
+            f"已同步 {len(sync['sessions'])} 个客户会话，新增 {sync['imported']} 条消息",
+            result,
+            artifacts=result["artifacts"],
+        )
+
+    @app.post("/api/weflow/chatlab/inspect", response_model=Envelope)
+    def inspect_chatlab(payload: ChatLabInspectRequest, request: Request) -> Envelope:
+        try:
+            result = system_from(request).weflow.inspect_chatlab_file(
+                payload.path,
+                session_id=payload.session_id,
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return success(
+            "WeFlow ChatLab 文件检查完成，尚未复制或索引聊天内容",
+            result,
+            next_actions=["确认会话 ID、消息数量和 restricted 隐私范围后再导入"],
+        )
+
+    @app.post("/api/weflow/chatlab/import", response_model=Envelope)
+    def import_chatlab(payload: ChatLabImportRequest, request: Request) -> Envelope:
+        result = system_from(request).customer_workflows.import_chatlab(
+            path=payload.path,
+            inspection_token=payload.inspection_token,
+            session_id=payload.session_id,
+            privacy=payload.privacy,
+        )
+        if result["status"] == "failed":
+            return warning(
+                "WeFlow ChatLab 导入未完成",
+                result,
+                next_actions=[result["error"]["safe_retry"]],
+            )
+        imported = result["result"]["imported"]
+        return success(
+            f"已导入 {imported} 条 WeFlow 客户消息",
+            result,
+            artifacts=result["artifacts"],
+        )
+
+    @app.get("/api/customers", response_model=Envelope)
+    def customers(
+        request: Request,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> Envelope:
+        items = system_from(request).customers.list_customers(limit)
+        return success(f"已读取 {len(items)} 个微信客户会话", items)
+
+    @app.get("/api/customers/{customer_id}", response_model=Envelope)
+    def customer(customer_id: str, request: Request) -> Envelope:
+        item = system_from(request).customers.get_customer(customer_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="客户不存在")
+        return success("已读取客户档案", item)
+
+    @app.post("/api/customers/{customer_id}", response_model=Envelope)
+    def update_customer(
+        customer_id: str,
+        payload: CustomerUpdateRequest,
+        request: Request,
+    ) -> Envelope:
+        item = system_from(request).customers.update_customer(
+            customer_id,
+            company=payload.company,
+            stage=payload.stage,
+            tags=payload.tags,
+            summary=payload.summary,
+            review_status=payload.review_status,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="客户不存在")
+        return success("客户档案已更新", item)
+
+    @app.get("/api/customers/{customer_id}/timeline", response_model=Envelope)
+    def customer_timeline(
+        customer_id: str,
+        request: Request,
+        limit: int = Query(default=100, ge=1, le=500),
+        before: int | None = Query(default=None, ge=0),
+        include_restricted: bool = False,
+    ) -> Envelope:
+        if not system_from(request).customers.get_customer(customer_id):
+            raise HTTPException(status_code=404, detail="客户不存在")
+        items = system_from(request).customers.timeline(
+            customer_id,
+            limit=limit,
+            before=before,
+            include_restricted=include_restricted,
+        )
+        return success(f"已读取 {len(items)} 条客户时间线消息", items)
+
+    @app.post("/api/customer-messages/search", response_model=Envelope)
+    def search_customer_messages(
+        payload: CustomerSearchRequest,
+        request: Request,
+    ) -> Envelope:
+        items = system_from(request).customers.search_messages(
+            payload.query,
+            customer_id=payload.customer_id,
+            limit=payload.limit,
+            include_restricted=payload.include_restricted,
+        )
+        return success(f"找到 {len(items)} 条客户聊天证据", items)
+
+    @app.post("/api/customer-reply/context", response_model=Envelope)
+    def customer_reply_context(
+        payload: CustomerReplyContextRequest,
+        request: Request,
+    ) -> Envelope:
+        result = system_from(request).customer_service.prepare_reply_context(
+            customer_id=payload.customer_id,
+            task=payload.task,
+            recent_limit=payload.recent_limit,
+            search_limit=payload.search_limit,
+            include_restricted=payload.include_restricted,
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="客户不存在")
+        return success(result["summary"], result)
+
+    @app.get("/api/customer-signals", response_model=Envelope)
+    def customer_signals(
+        request: Request,
+        customer_id: str | None = None,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> Envelope:
+        items = system_from(request).customers.list_signals(customer_id, limit)
+        return success(f"已读取 {len(items)} 条客户业务信号", items)
+
+    @app.post("/api/customer-signals", response_model=Envelope)
+    def create_customer_signal(
+        payload: CustomerSignalRequest,
+        request: Request,
+    ) -> Envelope:
+        item = system_from(request).customers.create_signal(
+            customer_id=payload.customer_id,
+            signal_type=payload.signal_type,
+            statement=payload.statement,
+            status=payload.status,
+            due_at=payload.due_at,
+            evidence_message_ids=payload.evidence_message_ids,
+            confidence=payload.confidence,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="客户不存在")
+        return success(
+            "客户需求、承诺或待办已保存为候选，等待用户审核",
+            item,
+            next_actions=["核对聊天证据后批准或驳回"],
+        )
+
+    @app.post("/api/customer-signals/{signal_id}/review", response_model=Envelope)
+    def review_customer_signal(
+        signal_id: str,
+        payload: ReviewRequest,
+        request: Request,
+    ) -> Envelope:
+        reviewed = system_from(request).customers.review_signal(
+            signal_id,
+            payload.decision,
+            payload.reason,
+        )
+        if not reviewed:
+            raise HTTPException(status_code=404, detail="客户业务信号不存在")
+        return success(f"客户业务信号已{_decision_label(payload.decision)}")
 
     web_dist = Path(resolved_settings.web_dist)
     assets = web_dist / "assets"

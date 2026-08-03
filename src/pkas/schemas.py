@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 Status = Literal["success", "warning", "error"]
 Domain = Literal["work", "self", "shared", "distill"]
@@ -65,3 +65,71 @@ class DistillationCandidateRequest(BaseModel):
 class DistillationExportRequest(BaseModel):
     approved_only: bool = True
     dataset_split: Literal["train", "validation", "test"] | None = None
+
+
+class WeFlowConnectionRequest(BaseModel):
+    base_url: str = Field(default="http://127.0.0.1:5031", min_length=8, max_length=200)
+    access_token: SecretStr = Field(min_length=1, max_length=1000)
+
+
+class WeFlowSessionsRequest(WeFlowConnectionRequest):
+    keyword: str = Field(default="", max_length=200)
+    limit: int = Field(default=500, ge=1, le=5000)
+
+
+class WeFlowSyncRequest(WeFlowConnectionRequest):
+    session_ids: list[str] = Field(min_length=1, max_length=100)
+    incremental: bool = True
+    privacy: Privacy = "restricted"
+    max_messages_per_session: int = Field(default=50000, ge=1, le=500000)
+
+
+class ChatLabInspectRequest(BaseModel):
+    path: str = Field(min_length=3)
+    session_id: str | None = Field(default=None, max_length=300)
+
+
+class ChatLabImportRequest(ChatLabInspectRequest):
+    inspection_token: str = Field(min_length=64, max_length=64)
+    privacy: Privacy = "restricted"
+
+
+class CustomerSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    customer_id: str | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+    include_restricted: bool = False
+
+
+class CustomerReplyContextRequest(BaseModel):
+    customer_id: str
+    task: str = Field(min_length=2, max_length=2000)
+    recent_limit: int = Field(default=40, ge=1, le=200)
+    search_limit: int = Field(default=20, ge=1, le=100)
+    include_restricted: bool = False
+
+
+class CustomerSignalRequest(BaseModel):
+    customer_id: str
+    signal_type: Literal[
+        "requirement",
+        "commitment",
+        "todo",
+        "risk",
+        "decision",
+        "follow_up",
+        "preference",
+    ]
+    statement: str = Field(min_length=2, max_length=4000)
+    status: Literal["open", "done", "cancelled"] = "open"
+    due_at: str | None = Field(default=None, max_length=80)
+    evidence_message_ids: list[str] = Field(default_factory=list)
+    confidence: Literal["low", "medium", "high"] = "low"
+
+
+class CustomerUpdateRequest(BaseModel):
+    company: str | None = Field(default=None, max_length=300)
+    stage: Literal["lead", "active", "delivery", "after_sales", "paused", "closed"] | None = None
+    tags: list[str] | None = Field(default=None, max_length=50)
+    summary: str | None = Field(default=None, max_length=8000)
+    review_status: Literal["candidate", "approved"] | None = None

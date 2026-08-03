@@ -65,6 +65,22 @@
 
 记录用户对候选知识、自我观察、蒸馏样本和高影响操作的批准或驳回。
 
+### Connector 与 ConnectorSnapshot
+
+Connector 记录 WeFlow 等本地数据源的类型、地址和健康状态，不保存 Access Token。ConnectorSnapshot 保存每次同步得到的原始 JSON 哈希、私有仓路径、来源 URI 和采集时间。
+
+### Customer 与 CustomerConversation
+
+Customer 表示用户明确选择进入业务系统的微信客户私聊或客户群。CustomerConversation 保存微信会话 ID、会话类型、消息范围、隐私级别、增量游标和最近同步时间。
+
+### CustomerMessage
+
+表示从 WeFlow ChatLab 标准化后的单条微信消息。核心字段包括平台消息 ID、发送者、是否本人发送、时间、消息类型、正文、回复目标、媒体定位、来源快照、去重哈希和隐私级别。
+
+### CustomerSignal
+
+表示从客户聊天中识别出的需求、承诺、待办、风险、决策、跟进或偏好。智能体只能创建 candidate，必须保留证据消息 ID，由用户审核后才能成为正式客户事实。
+
 ## 三、通用状态
 
 内容状态：

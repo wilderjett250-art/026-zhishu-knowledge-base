@@ -194,6 +194,10 @@ class Repository:
                 "distillation_examples",
                 "workflow_runs",
                 "agent_runs",
+                "customers",
+                "customer_conversations",
+                "customer_messages",
+                "customer_signals",
             ):
                 counts[table] = connection.execute(
                     f"SELECT COUNT(*) AS count FROM {table}"

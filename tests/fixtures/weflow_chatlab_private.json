@@ -1,0 +1,60 @@
+{
+  "chatlab": {
+    "version": "0.0.2",
+    "exportedAt": 1738713900,
+    "generator": "WeFlow"
+  },
+  "meta": {
+    "name": "测试客户张经理",
+    "platform": "wechat",
+    "type": "private",
+    "ownerId": "wxid_owner"
+  },
+  "members": [
+    {
+      "platformId": "wxid_customer_demo",
+      "accountName": "张经理",
+      "groupNickname": "",
+      "avatar": ""
+    },
+    {
+      "platformId": "wxid_owner",
+      "accountName": "我",
+      "groupNickname": "",
+      "avatar": ""
+    }
+  ],
+  "messages": [
+    {
+      "sender": "wxid_customer_demo",
+      "accountName": "张经理",
+      "timestamp": 1738713600,
+      "type": 0,
+      "content": "门店系统希望本周五前看到报价单。",
+      "platformMessageId": "wf-demo-001"
+    },
+    {
+      "sender": "wxid_owner",
+      "accountName": "我",
+      "timestamp": 1738713660,
+      "type": 0,
+      "content": "收到，我会先核对接口范围再给您正式报价。",
+      "platformMessageId": "wf-demo-002",
+      "replyToMessageId": "wf-demo-001"
+    },
+    {
+      "sender": "wxid_customer_demo",
+      "accountName": "张经理",
+      "timestamp": 1738713720,
+      "type": 0,
+      "content": "还需要包含三家门店的数据看板。",
+      "platformMessageId": "wf-demo-003"
+    }
+  ],
+  "sync": {
+    "hasMore": false,
+    "nextSince": 1738713720,
+    "nextOffset": 0,
+    "watermark": 1738713900
+  }
+}

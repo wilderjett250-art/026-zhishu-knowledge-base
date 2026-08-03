@@ -16,6 +16,8 @@ mcp = MCPServer(
         "不要猜测未检索到的个人事实。导入资料必须先调用 inspect_import_path，"
         "只有用户明确批准完全相同的路径、领域和隐私范围后，才调用 import_confirmed_path。"
         "个人画像和蒸馏样本只能创建候选，批准操作由用户在管理台完成。"
+        "微信客户聊天默认是 restricted；只有任务明确需要且用户授权时才读取。"
+        "回复客户时只生成草稿，不直接发送微信消息。"
     ),
     version="0.1.0",
 )
@@ -227,6 +229,142 @@ def save_distillation_candidate(
         "蒸馏样本已保存为候选，等待用户审核",
         item,
         next_actions=["审核质量、来源和隐私范围后再批准导出"],
+    )
+
+
+@mcp.tool(description="列出已经由用户从 WeFlow 明确同步进知识库的微信客户会话。")
+def list_weflow_customers(limit: int = 100) -> dict[str, Any]:
+    items = system().customers.list_customers(max(1, min(limit, 500)))
+    return envelope(f"已读取 {len(items)} 个微信客户会话", items)
+
+
+@mcp.tool(
+    description=(
+        "读取指定客户的微信时间线。微信聊天默认 restricted，"
+        "必须在用户授权当前客户任务后显式设置 include_restricted=true。"
+    )
+)
+def get_customer_timeline(
+    customer_id: str,
+    limit: int = 100,
+    before: int | None = None,
+    include_restricted: bool = False,
+) -> dict[str, Any]:
+    customer = system().customers.get_customer(customer_id)
+    if not customer:
+        return envelope("客户不存在", None, status="error")
+    items = system().customers.timeline(
+        customer_id,
+        limit=max(1, min(limit, 500)),
+        before=before,
+        include_restricted=include_restricted,
+    )
+    return envelope(
+        f"已读取 {customer['display_name']} 的 {len(items)} 条时间线消息",
+        {"customer": customer, "messages": items},
+        artifacts=list({item["vault_path"] for item in items if item.get("vault_path")}),
+    )
+
+
+@mcp.tool(
+    description=(
+        "在 WeFlow 客户聊天中检索需求、承诺、报价、进度或历史沟通。默认不检索 restricted 聊天。"
+    )
+)
+def search_customer_messages(
+    query: str,
+    customer_id: str | None = None,
+    limit: int = 20,
+    include_restricted: bool = False,
+) -> dict[str, Any]:
+    items = system().customers.search_messages(
+        query,
+        customer_id=customer_id,
+        limit=max(1, min(limit, 100)),
+        include_restricted=include_restricted,
+    )
+    return envelope(
+        f"找到 {len(items)} 条客户聊天证据",
+        items,
+        artifacts=list({item["vault_path"] for item in items if item.get("vault_path")}),
+    )
+
+
+@mcp.tool(
+    description=(
+        "为指定微信客户准备回复上下文：客户档案、近期聊天、历史匹配、"
+        "已批准需求/承诺/待办和相关工作知识。只生成上下文和回复草稿依据，不发送消息。"
+    )
+)
+def prepare_customer_reply_context(
+    customer_id: str,
+    task: str,
+    recent_limit: int = 40,
+    search_limit: int = 20,
+    include_restricted: bool = False,
+) -> dict[str, Any]:
+    result = system().customer_service.prepare_reply_context(
+        customer_id=customer_id,
+        task=task,
+        recent_limit=max(1, min(recent_limit, 200)),
+        search_limit=max(1, min(search_limit, 100)),
+        include_restricted=include_restricted,
+    )
+    if not result:
+        return envelope("客户不存在", None, status="error")
+    artifacts = {
+        item["vault_path"]
+        for group in (result["recent_messages"], result["matched_messages"])
+        for item in group
+        if item.get("vault_path")
+    }
+    return envelope(result["summary"], result, artifacts=sorted(artifacts))
+
+
+@mcp.tool(
+    description=(
+        "把微信聊天中识别出的需求、承诺、待办、风险、决策或跟进事项保存为待审核候选。"
+        "不会自动把智能体推断提升为正式客户事实。"
+    )
+)
+def save_customer_signal_candidate(
+    customer_id: str,
+    signal_type: str,
+    statement: str,
+    evidence_message_ids: list[str] | None = None,
+    confidence: str = "low",
+    status: str = "open",
+    due_at: str | None = None,
+) -> dict[str, Any]:
+    if signal_type not in {
+        "requirement",
+        "commitment",
+        "todo",
+        "risk",
+        "decision",
+        "follow_up",
+        "preference",
+    }:
+        return envelope("客户业务信号类型无效", {"signal_type": signal_type}, status="error")
+    if confidence not in {"low", "medium", "high"}:
+        return envelope("置信度参数无效", {"confidence": confidence}, status="error")
+    if status not in {"open", "done", "cancelled"}:
+        return envelope("业务信号状态无效", {"status": status}, status="error")
+    item = system().customers.create_signal(
+        customer_id=customer_id,
+        signal_type=signal_type,
+        statement=statement,
+        status=status,
+        due_at=due_at,
+        evidence_message_ids=evidence_message_ids or [],
+        confidence=confidence,
+    )
+    if not item:
+        return envelope("客户不存在", None, status="error")
+    return envelope(
+        "客户业务信号已保存为候选，等待用户审核",
+        item,
+        next_actions=["核对原始消息证据后在管理台批准或驳回"],
     )
 
 

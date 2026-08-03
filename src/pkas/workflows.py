@@ -138,6 +138,18 @@ class WorkflowService:
     def list_definitions(self) -> list[dict[str, Any]]:
         return [
             {
+                "name": "weflow_customer_sync",
+                "title": "WeFlow 客户增量同步",
+                "steps": ["连接本地 API", "拉取所选会话", "保存原始快照", "去重并建立客户索引"],
+                "approval": "只同步用户勾选的会话；Token 不保存；聊天默认 restricted",
+            },
+            {
+                "name": "weflow_chatlab_import",
+                "title": "WeFlow ChatLab 离线导入",
+                "steps": ["检查文件结构", "确认会话身份", "保存原始快照", "建立客户时间线"],
+                "approval": "检查令牌与文件范围一致后才允许导入",
+            },
+            {
                 "name": "import_path",
                 "title": "资料导入与索引",
                 "steps": ["检查来源", "复制原件并解析", "建立索引", "验证结果"],

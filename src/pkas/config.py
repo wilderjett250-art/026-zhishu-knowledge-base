@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     port: int = 8765
     max_source_bytes: int = 256 * 1024 * 1024
     max_import_files: int = 5000
+    weflow_base_url: str = "http://127.0.0.1:5031"
+    weflow_timeout_seconds: float = 30.0
     allowed_origins: list[str] = [
         "http://127.0.0.1:5173",
         "http://localhost:5173",

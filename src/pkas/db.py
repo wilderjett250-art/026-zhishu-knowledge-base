@@ -177,6 +177,128 @@ CREATE TABLE IF NOT EXISTS audit_events (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS connectors (
+    id TEXT PRIMARY KEY,
+    connector_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    base_url TEXT,
+    status TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    last_health_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(connector_type, base_url)
+);
+
+CREATE TABLE IF NOT EXISTS connector_snapshots (
+    id TEXT PRIMARY KEY,
+    connector_id TEXT REFERENCES connectors(id) ON DELETE SET NULL,
+    conversation_id TEXT,
+    content_hash TEXT NOT NULL UNIQUE,
+    vault_path TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    source_uri TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS customers (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL,
+    platform_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    customer_type TEXT NOT NULL,
+    remark TEXT,
+    nickname TEXT,
+    alias TEXT,
+    company TEXT,
+    stage TEXT NOT NULL DEFAULT 'active',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    privacy TEXT NOT NULL DEFAULT 'restricted',
+    summary TEXT,
+    review_status TEXT NOT NULL DEFAULT 'candidate',
+    last_message_at INTEGER,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform, platform_id)
+);
+
+CREATE TABLE IF NOT EXISTS customer_conversations (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    connector_id TEXT REFERENCES connectors(id) ON DELETE SET NULL,
+    platform TEXT NOT NULL,
+    platform_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    conversation_type TEXT NOT NULL,
+    owner_platform_id TEXT,
+    privacy TEXT NOT NULL DEFAULT 'restricted',
+    message_count INTEGER NOT NULL DEFAULT 0,
+    first_message_at INTEGER,
+    last_message_at INTEGER,
+    sync_since INTEGER NOT NULL DEFAULT 0,
+    sync_offset INTEGER NOT NULL DEFAULT 0,
+    sync_watermark INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform, platform_id)
+);
+
+CREATE TABLE IF NOT EXISTS customer_members (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES customer_conversations(id) ON DELETE CASCADE,
+    platform_id TEXT NOT NULL,
+    account_name TEXT,
+    group_nickname TEXT,
+    avatar_url TEXT,
+    role TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(conversation_id, platform_id)
+);
+
+CREATE TABLE IF NOT EXISTS customer_messages (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES customer_conversations(id) ON DELETE CASCADE,
+    snapshot_id TEXT REFERENCES connector_snapshots(id) ON DELETE SET NULL,
+    platform_message_id TEXT,
+    local_id TEXT,
+    sender_platform_id TEXT,
+    sender_name TEXT,
+    is_self INTEGER NOT NULL DEFAULT 0,
+    sent_at INTEGER NOT NULL,
+    message_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    raw_content TEXT,
+    parsed_content TEXT,
+    reply_to_message_id TEXT,
+    quote_json TEXT,
+    media_json TEXT,
+    source_hash TEXT NOT NULL,
+    privacy TEXT NOT NULL DEFAULT 'restricted',
+    created_at TEXT NOT NULL,
+    UNIQUE(conversation_id, source_hash)
+);
+
+CREATE TABLE IF NOT EXISTS customer_signals (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    conversation_id TEXT REFERENCES customer_conversations(id) ON DELETE SET NULL,
+    signal_type TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    due_at TEXT,
+    evidence_message_ids_json TEXT NOT NULL DEFAULT '[]',
+    confidence TEXT NOT NULL DEFAULT 'low',
+    approval_status TEXT NOT NULL DEFAULT 'candidate',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sources_domain ON sources(domain);
 CREATE INDEX IF NOT EXISTS idx_sources_privacy ON sources(privacy);
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id);
@@ -186,6 +308,16 @@ CREATE INDEX IF NOT EXISTS idx_messages_document ON messages(document_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_created ON workflow_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_persona_status ON persona_observations(approval_status);
+CREATE INDEX IF NOT EXISTS idx_connectors_type ON connectors(connector_type);
+CREATE INDEX IF NOT EXISTS idx_snapshots_conversation ON connector_snapshots(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(display_name);
+CREATE INDEX IF NOT EXISTS idx_customer_conversations_customer
+    ON customer_conversations(customer_id);
+CREATE INDEX IF NOT EXISTS idx_customer_messages_conversation_time
+    ON customer_messages(conversation_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_customer_messages_sender ON customer_messages(sender_platform_id);
+CREATE INDEX IF NOT EXISTS idx_customer_signals_customer ON customer_signals(customer_id);
+CREATE INDEX IF NOT EXISTS idx_customer_signals_status ON customer_signals(approval_status, status);
 """
 
 
@@ -213,12 +345,17 @@ class Database:
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(BASE_SCHEMA)
             tokenizer = self._ensure_fts(connection)
+            customer_tokenizer = self._ensure_customer_fts(connection)
             connection.execute(
-                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', '1')"
+                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', '2')"
             )
             connection.execute(
                 "INSERT OR REPLACE INTO app_meta(key, value) VALUES('fts_tokenizer', ?)",
                 (tokenizer,),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('customer_fts_tokenizer', ?)",
+                (customer_tokenizer,),
             )
             connection.commit()
 
@@ -255,6 +392,48 @@ class Database:
                     title,
                     content,
                     domain UNINDEXED,
+                    privacy UNINDEXED,
+                    tokenize='unicode61'
+                )
+                """
+            )
+            return "unicode61"
+
+    @staticmethod
+    def _ensure_customer_fts(connection: sqlite3.Connection) -> str:
+        row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='customer_messages_fts'"
+        ).fetchone()
+        if row:
+            tokenizer = connection.execute(
+                "SELECT value FROM app_meta WHERE key='customer_fts_tokenizer'"
+            ).fetchone()
+            return tokenizer["value"] if tokenizer else "existing"
+
+        try:
+            connection.execute(
+                """
+                CREATE VIRTUAL TABLE customer_messages_fts USING fts5(
+                    message_id UNINDEXED,
+                    customer_id UNINDEXED,
+                    conversation_id UNINDEXED,
+                    sender_name,
+                    content,
+                    privacy UNINDEXED,
+                    tokenize='trigram'
+                )
+                """
+            )
+            return "trigram"
+        except sqlite3.OperationalError:
+            connection.execute(
+                """
+                CREATE VIRTUAL TABLE customer_messages_fts USING fts5(
+                    message_id UNINDEXED,
+                    customer_id UNINDEXED,
+                    conversation_id UNINDEXED,
+                    sender_name,
+                    content,
                     privacy UNINDEXED,
                     tokenize='unicode61'
                 )

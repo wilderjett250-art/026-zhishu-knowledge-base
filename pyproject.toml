@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12,<5",
   "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
   "lxml>=5,<7",
   "mcp[cli]>=2,<3",
   "openpyxl>=3.1,<4",
@@ -25,7 +26,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1",
   "pytest>=8,<9",
   "pytest-asyncio>=0.25,<1",
   "pyright>=1.1,<2",
@@ -54,4 +54,3 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 include = ["src", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
-
