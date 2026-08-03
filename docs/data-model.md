@@ -67,7 +67,7 @@
 
 ### Connector 与 ConnectorSnapshot
 
-Connector 记录 WeFlow 等本地数据源的类型、地址和健康状态，不保存 Access Token。ConnectorSnapshot 保存每次同步得到的原始 JSON 哈希、私有仓路径、来源 URI 和采集时间。
+Connector 记录 WeFlow 等本地数据源的类型、接入方式和状态。ConnectorSnapshot 保存用户确认导入的原始 XLSX 或 ChatLab JSON 哈希、私有仓路径、来源 URI 和采集时间；不保存密钥内容。
 
 ### Customer 与 CustomerConversation
 
@@ -75,7 +75,7 @@ Customer 表示用户明确选择进入业务系统的微信客户私聊或客�
 
 ### CustomerMessage
 
-表示从 WeFlow ChatLab 标准化后的单条微信消息。核心字段包括平台消息 ID、发送者、是否本人发送、时间、消息类型、正文、回复目标、媒体定位、来源快照、去重哈希和隐私级别。
+表示从 WeFlow XLSX 或 ChatLab 标准化后的单条微信消息。核心字段包括可用的平台消息 ID、XLSX 行定位、发送者、是否本人发送、时间、消息类型、正文、回复目标、媒体定位、来源快照、去重哈希和隐私级别。
 
 ### CustomerSignal
 

@@ -20,7 +20,7 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; intro: string }> 
   home: { eyebrow: "PERSONAL INTELLIGENCE OS", title: "你的知识，在同一个坐标系里", intro: "资料、证据、工作流和长期自我模型都由你控制。" },
   knowledge: { eyebrow: "KNOWLEDGE ATLAS", title: "从答案返回原始证据", intro: "全文检索业务与自我资料，并沿来源路径回到原文。" },
   customers: { eyebrow: "CUSTOMER INTELLIGENCE", title: "每个微信客户都有完整上下文", intro: "沿聊天时间线核对需求、承诺、待办和历史沟通，再交给 Codex 起草回复。" },
-  import: { eyebrow: "SOURCE GATE", title: "连接 WeFlow，或导入明确资料", intro: "Token 只用于本次本机调用；只有你选择的会话或路径会进入知识库。" },
+  import: { eyebrow: "SOURCE GATE", title: "读取 WeFlow 导出，或导入明确资料", intro: "不访问数据库密钥、不依赖 HTTP API；只有你确认的导出会话或路径会进入知识库。" },
   workflows: { eyebrow: "REPEATABLE OPERATIONS", title: "把可靠做法固化成工作流", intro: "每次运行都有步骤、状态、结果与错误记录。" },
   agent: { eyebrow: "CODEX CONTEXT ENGINE", title: "让智能体自己找对资料", intro: "系统先选择领域、检索证据，再把可追溯上下文交给 Codex。" },
   persona: { eyebrow: "SELF MODEL", title: "被证据约束的长期自我画像", intro: "性格与偏好先作为候选，只有你批准后才成为长期事实。" },
@@ -267,7 +267,7 @@ function CustomersPanel({ customers, signals, run, setEvidence, busy }: { custom
     void run(() => post<Json>(`/api/customers/${selected.id}`, { company, stage, tags: tags.split(/[,，]/).map((item) => item.trim()).filter(Boolean), summary: customerSummary, review_status: "approved" }));
   };
 
-  if (!customers.length) return <div className="customer-empty"><span>CX / 00</span><h2>还没有微信客户会话</h2><p>进入“WeFlow / 资料”，连接本机 WeFlow API并选择客户会话，或者导入 WeFlow ChatLab JSON。</p></div>;
+  if (!customers.length) return <div className="customer-empty"><span>CX / 00</span><h2>还没有微信客户会话</h2><p>进入“WeFlow / 资料”，读取 WeFlow 已导出的 XLSX，检查并选择需要进入客户知识库的会话。</p></div>;
   return <section className="customer-workbench">
     <aside className="customer-rail">
       <header><strong>客户会话</strong><span>{customers.length}</span></header>
@@ -294,12 +294,11 @@ function CustomersPanel({ customers, signals, run, setEvidence, busy }: { custom
 }
 
 function ImportPanel({ run, busy }: { run: Runner; busy: boolean }) {
-  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:5031");
-  const [accessToken, setAccessToken] = useState("");
-  const [weflowStatus, setWeflowStatus] = useState<Json | null>(null);
-  const [sessions, setSessions] = useState<Json[]>([]);
-  const [selectedSessions, setSelectedSessions] = useState<string[]>([]);
-  const [sessionKeyword, setSessionKeyword] = useState("");
+  const [recordsPath, setRecordsPath] = useState("");
+  const [exportCatalog, setExportCatalog] = useState<Json | null>(null);
+  const [selectedExports, setSelectedExports] = useState<string[]>([]);
+  const [exportKeyword, setExportKeyword] = useState("");
+  const [exportInspection, setExportInspection] = useState<Json | null>(null);
   const [chatlabPath, setChatlabPath] = useState("");
   const [chatlabSessionId, setChatlabSessionId] = useState("");
   const [chatlabInspection, setChatlabInspection] = useState<Json | null>(null);
@@ -312,26 +311,27 @@ function ImportPanel({ run, busy }: { run: Runner; busy: boolean }) {
   const signature = `${path}|${recursive}`;
   const inspect = () => void run(() => post<Json>("/api/import/inspect", { path, recursive }), (data) => { setInspection(data); setInspectedSignature(signature); });
   const execute = () => void run(() => post<Json>("/api/import/run", { path, recursive, domain, privacy, inspection_token: inspection?.inspection_token }), () => { setInspection(null); setInspectedSignature(""); });
-  const checkWeFlow = () => void run(() => post<Json>("/api/weflow/health", { base_url: baseUrl, access_token: accessToken }), setWeflowStatus);
-  const loadSessions = () => void run(() => post<Json[]>("/api/weflow/sessions", { base_url: baseUrl, access_token: accessToken, keyword: sessionKeyword, limit: 1000 }), setSessions);
-  const toggleSession = (id: string) => setSelectedSessions((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const syncWeFlow = () => void run(() => post<Json>("/api/weflow/sync", { base_url: baseUrl, access_token: accessToken, session_ids: selectedSessions, incremental: true, privacy: "restricted", max_messages_per_session: 50000 }), () => setSelectedSessions([]));
+  const exportItems = useMemo(() => (exportCatalog?.items ?? []).filter((item: Json) => `${item.display_name} ${item.session_id}`.toLowerCase().includes(exportKeyword.trim().toLowerCase())), [exportCatalog, exportKeyword]);
+  const discoverExports = () => void run(() => post<Json>("/api/weflow/exports/discover", { records_path: recordsPath.trim() || null, keyword: "", limit: 1000 }), (data) => { setExportCatalog(data); setRecordsPath(data.records_path); setSelectedExports([]); setExportInspection(null); });
+  const toggleExport = (id: string) => { setSelectedExports((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]); setExportInspection(null); };
+  const inspectExports = () => void run(() => post<Json>("/api/weflow/exports/inspect", { records_path: recordsPath.trim() || null, session_ids: selectedExports }), setExportInspection);
+  const importExports = () => void run(() => post<Json>("/api/weflow/exports/import", { records_path: recordsPath.trim() || null, session_ids: selectedExports, inspection_token: exportInspection?.inspection_token, privacy: "restricted" }), () => { setSelectedExports([]); setExportInspection(null); });
   const inspectChatLab = () => void run(() => post<Json>("/api/weflow/chatlab/inspect", { path: chatlabPath, session_id: chatlabSessionId || null }), setChatlabInspection);
   const importChatLab = () => void run(() => post<Json>("/api/weflow/chatlab/import", { path: chatlabPath, session_id: chatlabSessionId || null, inspection_token: chatlabInspection?.inspection_token, privacy: "restricted" }), () => setChatlabInspection(null));
   return <>
     <section className="weflow-connect">
-      <Panel title="WeFlow 本地连接器" code="LIVE / INCREMENTAL">
+      <Panel title="WeFlow 导出记录" code="NO API / NO KEY">
         <div className="form-stack">
-          <Field label="本地 API 地址" hint="只允许 127.0.0.1 / localhost"><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} /></Field>
-          <Field label="Access Token" hint="仅停留在当前页面内存，不保存"><input type="password" autoComplete="off" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} placeholder="输入 WeFlow 设置中的 API Token" /></Field>
-          <div className="inline-actions"><button className="quiet-action" disabled={!accessToken || busy} onClick={checkWeFlow}>测试连接</button><button className="primary-button" disabled={!accessToken || busy} onClick={loadSessions}>读取会话列表</button>{weflowStatus && <span className="connector-ok"><i /> API ONLINE · TOKEN NOT STORED</span>}</div>
-          <div className="privacy-strip"><strong>隐私边界</strong><span>只同步你勾选的会话；聊天统一标记 restricted；本系统不直接发送微信消息。</span></div>
+          <Field label="导出记录绝对路径" hint="留空会自动读取当前 Windows 用户的 WeFlow 配置目录"><input value={recordsPath} onChange={(event) => { setRecordsPath(event.target.value); setExportCatalog(null); setSelectedExports([]); setExportInspection(null); }} placeholder="自动定位 weflow-export-records.json" /></Field>
+          <div className="inline-actions"><button className="primary-button" disabled={busy} onClick={discoverExports}>发现现存 XLSX 导出</button>{exportCatalog && <span className="connector-ok"><i /> EXPORT INDEX READY · API FREE</span>}</div>
+          {exportCatalog && <div className="inspection-grid"><MetricMini label="会话" value={exportCatalog.total_sessions} /><MetricMini label="现存" value={exportCatalog.existing_sessions} /><MetricMini label="导出记录" value={exportCatalog.record_count} /><MetricMini label="现存文件" value={exportCatalog.existing_record_count} /></div>}
+          <div className="privacy-strip"><strong>隐私边界</strong><span>只读 WeFlow 导出索引，不访问 decryptKey 或 WCDB；只导入你勾选的 XLSX，聊天统一标记 restricted。</span></div>
         </div>
       </Panel>
-      <Panel title={`选择客户会话 · ${selectedSessions.length}`} code={`${sessions.length} AVAILABLE`}>
-        <div className="session-toolbar"><input value={sessionKeyword} onChange={(event) => setSessionKeyword(event.target.value)} placeholder="按客户名称或 wxid 过滤" /><button disabled={!accessToken || busy} onClick={loadSessions}>重新查询</button></div>
-        <div className="session-picker">{sessions.length ? sessions.map((item) => <label key={item.id} className={selectedSessions.includes(item.id) ? "selected" : ""}><input type="checkbox" checked={selectedSessions.includes(item.id)} onChange={() => toggleSession(item.id)} /><span><strong>{item.name || item.id}</strong><small>{item.type} · {item.messageCount ?? 0} 条 · {item.id}</small></span><time>{formatUnixTime(item.lastMessageAt)}</time></label>) : <Empty text="连接 WeFlow 后读取会话列表。这里只显示元数据，不会自动同步聊天正文。" />}</div>
-        <button className="danger-safe-button sync-button" disabled={!selectedSessions.length || busy} onClick={syncWeFlow}>确认增量同步所选 {selectedSessions.length} 个会话</button>
+      <Panel title={`选择已导出会话 · ${selectedExports.length}`} code={`${exportItems.length} AVAILABLE`}>
+        <div className="session-toolbar"><input value={exportKeyword} onChange={(event) => setExportKeyword(event.target.value)} placeholder="按导出文件名或 wxid 过滤" /><button disabled={busy} onClick={discoverExports}>重新发现</button></div>
+        <div className="session-picker">{exportItems.length ? exportItems.map((item: Json) => <label key={item.session_id} className={selectedExports.includes(item.session_id) ? "selected" : ""}><input type="checkbox" checked={selectedExports.includes(item.session_id)} onChange={() => toggleExport(item.session_id)} /><span><strong>{item.display_name || item.session_id}</strong><small>{item.conversation_type} · {item.message_count ?? 0} 条 · {item.existing_export_count} 份现存导出</small></span><time>{formatUnixTime(item.export_time)}</time></label>) : <Empty text="点击“发现现存 XLSX 导出”。这里只读取导出记录元数据，不会自动导入聊天正文。" />}</div>
+        {!exportInspection ? <button className="danger-safe-button sync-button" disabled={!selectedExports.length || busy} onClick={inspectExports}>只读检查所选 {selectedExports.length} 个 XLSX</button> : <div className="export-confirm"><div className="boundary-note"><strong>检查通过</strong><p>{exportInspection.selected_sessions} 个会话，共声明 {exportInspection.total_messages} 条消息、{formatBytes(exportInspection.total_bytes)}。确认后复制原始 XLSX 哈希快照并建立客户索引。</p></div><button className="danger-safe-button sync-button" disabled={busy} onClick={importExports}>确认导入所选客户会话</button></div>}
       </Panel>
     </section>
     <section className="import-layout offline-import">
@@ -419,7 +419,7 @@ function DistillPanel({ items, run, busy }: { items: Json[]; run: Runner; busy: 
 function SettingsPanel({ health, audit }: { health: Json | null; audit: Json[] }) {
   const mcpCommand = "uv --directory E:\\codex-kb run pkas-mcp";
   return <>
-    <section className="settings-grid"><Panel title="本地运行状态" code="RUNTIME"><dl className="detail-list"><Detail label="服务状态" value={health ? "运行正常" : "连接中"} /><Detail label="应用版本" value={health?.app_version ?? "—"} /><Detail label="SQLite" value={health?.sqlite_version ?? "—"} /><Detail label="全文分词" value={health?.fts_tokenizer ?? "—"} /><Detail label="元数据位置" value={health?.database ?? "—"} /></dl></Panel><Panel title="Codex 接入" code="MCP / STDIO"><p className="panel-note">把这一条本地 MCP 命令配置给 Codex 后，每个任务都能按需检索知识和已授权的 WeFlow 客户聊天、读取原始快照并准备客户回复上下文。</p><code className="command-code">{mcpCommand}</code><div className="boundary-note"><strong>默认权限</strong><p>微信聊天默认 restricted；Token 不持久化；客户事实只能创建候选；系统不直接发送微信消息。</p></div></Panel></section>
+    <section className="settings-grid"><Panel title="本地运行状态" code="RUNTIME"><dl className="detail-list"><Detail label="服务状态" value={health ? "运行正常" : "连接中"} /><Detail label="应用版本" value={health?.app_version ?? "—"} /><Detail label="SQLite" value={health?.sqlite_version ?? "—"} /><Detail label="全文分词" value={health?.fts_tokenizer ?? "—"} /><Detail label="元数据位置" value={health?.database ?? "—"} /></dl></Panel><Panel title="Codex 接入" code="MCP / STDIO"><p className="panel-note">把这一条本地 MCP 命令配置给 Codex 后，每个任务都能按需检索知识和已授权的 WeFlow 客户聊天、读取原始快照并准备客户回复上下文。</p><code className="command-code">{mcpCommand}</code><div className="boundary-note"><strong>默认权限</strong><p>微信聊天默认 restricted；WeFlow 接入不读取数据库密钥且不依赖 HTTP API；客户事实只能创建候选；系统不直接发送微信消息。</p></div></Panel></section>
     <Panel title="审计轨迹" code={`${audit.length} EVENTS`}><ItemList items={audit} empty="关键操作发生后会记录在这里。" render={(item) => <div className="audit-row"><span>{String(item.id).padStart(4, "0")}</span><strong>{eventLabel(item.event_type)}</strong><small>{item.subject_type ?? "system"} · {item.subject_id ?? "—"}</small><time>{formatTime(item.created_at)}</time></div>} /></Panel>
   </>;
 }
@@ -443,7 +443,7 @@ function formatUnixTime(value?: number) { if (!value) return "—"; return new I
 function formatBytes(value?: number) { if (!value) return "0 B"; const units = ["B", "KB", "MB", "GB"]; const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1); return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
 function compactPath(value?: string) { if (!value) return "—"; return value.length > 48 ? `…${value.slice(-47)}` : value; }
 function statusLabel(value: string) { return ({ completed: "完成", warning: "警告", failed: "失败", running: "运行中" } as Record<string, string>)[value] ?? value; }
-function workflowName(value: string) { return ({ import_path: "资料导入与索引", rebuild_search_index: "全文索引重建", persona_review: "个人观察审核", weflow_customer_sync: "WeFlow 客户增量同步", weflow_chatlab_import: "WeFlow ChatLab 导入" } as Record<string, string>)[value] ?? value; }
+function workflowName(value: string) { return ({ import_path: "资料导入与索引", rebuild_search_index: "全文索引重建", persona_review: "个人观察审核", weflow_xlsx_import: "WeFlow XLSX 客户导入", weflow_chatlab_import: "WeFlow ChatLab 导入" } as Record<string, string>)[value] ?? value; }
 function approvalLabel(value: string) { return ({ candidate: "待审核", approved: "已批准", rejected: "已驳回" } as Record<string, string>)[value] ?? value; }
 function customerTypeLabel(value: string) { return ({ private: "私聊客户", group: "客户群" } as Record<string, string>)[value] ?? value; }
 function customerStageLabel(value: string) { return ({ lead: "线索", active: "沟通中", delivery: "交付中", after_sales: "售后", paused: "暂停", closed: "已结束" } as Record<string, string>)[value] ?? value; }

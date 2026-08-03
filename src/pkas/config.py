@@ -1,9 +1,11 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+APPDATA_ROOT = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
 
 
 class Settings(BaseSettings):
@@ -22,8 +24,9 @@ class Settings(BaseSettings):
     port: int = 8765
     max_source_bytes: int = 256 * 1024 * 1024
     max_import_files: int = 5000
-    weflow_base_url: str = "http://127.0.0.1:5031"
-    weflow_timeout_seconds: float = 30.0
+    weflow_export_records_path: Path = (
+        APPDATA_ROOT / "weflow" / "weflow-export-records.json"
+    )
     allowed_origins: list[str] = [
         "http://127.0.0.1:5173",
         "http://localhost:5173",

@@ -12,7 +12,7 @@
 - 检索结果到原文件、仓内原件、文档和段落定位的证据链。
 - 可记录步骤、状态、输出和失败信息的资料导入与索引工作流。
 - Codex MCP 工具：检索、读原文、列来源、检查/确认导入、准备智能体上下文、提交画像与蒸馏候选。
-- WeFlow 本地 API 连接、会话选择、ChatLab `0.0.2` 离线导入和增量游标同步。
+- WeFlow 导出记录发现、XLSX 会话选择、ChatLab `0.0.2` 兼容导入和消息去重。
 - 微信客户档案、聊天时间线、客户消息检索、需求/承诺/待办审核和回复上下文。
 - 自我画像人工批准机制，以及已批准蒸馏样本的标准 JSONL 导出。
 - 一个本地管理台，统一操作知识、来源、工作流、智能体、自我画像、蒸馏和审计记录。
@@ -37,16 +37,17 @@ uv run pkas serve --open-browser
 
 ## WeFlow 微信客户接入
 
-在 WeFlow 设置中先完成微信数据库连接，然后开启“API 服务”，配置 Access Token。知枢默认连接 `http://127.0.0.1:5031`，并且拒绝把 WeFlow 请求发送到非本机地址。
+先由 WeFlow 使用它已保存的数据库连接打开微信记录并导出 XLSX。知枢不读取 `decryptKey`、不直接打开 WCDB，也不依赖 WeFlow HTTP API；它只读取 WeFlow 自己维护的 `weflow-export-records.json`，再处理用户明确选择的现存导出文件。
 
 管理台操作入口为“WeFlow / 资料”：
 
-1. 输入 WeFlow Access Token 并测试连接。Token 只停留在当前页面与本次后端请求中，不写数据库、日志、快照或 Git。
-2. 只读加载会话列表，勾选确定属于业务客户的私聊或群聊。
-3. 确认后做增量同步。聊天原始响应保存为 SHA-256 快照，消息按平台 ID、发送者、时间与内容去重。
-4. 在“微信客户”中查看时间线、检索历史沟通、维护已确认客户档案、审核需求/承诺/待办，并为 Codex 准备回复依据。
+1. 点击“发现现存 XLSX 导出”。默认自动定位 `%APPDATA%\weflow\weflow-export-records.json`，也可以填写准确的绝对路径。
+2. 系统只读列出仍然存在的导出文件；勾选确定属于业务客户的私聊或群聊。
+3. 先检查 XLSX 表头、文件哈希、会话数量和声明消息数，再明确确认导入。
+4. 原始 XLSX 保存为 SHA-256 快照，消息按会话、发送者、时间、类型与内容去重并建立客户全文索引。
+5. 在“微信客户”中查看时间线、检索历史沟通、维护已确认客户档案、审核需求/承诺/待办，并为 Codex 准备回复依据。
 
-如果不启用 WeFlow API，也可以导出 ChatLab JSON，在同一页面先检查文件结构和会话 ID，再作为 `restricted` 客户聊天导入。系统不会直接操作微信或自动发送客户消息。
+ChatLab JSON 仍作为兼容入口保留。两种方式都不会直接操作微信或自动发送客户消息。
 
 ## 接入 Codex
 
@@ -82,9 +83,9 @@ uv run pkas inspect "E:\明确的资料目录"
 uv run pkas ingest "E:\明确的资料目录" --domain work --privacy private --yes
 uv run pkas search "项目的核心业务规则"
 uv run pkas stats
-uv run pkas weflow-check
-uv run pkas weflow-sessions
-uv run pkas weflow-sync wxid_customer --yes
+uv run pkas weflow-exports
+uv run pkas weflow-export-inspect wxid_customer
+uv run pkas weflow-export-import wxid_customer --inspection-token <检查令牌> --yes
 uv run pkas chatlab-inspect "E:\WeFlow导出\客户.json"
 uv run pkas mcp
 ```
@@ -92,7 +93,8 @@ uv run pkas mcp
 ## 数据与隐私
 
 - `data/raw/sha256`：授权导入的原始资料，按内容哈希保存。
-- `data/raw/weflow/sha256`：WeFlow API 或 ChatLab 文件的原始 JSON 快照。
+- `data/raw/weflow-xlsx/sha256`：明确选择后导入的 WeFlow 原始 XLSX 哈希快照。
+- `data/raw/weflow/sha256`：兼容导入的 ChatLab JSON 哈希快照。
 - `data/index/pkas.sqlite`：元数据、全文索引、运行记录和审计记录。
 - `data/distill/exports`：经过批准后导出的蒸馏 JSONL。
 - 密码、令牌、私钥、证书和常见密钥文件名不会导入。

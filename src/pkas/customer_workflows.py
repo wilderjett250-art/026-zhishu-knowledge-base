@@ -9,53 +9,58 @@ class CustomerWorkflowService:
         self.repository = repository
         self.weflow = weflow
 
-    def sync_weflow(
+    def import_weflow_exports(
         self,
         *,
-        base_url: str,
-        access_token: str,
+        records_path: str | None,
         session_ids: list[str],
-        incremental: bool,
+        inspection_token: str,
         privacy: str,
-        max_messages_per_session: int,
     ) -> dict[str, Any]:
         run_id = self.repository.create_workflow_run(
-            "weflow_customer_sync",
+            "weflow_xlsx_import",
             {
-                "base_url": base_url,
+                "records_path": records_path,
                 "session_ids": session_ids,
-                "incremental": incremental,
                 "privacy": privacy,
-                "max_messages_per_session": max_messages_per_session,
-                "token_stored": False,
+                "api_required": False,
+                "key_accessed": False,
             },
         )
         try:
-            connect_step = self.repository.add_workflow_step(run_id, 1, "connect_weflow")
-            health = self.weflow.check_connection(
-                base_url=base_url,
-                access_token=access_token,
+            inspect_step = self.repository.add_workflow_step(
+                run_id,
+                1,
+                "verify_weflow_xlsx_selection",
             )
+            inspection = self.weflow.inspect_export_selection(
+                records_path=records_path,
+                session_ids=session_ids,
+            )
+            if inspection["inspection_token"] != inspection_token:
+                raise ValueError("WeFlow 导出记录或 XLSX 文件在检查后发生了变化。")
             self.repository.finish_workflow_step(
-                connect_step,
+                inspect_step,
                 status="completed",
-                summary="WeFlow 本地 API 鉴权和健康检查通过",
+                summary=f"已核对 {inspection['selected_sessions']} 个 WeFlow XLSX",
             )
 
-            sync_step = self.repository.add_workflow_step(run_id, 2, "sync_selected_sessions")
-            result = self.weflow.sync_sessions(
-                base_url=base_url,
-                access_token=access_token,
+            import_step = self.repository.add_workflow_step(
+                run_id,
+                2,
+                "import_selected_weflow_exports",
+            )
+            result = self.weflow.import_export_selection(
+                records_path=records_path,
                 session_ids=session_ids,
-                incremental=incremental,
+                inspection_token=inspection_token,
                 privacy=privacy,
-                max_messages_per_session=max_messages_per_session,
             )
             self.repository.finish_workflow_step(
-                sync_step,
+                import_step,
                 status="completed",
                 summary=(
-                    f"同步 {len(result['sessions'])} 个会话，新增 {result['imported']} 条消息，"
+                    f"导入 {len(result['sessions'])} 个会话，新增 {result['imported']} 条消息，"
                     f"识别 {result['duplicates']} 条重复消息"
                 ),
                 artifacts=result["snapshot_paths"],
@@ -68,7 +73,7 @@ class CustomerWorkflowService:
                 status="completed",
                 summary=f"客户消息索引现有 {stats['counts']['customer_messages']} 条消息",
             )
-            output = {"health": health, "sync": result, "stats": stats}
+            output = {"inspection": inspection, "result": result, "stats": stats}
             self.repository.finish_workflow_run(run_id, status="completed", output=output)
             return {
                 "run_id": run_id,
@@ -80,8 +85,8 @@ class CustomerWorkflowService:
             error = {
                 "type": type(exc).__name__,
                 "message": str(exc),
-                "safe_retry": "检查 WeFlow API、Token 和已选会话后重试；增量去重不会重复写入消息。",
-                "stop_condition": "会话范围不明确、Token 暴露或本机 API 身份无法确认时停止。",
+                "safe_retry": "重新发现导出记录，检查同一批 XLSX 后再确认导入；消息会自动去重。",
+                "stop_condition": "导出文件缺失、检查后变化或会话范围不明确时停止。",
             }
             self.repository.finish_workflow_run(run_id, status="failed", error=error)
             return {"run_id": run_id, "status": "failed", "error": error, "artifacts": []}

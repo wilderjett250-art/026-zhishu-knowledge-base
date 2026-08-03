@@ -1,11 +1,68 @@
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 from pkas.api import create_app
 from pkas.config import Settings
 
 WEFLOW_FIXTURE = Path(__file__).parent / "fixtures" / "weflow_chatlab_private.json"
+
+
+def create_weflow_xlsx_export(source_root: Path) -> Path:
+    xlsx = source_root / "api-customer.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["微信聊天记录"])
+    sheet.append(["昵称", "API 测试客户", "微信ID", "wxid_api_customer"])
+    sheet.append(
+        [
+            "序号",
+            "时间",
+            "发送者昵称",
+            "发送者微信ID",
+            "发送者备注",
+            "发送者身份",
+            "消息类型",
+            "内容",
+        ]
+    )
+    sheet.append(
+        [
+            1,
+            "2025-02-05 10:00:00",
+            "客户",
+            "wxid_api_customer",
+            "",
+            "客户",
+            "文本消息",
+            "请提供报价。",
+        ]
+    )
+    sheet.append(
+        [2, "2025-02-05 10:01:00", "我", "wxid_owner", "", "我", "文本消息", "收到。"]
+    )
+    workbook.save(xlsx)
+    records = source_root / "weflow-export-records.json"
+    records.write_text(
+        json.dumps(
+            {
+                "wxid_api_customer": [
+                    {
+                        "exportTime": 1738749660000,
+                        "format": "xlsx",
+                        "messageCount": 2,
+                        "outputPath": str(xlsx.resolve()),
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return records
 
 
 def test_api_end_to_end(test_settings: Settings, source_root: Path) -> None:
@@ -101,6 +158,48 @@ def test_api_requires_current_inspection_token(
     assert response.json()["status"] == "warning"
     assert "发生了变化" in response.json()["data"]["error"]["message"]
     assert dashboard["counts"]["sources"] == 0
+
+
+def test_weflow_xlsx_export_api_flow(
+    test_settings: Settings,
+    source_root: Path,
+) -> None:
+    records = create_weflow_xlsx_export(source_root)
+
+    with TestClient(create_app(test_settings)) as client:
+        discovered = client.post(
+            "/api/weflow/exports/discover",
+            json={"records_path": str(records), "keyword": "", "limit": 100},
+        )
+        assert discovered.status_code == 200
+        catalog = discovered.json()["data"]
+        assert catalog["api_required"] is False
+        assert catalog["existing_sessions"] == 1
+
+        inspected = client.post(
+            "/api/weflow/exports/inspect",
+            json={
+                "records_path": str(records),
+                "session_ids": ["wxid_api_customer"],
+            },
+        )
+        assert inspected.status_code == 200
+        inspection = inspected.json()["data"]
+        assert inspection["total_messages"] == 2
+
+        imported = client.post(
+            "/api/weflow/exports/import",
+            json={
+                "records_path": str(records),
+                "session_ids": ["wxid_api_customer"],
+                "inspection_token": inspection["inspection_token"],
+                "privacy": "restricted",
+            },
+        )
+        assert imported.status_code == 200
+        assert imported.json()["data"]["result"]["imported"] == 2
+        customers = client.get("/api/customers").json()["data"]
+        assert customers[0]["display_name"] == "API 测试客户"
 
 
 def test_weflow_customer_api_end_to_end(

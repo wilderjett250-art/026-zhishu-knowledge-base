@@ -26,9 +26,9 @@ from pkas.schemas import (
     PersonaCandidateRequest,
     ReviewRequest,
     SearchRequest,
-    WeFlowConnectionRequest,
-    WeFlowSessionsRequest,
-    WeFlowSyncRequest,
+    WeFlowExportDiscoverRequest,
+    WeFlowExportImportRequest,
+    WeFlowExportInspectRequest,
 )
 from pkas.system import KnowledgeSystem
 
@@ -313,49 +313,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         items = system_from(request).repository.audit_events(limit)
         return success(f"已读取 {len(items)} 条审计记录", items)
 
-    @app.post("/api/weflow/health", response_model=Envelope)
-    def weflow_health(payload: WeFlowConnectionRequest, request: Request) -> Envelope:
+    @app.post("/api/weflow/exports/discover", response_model=Envelope)
+    def discover_weflow_exports(
+        payload: WeFlowExportDiscoverRequest,
+        request: Request,
+    ) -> Envelope:
         try:
-            result = system_from(request).weflow.check_connection(
-                base_url=payload.base_url,
-                access_token=payload.access_token.get_secret_value(),
-            )
-        except (OSError, ValueError, RuntimeError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return success("WeFlow 本地 API 连接正常，Token 未被保存", result)
-
-    @app.post("/api/weflow/sessions", response_model=Envelope)
-    def weflow_sessions(payload: WeFlowSessionsRequest, request: Request) -> Envelope:
-        try:
-            items = system_from(request).weflow.list_sessions(
-                base_url=payload.base_url,
-                access_token=payload.access_token.get_secret_value(),
+            result = system_from(request).weflow.discover_exports(
+                records_path=payload.records_path,
                 keyword=payload.keyword,
                 limit=payload.limit,
             )
-        except (OSError, ValueError, RuntimeError) as exc:
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return success(f"已读取 {len(items)} 个 WeFlow 会话，尚未同步聊天内容", items)
+        return success(
+            f"发现 {result['existing_sessions']} 个有现存 XLSX 的 WeFlow 会话",
+            result,
+            next_actions=["勾选需要进入知识库的客户会话，再执行只读结构检查"],
+        )
 
-    @app.post("/api/weflow/sync", response_model=Envelope)
-    def weflow_sync(payload: WeFlowSyncRequest, request: Request) -> Envelope:
-        result = system_from(request).customer_workflows.sync_weflow(
-            base_url=payload.base_url,
-            access_token=payload.access_token.get_secret_value(),
+    @app.post("/api/weflow/exports/inspect", response_model=Envelope)
+    def inspect_weflow_exports(
+        payload: WeFlowExportInspectRequest,
+        request: Request,
+    ) -> Envelope:
+        try:
+            result = system_from(request).weflow.inspect_export_selection(
+                records_path=payload.records_path,
+                session_ids=payload.session_ids,
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return success(
+            f"已检查 {result['selected_sessions']} 个 WeFlow XLSX，会话内容尚未导入",
+            result,
+            next_actions=["核对会话、消息数量和 restricted 范围后确认导入"],
+        )
+
+    @app.post("/api/weflow/exports/import", response_model=Envelope)
+    def import_weflow_exports(
+        payload: WeFlowExportImportRequest,
+        request: Request,
+    ) -> Envelope:
+        result = system_from(request).customer_workflows.import_weflow_exports(
+            records_path=payload.records_path,
             session_ids=payload.session_ids,
-            incremental=payload.incremental,
+            inspection_token=payload.inspection_token,
             privacy=payload.privacy,
-            max_messages_per_session=payload.max_messages_per_session,
         )
         if result["status"] == "failed":
             return warning(
-                "WeFlow 客户会话同步未完成",
+                "WeFlow XLSX 客户会话导入未完成",
                 result,
                 next_actions=[result["error"]["safe_retry"]],
             )
-        sync = result["sync"]
+        imported = result["result"]["imported"]
         return success(
-            f"已同步 {len(sync['sessions'])} 个客户会话，新增 {sync['imported']} 条消息",
+            f"已从 WeFlow XLSX 导入 {imported} 条客户消息",
             result,
             artifacts=result["artifacts"],
         )

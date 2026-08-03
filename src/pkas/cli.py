@@ -108,63 +108,59 @@ def stats() -> None:
     print_json(KnowledgeSystem.create().repository.stats())
 
 
-@app.command("weflow-check")
-def weflow_check(
-    access_token: Annotated[
-        str,
-        typer.Option(prompt="WeFlow Access Token", hide_input=True),
-    ],
-    base_url: Annotated[
-        str,
-        typer.Option(help="WeFlow 本地 API 地址"),
-    ] = "http://127.0.0.1:5031",
+@app.command("weflow-exports")
+def weflow_exports(
+    records_path: Annotated[
+        Path | None,
+        typer.Option(help="weflow-export-records.json 绝对路径；默认自动定位"),
+    ] = None,
+    keyword: Annotated[str, typer.Option(help="客户名称或 wxid 过滤词")] = "",
 ) -> None:
-    """检查 WeFlow 本地 API；Access Token 不会保存。"""
-    result = KnowledgeSystem.create().weflow.check_connection(
-        base_url=base_url,
-        access_token=access_token,
+    """只读列出 WeFlow 已导出的 XLSX，不需要 API 或密钥。"""
+    result = KnowledgeSystem.create().weflow.discover_exports(
+        records_path=str(records_path) if records_path else None,
+        keyword=keyword,
     )
     print_json(result)
 
 
-@app.command("weflow-sessions")
-def weflow_sessions(
-    access_token: Annotated[
-        str,
-        typer.Option(prompt="WeFlow Access Token", hide_input=True),
-    ],
-    base_url: Annotated[str, typer.Option(help="WeFlow 本地 API 地址")] = ("http://127.0.0.1:5031"),
-    keyword: Annotated[str, typer.Option(help="客户名称或 wxid 过滤词")] = "",
+@app.command("weflow-export-inspect")
+def weflow_export_inspect(
+    session_ids: Annotated[list[str], typer.Argument(help="明确选择的导出会话 ID")],
+    records_path: Annotated[
+        Path | None,
+        typer.Option(help="weflow-export-records.json 绝对路径；默认自动定位"),
+    ] = None,
 ) -> None:
-    """只读列出 WeFlow 会话，不同步聊天正文。"""
-    items = KnowledgeSystem.create().weflow.list_sessions(
-        base_url=base_url,
-        access_token=access_token,
-        keyword=keyword,
-    )
-    print_json(items)
-
-
-@app.command("weflow-sync")
-def weflow_sync(
-    session_ids: Annotated[list[str], typer.Argument(help="明确选择的一个或多个会话 ID")],
-    access_token: Annotated[
-        str,
-        typer.Option(prompt="WeFlow Access Token", hide_input=True),
-    ],
-    base_url: Annotated[str, typer.Option(help="WeFlow 本地 API 地址")] = ("http://127.0.0.1:5031"),
-    yes: Annotated[bool, typer.Option("--yes", help="确认同步所列会话")] = False,
-) -> None:
-    """增量同步明确选择的 WeFlow 客户会话。"""
-    if not yes:
-        raise typer.BadParameter("必须添加 --yes 明确确认所列微信会话")
-    result = KnowledgeSystem.create().customer_workflows.sync_weflow(
-        base_url=base_url,
-        access_token=access_token,
+    """检查所选 WeFlow XLSX 的结构和哈希，不导入聊天。"""
+    result = KnowledgeSystem.create().weflow.inspect_export_selection(
+        records_path=str(records_path) if records_path else None,
         session_ids=session_ids,
-        incremental=True,
+    )
+    print_json(result)
+
+
+@app.command("weflow-export-import")
+def weflow_export_import(
+    session_ids: Annotated[list[str], typer.Argument(help="已检查的导出会话 ID")],
+    inspection_token: Annotated[
+        str,
+        typer.Option(help="检查时返回的 64 位令牌"),
+    ],
+    records_path: Annotated[
+        Path | None,
+        typer.Option(help="weflow-export-records.json 绝对路径；默认自动定位"),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="确认导入所列会话")] = False,
+) -> None:
+    """导入已确认的 WeFlow XLSX 客户会话。"""
+    if not yes:
+        raise typer.BadParameter("必须添加 --yes 明确确认所列 WeFlow 导出会话")
+    result = KnowledgeSystem.create().customer_workflows.import_weflow_exports(
+        records_path=str(records_path) if records_path else None,
+        session_ids=session_ids,
+        inspection_token=inspection_token,
         privacy="restricted",
-        max_messages_per_session=50000,
     )
     print_json(result)
 

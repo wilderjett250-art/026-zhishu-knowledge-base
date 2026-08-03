@@ -232,7 +232,7 @@ def save_distillation_candidate(
     )
 
 
-@mcp.tool(description="列出已经由用户从 WeFlow 明确同步进知识库的微信客户会话。")
+@mcp.tool(description="列出已经由用户从 WeFlow 导出文件明确导入知识库的微信客户会话。")
 def list_weflow_customers(limit: int = 100) -> dict[str, Any]:
     items = system().customers.list_customers(max(1, min(limit, 500)))
     return envelope(f"已读取 {len(items)} 个微信客户会话", items)

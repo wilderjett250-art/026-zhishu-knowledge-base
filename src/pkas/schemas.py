@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field
 
 Status = Literal["success", "warning", "error"]
 Domain = Literal["work", "self", "shared", "distill"]
@@ -67,21 +67,20 @@ class DistillationExportRequest(BaseModel):
     dataset_split: Literal["train", "validation", "test"] | None = None
 
 
-class WeFlowConnectionRequest(BaseModel):
-    base_url: str = Field(default="http://127.0.0.1:5031", min_length=8, max_length=200)
-    access_token: SecretStr = Field(min_length=1, max_length=1000)
-
-
-class WeFlowSessionsRequest(WeFlowConnectionRequest):
+class WeFlowExportDiscoverRequest(BaseModel):
+    records_path: str | None = None
     keyword: str = Field(default="", max_length=200)
-    limit: int = Field(default=500, ge=1, le=5000)
+    limit: int = Field(default=500, ge=1, le=1000)
 
 
-class WeFlowSyncRequest(WeFlowConnectionRequest):
+class WeFlowExportInspectRequest(BaseModel):
+    records_path: str | None = None
     session_ids: list[str] = Field(min_length=1, max_length=100)
-    incremental: bool = True
+
+
+class WeFlowExportImportRequest(WeFlowExportInspectRequest):
+    inspection_token: str = Field(min_length=64, max_length=64)
     privacy: Privacy = "restricted"
-    max_messages_per_session: int = Field(default=50000, ge=1, le=500000)
 
 
 class ChatLabInspectRequest(BaseModel):

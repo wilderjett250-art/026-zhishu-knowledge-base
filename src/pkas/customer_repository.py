@@ -433,7 +433,10 @@ class CustomerRepository:
             "type": message_type,
             "content": content,
         }
-        source_hash = hashlib.sha256(_json(identity).encode("utf-8")).hexdigest()
+        dedup_identity = message.get("dedupKey")
+        if not isinstance(dedup_identity, str) or not dedup_identity:
+            dedup_identity = _json(identity)
+        source_hash = hashlib.sha256(dedup_identity.encode("utf-8")).hexdigest()
         exists = connection.execute(
             """
             SELECT id FROM customer_messages
