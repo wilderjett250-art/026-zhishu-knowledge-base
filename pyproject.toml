@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zhishu-knowledge-base"
+version = "0.1.0a1"
+description = "A local-first personal knowledge retrieval framework"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE.md" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zhishu"]
+
