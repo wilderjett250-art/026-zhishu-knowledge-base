@@ -1,8 +1,13 @@
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from mcp.server import MCPServer
+from mcp.types import ToolAnnotations
 
+from pkas.customer_service import CustomerReviewRequired
+from pkas.search_gateway import UnifiedSearchRequest, unified_search
 from pkas.system import KnowledgeSystem
+from pkas.usage_metrics import observe_tool
 
 mcp = MCPServer(
     "personal-knowledge-agent",
@@ -20,9 +25,36 @@ mcp = MCPServer(
         "WeFlow 导出也必须先发现并检查；只有用户明确批准同一批会话后才允许确认导入。"
         "个人画像和蒸馏样本只能创建候选，批准操作由用户在管理台完成。"
         "微信客户聊天默认是 restricted；只有任务明确需要且用户授权时才读取。"
-        "回复客户时只生成草稿，不直接发送微信消息。"
+        "回复客户时只生成草稿，不直接发送微信消息。需要跨资料理解、规划或任务收尾时，"
+        "调用 run_knowledge_agent 或 run_codex_closeout；模型只使用 DeepSeek API，"
+        "本地同步和检索不消耗模型 Token。"
     ),
     version="0.1.0",
+)
+
+READ_ONLY_TOOL = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+ADDITIVE_IDEMPOTENT_TOOL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+ADDITIVE_TOOL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+AI_TOOL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
 
 
@@ -49,25 +81,45 @@ def envelope(
 
 @mcp.tool(
     description=(
-        "检索本地个人知识库，返回带原始文件路径和文档定位的片段。默认不返回 restricted 资料。"
-    )
+        "与EXE共用统一混合检索，返回来源、实际模式、参数和降级提示。"
+        "默认只查文件，不混入Codex任务请求；scopes可显式加入chats（仅全文）。"
+        "默认不返回 restricted 资料；包含受限资料不改变云端处理授权。"
+        "文件按既有配置调用Embedding和重排API。"
+        "助手回答在采集层已排除；include_unverified_claims 仅为旧客户端兼容参数。"
+    ),
+    annotations=READ_ONLY_TOOL,
 )
+@observe_tool
 def search_knowledge(
     query: str,
     domain: str | None = None,
     limit: int = 10,
     include_restricted: bool = False,
+    include_unverified_claims: bool = False,
+    scopes: list[Literal["files", "chats"]] | None = None,
+    rerank_mode: Literal["auto", "never", "always"] = "auto",
+    expand_parent: bool = True,
 ) -> dict[str, Any]:
-    results = system().repository.search(
-        query,
-        domain=domain,
-        limit=max(1, min(limit, 50)),
-        include_restricted=include_restricted,
+    response = unified_search(system(), UnifiedSearchRequest(query=query, domain=domain,
+        limit=max(1, min(limit, 50)), include_restricted=include_restricted,
+        scopes=scopes if scopes is not None else ["files"], rerank_mode=rerank_mode,
+        expand_parent=expand_parent))
+    summary = f"找到 {len(response['results'])} 条带来源的知识片段（{response['mode']}）"
+    result = envelope(
+        summary,
+        response["results"],
+        status="warning" if response["warnings"] else "success",
+        next_actions=response["warnings"],
     )
-    return envelope(f"找到 {len(results)} 条带来源的知识片段", results)
+    result["retrieval"] = response
+    return result
 
 
-@mcp.tool(description="按 document_id 阅读知识库中的原文，可分页读取长文档。")
+@mcp.tool(
+    description="按 document_id 阅读知识库中的原文，可分页读取长文档。",
+    annotations=READ_ONLY_TOOL,
+)
+@observe_tool
 def read_document(
     document_id: str,
     offset: int = 0,
@@ -88,7 +140,10 @@ def read_document(
     return envelope("已读取原文与来源定位", item, artifacts=[item["vault_path"]])
 
 
-@mcp.tool(description="列出最近导入的本地资料来源及其领域、隐私级别和哈希。")
+@mcp.tool(
+    description="列出最近导入的本地资料来源及其领域、隐私级别和哈希。",
+    annotations=READ_ONLY_TOOL,
+)
 def list_sources(limit: int = 50) -> dict[str, Any]:
     items = system().repository.list_sources(max(1, min(limit, 200)))
     return envelope(f"已读取 {len(items)} 个资料来源", items)
@@ -98,7 +153,8 @@ def list_sources(limit: int = 50) -> dict[str, Any]:
     description=(
         "只读检查一个用户明确给出的绝对路径，统计可导入、敏感和不支持文件；"
         "不会复制、解析或索引资料。正式导入前必须先调用本工具。"
-    )
+    ),
+    annotations=READ_ONLY_TOOL,
 )
 def inspect_import_path(path: str, recursive: bool = True) -> dict[str, Any]:
     try:
@@ -121,7 +177,8 @@ def inspect_import_path(path: str, recursive: bool = True) -> dict[str, Any]:
     description=(
         "将明确授权路径中的资料复制到哈希原件库并建立全文索引。"
         "必须先检查范围，并把 confirmed 设为 true；敏感密钥文件仍会跳过。"
-    )
+    ),
+    annotations=ADDITIVE_IDEMPOTENT_TOOL,
 )
 def import_confirmed_path(
     path: str,
@@ -169,7 +226,8 @@ def import_confirmed_path(
     description=(
         "列出已注册的资料源、同步模式、最近扫描时间和索引数量。"
         "catalog 只建立文件目录；index 会抽取受支持正文。"
-    )
+    ),
+    annotations=READ_ONLY_TOOL,
 )
 def list_sync_roots() -> dict[str, Any]:
     items = system().sync.list_roots()
@@ -181,7 +239,8 @@ def list_sync_roots() -> dict[str, Any]:
         "注册一个用户明确指定的本地目录为持续资料源。必须 confirmed=true。"
         "local_files 支持目录盘点或正文索引；codex_sessions 只抽取用户请求与最终回答，"
         "不会收集推理、工具输出或附件二进制。"
-    )
+    ),
+    annotations=ADDITIVE_IDEMPOTENT_TOOL,
 )
 def register_sync_root(
     name: str,
@@ -218,7 +277,8 @@ def register_sync_root(
     description=(
         "扫描一个已经由用户确认注册的持续资料源并增量更新，不需要重复确认。"
         "catalog 模式只保存文件路径、大小和修改时间；index 模式还会抽取正文。"
-    )
+    ),
+    annotations=ADDITIVE_IDEMPOTENT_TOOL,
 )
 def scan_sync_root(root_id: str) -> dict[str, Any]:
     try:
@@ -229,7 +289,11 @@ def scan_sync_root(root_id: str) -> dict[str, Any]:
     return envelope("资料源增量同步完成", result, status=status)
 
 
-@mcp.tool(description="按文件名或相对路径搜索资料目录；catalog 模式下也可定位尚未抽取的现成文件。")
+@mcp.tool(
+    description="按文件名或相对路径搜索资料目录；catalog 模式下也可定位尚未抽取的现成文件。",
+    annotations=READ_ONLY_TOOL,
+)
+@observe_tool
 def search_source_catalog(
     query: str,
     root_id: str | None = None,
@@ -243,7 +307,8 @@ def search_source_catalog(
     description=(
         "只读发现 WeFlow 已完成并仍存在的 XLSX 导出。不会访问数据库密钥、WCDB 或 HTTP API，"
         "也不会导入聊天正文。"
-    )
+    ),
+    annotations=READ_ONLY_TOOL,
 )
 def discover_weflow_exports(
     records_path: str | None = None,
@@ -290,7 +355,8 @@ def _resolve_weflow_selection(
     description=(
         "只读检查明确选择的 WeFlow XLSX，计算哈希、消息数和检查令牌，不导入正文。"
         "all_existing=true 只适用于用户明确要求全部现有导出时。"
-    )
+    ),
+    annotations=READ_ONLY_TOOL,
 )
 def inspect_weflow_exports(
     session_ids: list[str] | None = None,
@@ -334,7 +400,8 @@ def inspect_weflow_exports(
     description=(
         "导入已经检查且由用户明确批准的 WeFlow XLSX，会保存哈希原始快照并建立 restricted 客户索引。"
         "必须传入检查令牌并设置 confirmed=true；部分失败可安全重试。"
-    )
+    ),
+    annotations=ADDITIVE_IDEMPOTENT_TOOL,
 )
 def import_confirmed_weflow_exports(
     inspection_token: str,
@@ -400,7 +467,8 @@ def import_confirmed_weflow_exports(
     description=(
         "为当前任务自动选择工作/自我知识范围并准备带证据的上下文。"
         "本工具负责检索与记录，最终推理和行动由调用它的 Codex 智能体完成。"
-    )
+    ),
+    annotations=ADDITIVE_TOOL,
 )
 def prepare_agent_context(
     task: str,
@@ -419,8 +487,127 @@ def prepare_agent_context(
 
 @mcp.tool(
     description=(
-        "把有证据支持的性格、偏好或习惯保存为待审核候选。不会自动写入已批准的长期个人画像。"
+        "运行 DeepSeek 知识 Agent：先规划查询，再执行本地知识库和资料目录检索，"
+        "最后依据证据整理当前状态与下一步。默认不读取 restricted 资料，"
+        "默认不把结果写成长期知识。"
+    ),
+    annotations=AI_TOOL,
+)
+@observe_tool
+def run_knowledge_agent(
+    task: str,
+    workspace_path: str | None = None,
+    domain: str | None = None,
+    include_restricted: bool = False,
+    persist_result: bool = False,
+    complexity: str = "simple",
+) -> dict[str, Any]:
+    if complexity not in {"simple", "complex"}:
+        return envelope("Agent 复杂度参数无效", {"complexity": complexity}, status="error")
+    result = system().agent.run(
+        task=task,
+        workspace_path=workspace_path,
+        domain=domain,
+        include_restricted=include_restricted,
+        persist_result=persist_result,
+        complexity=complexity,
     )
+    if result["status"] != "completed":
+        return envelope(
+            "DeepSeek 知识 Agent 未完成任务",
+            result,
+            status="warning",
+            next_actions=[result["error"]["safe_retry"]],
+        )
+    return envelope(result["result"]["summary"], result)
+
+
+@mcp.tool(
+    description=(
+        "对已经写入知识库的 Codex 任务执行开发状态收尾：读取任务证据、"
+        "只读检查授权工作区、调用 DeepSeek 整理声明和遗留项，并保存不可直接检索的未审核候选。"
+    ),
+    annotations=AI_TOOL,
+)
+@observe_tool
+def run_codex_closeout(
+    source_id: str,
+    workspace_path: str | None = None,
+) -> dict[str, Any]:
+    result = system().agent.closeout_codex_turn(
+        source_id=source_id,
+        workspace_path=workspace_path,
+    )
+    if result["status"] != "completed":
+        return envelope(
+            "Codex 任务收尾 Agent 未完成",
+            result,
+            status="warning",
+            next_actions=[result["error"]["safe_retry"]],
+        )
+    return envelope("已生成带证据状态的未审核知识候选", result)
+
+
+@mcp.tool(
+    description="查看 LangGraph Agent 运行的当前检查点、待执行节点和是否可恢复。",
+    annotations=READ_ONLY_TOOL,
+)
+def get_agent_graph_status(run_id: str) -> dict[str, Any]:
+    try:
+        result = system().agent.graph_status(run_id)
+    except ValueError as exc:
+        return envelope(str(exc), {"run_id": run_id}, status="error")
+    return envelope("已读取 LangGraph Agent 检查点状态", result)
+
+
+@mcp.tool(
+    description=(
+        "从最后一个成功检查点恢复失败或中断的 LangGraph Agent 运行。"
+        "只继续待执行节点，不重复已经完成的工具步骤。"
+    ),
+    annotations=AI_TOOL,
+)
+def resume_agent_run(run_id: str) -> dict[str, Any]:
+    result = system().agent.resume(run_id)
+    if result["status"] != "completed":
+        return envelope(
+            "LangGraph Agent 尚未恢复完成",
+            result,
+            status="warning",
+            next_actions=[result["error"]["safe_retry"]],
+        )
+    return envelope("LangGraph Agent 已从检查点恢复并完成", result)
+
+
+@mcp.tool(
+    description="查看 Codex 任务结束后等待 DeepSeek 整理的本地 Agent 后台任务。",
+    annotations=READ_ONLY_TOOL,
+)
+def list_agent_jobs(limit: int = 100) -> dict[str, Any]:
+    items = system().repository.list_agent_jobs(max(1, min(limit, 500)))
+    return envelope(f"已读取 {len(items)} 个 Agent 后台任务", items)
+
+
+@mcp.tool(
+    description="查看今日 DeepSeek Agent 的缓存命中、输入、输出和估算费用，不返回密钥。",
+    annotations=READ_ONLY_TOOL,
+)
+def get_agent_token_usage() -> dict[str, Any]:
+    knowledge_system = system()
+    usage = knowledge_system.repository.llm_usage_since(
+        datetime.now(UTC).date().isoformat()
+    )
+    usage["deepseek_configured"] = knowledge_system.settings.deepseek_enabled
+    usage["input_token_budget"] = knowledge_system.settings.agent_daily_input_token_budget
+    usage["output_token_budget"] = knowledge_system.settings.agent_daily_output_token_budget
+    return envelope("已读取今日 DeepSeek Agent Token 使用量", usage)
+
+
+@mcp.tool(
+    description=(
+        "把有证据支持的性格、偏好或习惯保存为待审核候选。不会自动写入已批准的长期个人画像。"
+    ),
+    annotations=ADDITIVE_TOOL,
 )
 def save_persona_candidate(
     observation_type: str,
@@ -444,7 +631,8 @@ def save_persona_candidate(
 
 
 @mcp.tool(
-    description=("把一次高质量问答、决策或表达偏好保存为待审核蒸馏样本。不会自动批准或用于训练。")
+    description=("把一次高质量问答、决策或表达偏好保存为待审核蒸馏样本。不会自动批准或用于训练。"),
+    annotations=ADDITIVE_TOOL,
 )
 def save_distillation_candidate(
     example_type: str,
@@ -475,17 +663,31 @@ def save_distillation_candidate(
     )
 
 
-@mcp.tool(description="列出已经由用户从 WeFlow 导出文件明确导入知识库的微信客户会话。")
-def list_weflow_customers(limit: int = 100) -> dict[str, Any]:
-    items = system().customers.list_customers(max(1, min(limit, 500)))
-    return envelope(f"已读取 {len(items)} 个微信客户会话", items)
+@mcp.tool(
+    description=(
+        "列出已经由用户确认的微信客户会话。默认排除刚导入但尚未归类的普通微信会话；"
+        "只有用户明确要求人工整理待归类会话时才设置 include_candidates=true。"
+    ),
+    annotations=READ_ONLY_TOOL,
+)
+def list_weflow_customers(
+    limit: int = 100,
+    include_candidates: bool = False,
+) -> dict[str, Any]:
+    items = system().customers.list_customers(
+        max(1, min(limit, 500)),
+        review_status=None if include_candidates else "approved",
+    )
+    scope = "微信会话" if include_candidates else "已确认微信客户"
+    return envelope(f"已读取 {len(items)} 个{scope}", items)
 
 
 @mcp.tool(
     description=(
         "读取指定客户的微信时间线。微信聊天默认 restricted，"
         "必须在用户授权当前客户任务后显式设置 include_restricted=true。"
-    )
+    ),
+    annotations=READ_ONLY_TOOL,
 )
 def get_customer_timeline(
     customer_id: str,
@@ -511,23 +713,28 @@ def get_customer_timeline(
 
 @mcp.tool(
     description=(
-        "在 WeFlow 客户聊天中检索需求、承诺、报价、进度或历史沟通。默认不检索 restricted 聊天。"
-    )
+        "在 WeFlow 聊天中检索需求、承诺、报价、进度或历史沟通。"
+        "未指定 customer_id 时默认只检索已确认客户，并且默认不检索 restricted 聊天。"
+    ),
+    annotations=READ_ONLY_TOOL,
 )
+@observe_tool
 def search_customer_messages(
     query: str,
     customer_id: str | None = None,
     limit: int = 20,
     include_restricted: bool = False,
+    include_candidates: bool = False,
 ) -> dict[str, Any]:
     items = system().customers.search_messages(
         query,
         customer_id=customer_id,
         limit=max(1, min(limit, 100)),
         include_restricted=include_restricted,
+        include_candidates=include_candidates,
     )
     return envelope(
-        f"找到 {len(items)} 条客户聊天证据",
+        f"找到 {len(items)} 条微信聊天证据",
         items,
         artifacts=list({item["vault_path"] for item in items if item.get("vault_path")}),
     )
@@ -537,7 +744,8 @@ def search_customer_messages(
     description=(
         "为指定微信客户准备回复上下文：客户档案、近期聊天、历史匹配、"
         "已批准需求/承诺/待办和相关工作知识。只生成上下文和回复草稿依据，不发送消息。"
-    )
+    ),
+    annotations=ADDITIVE_TOOL,
 )
 def prepare_customer_reply_context(
     customer_id: str,
@@ -546,13 +754,21 @@ def prepare_customer_reply_context(
     search_limit: int = 20,
     include_restricted: bool = False,
 ) -> dict[str, Any]:
-    result = system().customer_service.prepare_reply_context(
-        customer_id=customer_id,
-        task=task,
-        recent_limit=max(1, min(recent_limit, 200)),
-        search_limit=max(1, min(search_limit, 100)),
-        include_restricted=include_restricted,
-    )
+    try:
+        result = system().customer_service.prepare_reply_context(
+            customer_id=customer_id,
+            task=task,
+            recent_limit=max(1, min(recent_limit, 200)),
+            search_limit=max(1, min(search_limit, 100)),
+            include_restricted=include_restricted,
+        )
+    except CustomerReviewRequired as exc:
+        return envelope(
+            "微信会话尚未确认为业务客户",
+            {"customer_id": customer_id, "reason": str(exc)},
+            status="warning",
+            next_actions=["请用户在本机管理台核对身份并保存为已确认客户"],
+        )
     if not result:
         return envelope("客户不存在", None, status="error")
     artifacts = {
@@ -568,7 +784,8 @@ def prepare_customer_reply_context(
     description=(
         "把微信聊天中识别出的需求、承诺、待办、风险、决策或跟进事项保存为待审核候选。"
         "不会自动把智能体推断提升为正式客户事实。"
-    )
+    ),
+    annotations=ADDITIVE_TOOL,
 )
 def save_customer_signal_candidate(
     customer_id: str,
@@ -579,6 +796,14 @@ def save_customer_signal_candidate(
     status: str = "open",
     due_at: str | None = None,
 ) -> dict[str, Any]:
+    customer = system().customers.get_customer(customer_id)
+    if customer and customer["review_status"] != "approved":
+        return envelope(
+            "微信会话尚未确认为业务客户，未保存业务信号",
+            {"customer_id": customer_id},
+            status="warning",
+            next_actions=["请用户先在本机管理台核对并确认客户身份"],
+        )
     if signal_type not in {
         "requirement",
         "commitment",

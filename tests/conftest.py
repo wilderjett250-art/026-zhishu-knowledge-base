@@ -13,7 +13,16 @@ def test_settings(tmp_path: Path) -> Settings:
     settings = Settings(
         project_root=project_root,
         data_root=project_root / "data",
+        integration_home=tmp_path / "integration-home",
         allowed_origins=[],
+        deepseek_api_key=None,
+        document_docling_enabled=False,
+        document_paddleocr_enabled=False,
+        document_paddleocr_base_url=None,
+        document_paddleocr_api_key=None,
+        document_allow_remote_processing=False,
+        document_allow_restricted_remote_processing=False,
+        thread_journal_enabled=False,
     )
     settings.ensure_directories()
     return settings

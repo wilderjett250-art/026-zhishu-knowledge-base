@@ -476,7 +476,10 @@ class SyncService:
                         source_id = new_source_id
                         state = "indexed"
                         indexed_at = scan_time
-                        counts["indexed" if imported["status"] == "imported" else "duplicates"] += 1
+                        if imported["status"] in {"imported", "reindexed"}:
+                            counts["indexed"] += 1
+                        else:
+                            counts["duplicates"] += 1
                     except ParseError:
                         state = "skipped"
                         reason = "no_indexable_text"
@@ -640,11 +643,10 @@ class SyncService:
                         pending_user = f"{pending_user}\n{message}".strip()
                 elif event_type == "task_complete":
                     turn_id = str(payload.get("turn_id") or current_turn_id or "")
-                    assistant = self._payload_text(payload.get("last_agent_message"))
                     if not turn_id:
                         seed = f"{path}:{payload.get('completed_at')}:{handle.tell()}"
                         turn_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-                    if (pending_user or assistant) and not is_internal_codex_turn(
+                    if pending_user and not is_internal_codex_turn(
                         user_text=pending_user,
                         cwd=str(cwd) if cwd else None,
                     ):
@@ -652,7 +654,7 @@ class SyncService:
                             thread_id=session_id,
                             turn_id=turn_id,
                             user_text=pending_user,
-                            assistant_text=assistant,
+                            assistant_text="",
                             cwd=str(cwd) if cwd else None,
                             thread_name=str(thread_name) if thread_name else None,
                             started_at=(

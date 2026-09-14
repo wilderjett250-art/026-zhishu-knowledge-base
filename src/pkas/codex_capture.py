@@ -15,6 +15,13 @@ _AMBIENT_PROMPT_MARKER = (
     "you are an expert at upholding safety and compliance standards "
     "for codex ambient suggestions"
 )
+_TITLE_PROMPT_MARKER = (
+    "you are a helpful assistant. you will be presented with a user prompt, "
+    "and your job is to provide a short title for a task"
+)
+_ACTIVITY_UPDATE_PROMPT_MARKER = (
+    "you write the one-line activity update displayed beneath an existing codex task title"
+)
 
 _SECRET_PATTERNS = (
     (
@@ -66,11 +73,25 @@ def redact_secrets(text: str) -> tuple[str, int]:
 
 
 def is_internal_codex_turn(*, user_text: str, cwd: str | None) -> bool:
-    """Identify hidden Codex desktop ambient-suggestion runs, not user tasks."""
+    """Identify hidden Codex desktop maintenance runs, not user tasks."""
     normalized_cwd = (cwd or "").replace("/", "\\").lower()
-    return (
-        _AMBIENT_PROMPT_MARKER in user_text[:2_000].lower()
+    normalized_prompt = user_text[:2_000].lower()
+    # Do not feed generated summaries back through chat-history sync as new evidence.
+    summary_worker = (
+        "\\summary-jobs\\" in normalized_cwd
+        and normalized_cwd.endswith("\\agent-work")
+        and ("pkas_summary_agent_v1" in normalized_prompt
+             or "你是用户私人知识库的文件整理助手" in normalized_prompt)
+    )
+    ambient = (
+        _AMBIENT_PROMPT_MARKER in normalized_prompt
         and "\\windowsapps\\openai.codex_" in normalized_cwd
+    )
+    return (
+        ambient
+        or summary_worker
+        or _TITLE_PROMPT_MARKER in normalized_prompt
+        or _ACTIVITY_UPDATE_PROMPT_MARKER in normalized_prompt
     )
 
 
@@ -114,10 +135,12 @@ def build_codex_turn(
     capture_mode: str = "notify",
 ) -> dict[str, Any]:
     bounded_user, user_truncated = _bounded(user_text)
-    bounded_assistant, assistant_truncated = _bounded(assistant_text)
     safe_user, user_redactions = redact_secrets(bounded_user)
-    safe_assistant, assistant_redactions = redact_secrets(bounded_assistant)
     safe_cwd, cwd_redactions = redact_secrets(cwd or "")
+
+    # The assistant response is deliberately accepted only for call-site compatibility.
+    # It must never be normalized, persisted, chunked, or indexed as knowledge.
+    _ = assistant_text
 
     first_line = next((line.strip() for line in safe_user.splitlines() if line.strip()), "")
     title = (thread_name or first_line or f"Codex 任务 {turn_id}").strip()[:120]
@@ -140,10 +163,6 @@ def build_codex_turn(
         "## 用户请求",
         "",
         safe_user or "（本轮没有可索引的文字请求）",
-        "",
-        "## Codex 最终回答",
-        "",
-        safe_assistant or "（本轮没有可索引的最终回答）",
     ]
     return {
         "title": title,
@@ -158,9 +177,11 @@ def build_codex_turn(
             "started_at": started_at,
             "completed_at": completed_at,
             "capture_mode": capture_mode,
-            "redaction_count": user_redactions + assistant_redactions + cwd_redactions,
+            "record_kind": "user_task",
+            "assistant_output_indexed": False,
+            "evidence_basis": "user_request_only",
+            "redaction_count": user_redactions + cwd_redactions,
             "user_truncated": user_truncated,
-            "assistant_truncated": assistant_truncated,
         },
     }
 
@@ -181,8 +202,8 @@ def capture_notification(
         payload.get("last-assistant-message") or payload.get("last_assistant_message")
     )
     cwd = _text_from_value(payload.get("cwd"))
-    if not user_text.strip() and not assistant_text.strip():
-        return {"status": "ignored", "reason": "empty_turn"}
+    if not user_text.strip():
+        return {"status": "ignored", "reason": "no_user_request"}
     if is_internal_codex_turn(user_text=user_text, cwd=cwd):
         return {"status": "ignored", "reason": "internal_codex_turn"}
 
@@ -195,7 +216,7 @@ def capture_notification(
         capture_mode="notify",
     )
     service = ingestion or IngestionService(settings=settings)
-    return service.import_text(
+    result = service.import_text(
         text=turn["text"],
         title=turn["title"],
         original_uri=turn["original_uri"],
@@ -206,6 +227,7 @@ def capture_notification(
         event_time=turn["event_time"],
         source_created_at=turn["event_time"],
     )
+    return result
 
 
 def _run_delegate(executable: str | None, arguments: list[str], raw_payload: str) -> None:

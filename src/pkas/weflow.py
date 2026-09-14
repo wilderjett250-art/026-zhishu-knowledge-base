@@ -213,11 +213,72 @@ class WeFlowService:
         catalog_path, payload = self._load_export_records(records_path)
         selected = self._select_exports(payload, session_ids)
         records_hash = _file_hash(catalog_path)
+        prepared: list[dict[str, Any]] = []
+        for selection_order, (session_id, record, source) in enumerate(selected):
+            layout = self._inspect_xlsx_layout(source)
+            prepared.append(
+                {
+                    "session_id": session_id,
+                    "record": record,
+                    "source": source,
+                    "layout": layout,
+                    "content_hash": _file_hash(source),
+                    "selection_order": selection_order,
+                }
+            )
+
+        by_content_hash: dict[str, list[dict[str, Any]]] = {}
+        for item in prepared:
+            by_content_hash.setdefault(item["content_hash"], []).append(item)
+
+        canonical: list[dict[str, Any]] = []
+        skipped_aliases: list[dict[str, str]] = []
+        for duplicate_group in by_content_hash.values():
+            metadata_ids = {
+                item["layout"]["metadata_session_id"]
+                for item in duplicate_group
+                if item["layout"]["metadata_session_id"]
+            }
+            if len(metadata_ids) > 1:
+                raise WeFlowFormatError("内容相同的 WeFlow XLSX 包含不一致的会话元数据。")
+            metadata_session_id = next(iter(metadata_ids), "")
+            if len(duplicate_group) == 1:
+                item = duplicate_group[0]
+                if metadata_session_id and metadata_session_id != item["session_id"]:
+                    raise WeFlowFormatError(
+                        "WeFlow 导出记录中的会话 ID 与 XLSX 元数据不一致，"
+                        "且未找到可核对的规范会话。"
+                    )
+                canonical.append(item)
+                continue
+
+            matches = [
+                item for item in duplicate_group if item["session_id"] == metadata_session_id
+            ]
+            if len(matches) != 1:
+                raise WeFlowFormatError(
+                    "同一 WeFlow XLSX 被多个会话记录引用，但无法从 XLSX 元数据确定唯一规范会话。"
+                )
+            canonical_item = matches[0]
+            canonical.append(canonical_item)
+            skipped_aliases.extend(
+                {
+                    "alias_session_id": item["session_id"],
+                    "canonical_session_id": canonical_item["session_id"],
+                }
+                for item in duplicate_group
+                if item is not canonical_item
+            )
+
+        canonical.sort(key=lambda item: item["selection_order"])
         inspected: list[dict[str, Any]] = []
         token_items: list[dict[str, str]] = []
-        for session_id, record, source in selected:
-            layout = self._inspect_xlsx_layout(source)
-            content_hash = _file_hash(source)
+        for prepared_item in canonical:
+            session_id = prepared_item["session_id"]
+            record = prepared_item["record"]
+            source = prepared_item["source"]
+            layout = prepared_item["layout"]
+            content_hash = prepared_item["content_hash"]
             display_name = layout["display_name"] or source.stem
             inspected.append(
                 {
@@ -256,7 +317,11 @@ class WeFlowService:
         ).hexdigest()
         return {
             "records_path": str(catalog_path),
+            "requested_sessions": len(list(dict.fromkeys(session_ids))),
             "selected_sessions": len(inspected),
+            "skipped_alias_sessions": len(skipped_aliases),
+            "skipped_aliases": skipped_aliases,
+            "canonical_session_ids": [item["session_id"] for item in inspected],
             "total_messages": sum(item["message_count"] for item in inspected),
             "total_bytes": sum(item["byte_size"] for item in inspected),
             "items": inspected,
@@ -310,6 +375,7 @@ class WeFlowService:
         return {
             "connector_id": connector_id,
             "sessions": results,
+            "skipped_alias_sessions": inspection["skipped_alias_sessions"],
             "failed_sessions": len(session_errors),
             "session_errors": session_errors,
             "imported": sum(item["imported"] for item in results),

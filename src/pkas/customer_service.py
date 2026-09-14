@@ -4,6 +4,10 @@ from pkas.customer_repository import CustomerRepository
 from pkas.repository import Repository
 
 
+class CustomerReviewRequired(ValueError):
+    """Raised when an unreviewed WeChat conversation enters a customer workflow."""
+
+
 class CustomerService:
     def __init__(
         self,
@@ -26,6 +30,10 @@ class CustomerService:
         customer = self.customers.get_customer(customer_id)
         if not customer:
             return None
+        if customer["review_status"] != "approved":
+            raise CustomerReviewRequired(
+                "该微信会话尚未由用户确认为业务客户，不能准备客户回复上下文。"
+            )
         recent_messages = self.customers.timeline(
             customer_id,
             limit=recent_limit,

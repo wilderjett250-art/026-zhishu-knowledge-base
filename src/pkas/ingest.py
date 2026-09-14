@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from pkas.config import Settings, get_settings
-from pkas.parsers import SUPPORTED_EXTENSIONS, ParsedDocument, ParseError, parse_file
+from pkas.parsers import SUPPORTED_EXTENSIONS, ParsedBlock, ParsedDocument, ParseError, parse_file
 from pkas.repository import Repository
 
 SKIP_DIRECTORIES = {
@@ -72,7 +72,15 @@ def is_sensitive_path(path: Path) -> bool:
     return path.suffix.lower() in SENSITIVE_SUFFIXES
 
 
-def chunk_text(text: str, max_chars: int = 1800, overlap: int = 180) -> list[dict[str, Any]]:
+CHUNKER_VERSION = "typed-v2"
+CODE_EXTENSIONS = {
+    ".bat", ".c", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js",
+    ".jsx", ".kt", ".ps1", ".py", ".rs", ".scss", ".sh", ".sql", ".svelte",
+    ".swift", ".ts", ".tsx", ".vue",
+}
+
+
+def chunk_text(text: str, max_chars: int = 900, overlap: int = 90) -> list[dict[str, Any]]:
     clean = text.replace("\x00", "").strip()
     if not clean:
         return []
@@ -88,6 +96,9 @@ def chunk_text(text: str, max_chars: int = 1800, overlap: int = 180) -> list[dic
                 "sequence": len(chunks),
                 "text": content.strip(),
                 "locator": f"paragraph:{start}-{end}",
+                "block_sequences": [],
+                "chunk_kind": "normalized-text",
+                "chunker_version": CHUNKER_VERSION,
             }
         )
 
@@ -119,6 +130,137 @@ def chunk_text(text: str, max_chars: int = 1800, overlap: int = 180) -> list[dic
 
     if buffer:
         append_chunk(buffer, start_paragraph, len(paragraphs) - 1)
+    return chunks
+
+
+def chunk_document(
+    parsed: ParsedDocument,
+    max_chars: int | None = None,
+    overlap: int | None = None,
+) -> list[dict[str, Any]]:
+    if not parsed.blocks:
+        return chunk_text(
+            parsed.text,
+            max_chars=max_chars or 900,
+            overlap=90 if overlap is None else overlap,
+        )
+
+    kinds = [block.kind for block in parsed.blocks]
+    extension = str(parsed.metadata.get("source_extension") or "").lower()
+    table_count = sum(kind in {"table", "table-row"} for kind in kinds)
+    message_count = sum(kind == "message" for kind in kinds)
+    if message_count >= max(1, len(kinds) // 2):
+        profile = "message-window"
+        target = max_chars or 1200
+        max_units = 30
+    elif table_count >= max(1, len(kinds) // 2):
+        profile = "table-rows"
+        target = max_chars or 1400
+        max_units = 20
+    elif extension in CODE_EXTENSIONS:
+        profile = "code"
+        target = max_chars or 1600
+        max_units = 120
+    else:
+        profile = "document-section"
+        target = max_chars or 900
+        max_units = 80
+    resolved_overlap = min(target // 4, 90 if overlap is None else max(0, overlap))
+
+    chunks: list[dict[str, Any]] = []
+    buffer: list[tuple[int, ParsedBlock]] = []
+    buffer_chars = 0
+
+    def append(content: str, locator: str, sequences: list[int]) -> None:
+        chunks.append(
+            {
+                "sequence": len(chunks),
+                "text": content.strip(),
+                "locator": locator,
+                "block_sequences": list(dict.fromkeys(sequences)),
+                "chunk_kind": profile,
+                "chunker_version": CHUNKER_VERSION,
+            }
+        )
+
+    def flush() -> None:
+        nonlocal buffer, buffer_chars
+        if not buffer:
+            return
+        content = "\n\n".join(block.text.strip() for _, block in buffer if block.text.strip())
+        if len(buffer) == 1:
+            locator = buffer[0][1].locator
+        else:
+            locator = f"{buffer[0][1].locator}..{buffer[-1][1].locator}"
+        append(content, locator, [sequence for sequence, _ in buffer])
+        buffer = []
+        buffer_chars = 0
+
+    table_header: tuple[int, ParsedBlock] | None = None
+    current_table_id: str | None = None
+    section_heading: tuple[int, ParsedBlock] | None = None
+    for block_sequence, block in enumerate(parsed.blocks):
+        text = block.text.replace("\x00", "").strip()
+        if not text:
+            continue
+        if block.kind == "heading":
+            flush()
+            section_heading = (block_sequence, block)
+            table_header = None
+            current_table_id = None
+            buffer.append((block_sequence, block))
+            buffer_chars = len(text)
+            continue
+        if profile == "table-rows" and block.kind in {"table", "table-row"}:
+            derived_table_id = (
+                block.locator.rsplit("/row:", 1)[0]
+                if "/row:" in block.locator
+                else block.locator.split(":", 1)[0]
+            )
+            table_id = str(
+                block.metadata.get("table_id")
+                or derived_table_id
+            )
+            if current_table_id is not None and table_id != current_table_id:
+                flush()
+                table_header = None
+            current_table_id = table_id
+            if table_header is None or bool(block.metadata.get("is_header")):
+                table_header = (block_sequence, block)
+            if not buffer and section_heading:
+                buffer.append(section_heading)
+                buffer_chars += len(section_heading[1].text)
+            if not buffer and table_header[0] != block_sequence:
+                buffer.append(table_header)
+                buffer_chars += len(table_header[1].text)
+        if len(text) > target:
+            flush()
+            step = max(1, target - resolved_overlap)
+            for offset in range(0, len(text), step):
+                segment = text[offset : offset + target]
+                append(
+                    segment,
+                    f"{block.locator}/chars:{offset}-{offset + len(segment)}",
+                    [block_sequence],
+                )
+                if offset + target >= len(text):
+                    break
+            continue
+
+        candidate_chars = buffer_chars + len(text) + (2 if buffer else 0)
+        if buffer and (candidate_chars > target or len(buffer) >= max_units):
+            flush()
+            if profile == "table-rows":
+                if section_heading:
+                    buffer.append(section_heading)
+                    buffer_chars += len(section_heading[1].text)
+                if table_header and table_header[0] != block_sequence:
+                    buffer.append(table_header)
+                    buffer_chars += len(table_header[1].text)
+        buffer.append((block_sequence, block))
+        buffer_chars += len(text) + (2 if len(buffer) > 1 else 0)
+
+    flush()
     return chunks
 
 
@@ -249,10 +391,12 @@ class IngestionService:
                 errors.append({"path": str(path), "error": str(exc)})
 
         imported = sum(1 for item in results if item["status"] == "imported")
+        reindexed = sum(1 for item in results if item["status"] == "reindexed")
         duplicates = sum(1 for item in results if item["status"] == "duplicate")
         return {
             "target": str(target),
             "imported": imported,
+            "reindexed": reindexed,
             "duplicates": duplicates,
             "skipped": len(skipped),
             "errors": len(errors),
@@ -271,6 +415,30 @@ class IngestionService:
         content_hash = sha256_file(resolved)
         existing = self.repository.source_by_hash(content_hash)
         if existing:
+            if (
+                existing.get("parser_name") != "normalized-text"
+                and existing.get("parser_version") != "hybrid-v1"
+            ):
+                parsed = parse_file(
+                    resolved,
+                    settings=self.settings,
+                    privacy=str(existing.get("privacy") or privacy),
+                )
+                chunks = chunk_document(parsed)
+                if not chunks:
+                    raise ParseError("文件中没有可索引文字。")
+                stored = self.repository.replace_document(
+                    source_id=existing["id"],
+                    parsed=parsed,
+                    chunks=chunks,
+                )
+                return {
+                    "status": "reindexed",
+                    "path": str(resolved),
+                    "content_hash": content_hash,
+                    "vault_path": existing["vault_path"],
+                    **stored,
+                }
             return {
                 "status": "duplicate",
                 "path": str(resolved),
@@ -278,8 +446,8 @@ class IngestionService:
                 "content_hash": content_hash,
             }
 
-        parsed = parse_file(resolved)
-        chunks = chunk_text(parsed.text)
+        parsed = parse_file(resolved, settings=self.settings, privacy=privacy)
+        chunks = chunk_document(parsed)
         if not chunks:
             raise ParseError("文件中没有可索引文字。")
 
@@ -316,6 +484,58 @@ class IngestionService:
             **stored,
         }
 
+    def reindex_outdated(self, *, limit: int = 10_000) -> dict[str, Any]:
+        candidates = self.repository.sources_for_reindex(
+            "hybrid-v1", CHUNKER_VERSION, limit=limit
+        )
+        reindexed = 0
+        skipped = 0
+        errors: dict[str, int] = {}
+        for item in candidates:
+            path = Path(item["vault_path"])
+            if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                skipped += 1
+                continue
+            try:
+                with self.repository.database.connect() as connection:
+                    source = connection.execute(
+                        "SELECT content_hash FROM sources WHERE id=?", (item["id"],)
+                    ).fetchone()
+                if not source or sha256_file(path) != source["content_hash"]:
+                    skipped += 1
+                    continue
+                parsed = parse_file(
+                    path,
+                    settings=self.settings,
+                    privacy=str(item["privacy"]),
+                )
+                parsed.title = Path(str(item["original_name"])).stem or parsed.title
+                if sha256_file(path) != source["content_hash"]:
+                    skipped += 1
+                    continue
+                chunks = chunk_document(parsed)
+                if not chunks:
+                    raise ParseError("文件中没有可索引文字。")
+                self.repository.replace_document(
+                    source_id=item["id"],
+                    parsed=parsed,
+                    chunks=chunks,
+                )
+                reindexed += 1
+            except (OSError, ParseError, ValueError) as exc:
+                error_name = type(exc).__name__
+                errors[error_name] = errors.get(error_name, 0) + 1
+        return {
+            "status": "completed" if not errors else "warning",
+            "candidates": len(candidates),
+            "reindexed": reindexed,
+            "skipped": skipped,
+            "errors": sum(errors.values()),
+            "error_types": errors,
+            "parser_version": "hybrid-v1",
+            "chunker_version": CHUNKER_VERSION,
+        }
+
     def import_text(
         self,
         *,
@@ -333,6 +553,16 @@ class IngestionService:
         clean = text.replace("\x00", "").strip()
         if not clean:
             raise ParseError("文本中没有可索引内容。")
+        if source_type == "codex-turn":
+            codex_metadata = metadata or {}
+            if (
+                codex_metadata.get("record_kind") != "user_task"
+                or codex_metadata.get("assistant_output_indexed") is not False
+                or "## Codex 最终回答" in clean
+            ):
+                raise ImportBoundaryError(
+                    "Codex 任务记录只能写入用户请求；助手回答不得进入知识库。"
+                )
         existing_uri = self.repository.source_by_uri(original_uri)
         if existing_uri:
             return {

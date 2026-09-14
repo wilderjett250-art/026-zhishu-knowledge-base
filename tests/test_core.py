@@ -43,6 +43,87 @@ def test_import_search_deduplicate_and_provenance(
     assert Path(results[0]["vault_path"]).is_file()
 
 
+def test_exact_source_name_is_ranked_before_mentions(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    target = source_root / "DEG_project_inventory.md"
+    target.write_text("项目台账正文", encoding="utf-8")
+    mention = source_root / "conversation.md"
+    mention.write_text("请导入 DEG_project_inventory.md", encoding="utf-8")
+    imported = knowledge_system.ingestion.import_file(
+        target,
+        domain="work",
+        privacy="private",
+    )
+    knowledge_system.ingestion.import_file(
+        mention,
+        domain="work",
+        privacy="private",
+    )
+
+    results = knowledge_system.repository.search("DEG_project_inventory.md", domain="work")
+
+    assert results[0]["source_id"] == imported["source_id"]
+    assert results[0]["match_strategy"] == "exact_source_name"
+
+
+def test_dashboard_and_source_list_use_document_title_for_uuid_files(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    source = source_root / "019da6a1-1e8c-7393-86eb-353e074224d3.md"
+    source.write_text("# Unity 动作来源排查\n正文可读取。", encoding="utf-8")
+    knowledge_system.ingestion.import_file(source, domain="work", privacy="private")
+    with knowledge_system.database.connect() as connection:
+        connection.execute(
+            "UPDATE sources SET source_type='thread-summary' WHERE original_name=?",
+            (source.name,),
+        )
+        connection.execute(
+            "UPDATE documents SET title='Unity 动作来源排查' WHERE source_id=("
+            "SELECT id FROM sources WHERE original_name=? LIMIT 1)",
+            (source.name,),
+        )
+        connection.commit()
+
+    recent = knowledge_system.repository.stats()["recent_sources"][0]
+    listed = knowledge_system.repository.list_sources(status="indexed")[0]
+
+    assert recent["title"] == "Unity 动作来源排查"
+    assert recent["document_id"].startswith("doc_")
+    assert listed["title"] == "Unity 动作来源排查"
+    assert listed["document_id"] == recent["document_id"]
+    assert listed["original_name"] == source.name
+
+
+def test_natural_language_search_broadens_locally_without_losing_provenance(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    note = source_root / "project-status.md"
+    note.write_text(
+        "PKAS 当前已经完成 Codex 历史增量同步，下一步是接入 DeepSeek Agent。",
+        encoding="utf-8",
+    )
+    knowledge_system.workflows.run_import(
+        path=str(note),
+        recursive=False,
+        domain="work",
+        privacy="private",
+    )
+
+    results = knowledge_system.repository.search(
+        "请核对知识库当前 Codex 历史增量同步和 DeepSeek Agent 接入进度",
+        domain="work",
+    )
+
+    assert len(results) == 1
+    assert results[0]["original_uri"] == str(note.resolve())
+    assert results[0]["match_strategy"] == "broad_local"
+    assert results[0]["document_id"].startswith("doc_")
+
+
 def test_restricted_content_requires_explicit_search(
     knowledge_system: KnowledgeSystem,
     source_root: Path,
@@ -143,3 +224,57 @@ def test_persona_and_distillation_require_review(
     record = json.loads(output.read_text(encoding="utf-8").strip())
     assert record["messages"][0]["role"] == "user"
     assert record["messages"][1]["content"] == "目标环境完成真实验收后。"
+
+
+def test_project_knowledge_candidate_requires_approval_before_search(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    note = source_root / "agent-evidence.md"
+    note.write_text("项目已经完成本地全文检索验证。", encoding="utf-8")
+    imported = knowledge_system.workflows.run_import(
+        path=str(note),
+        recursive=False,
+        domain="work",
+        privacy="private",
+    )
+    source_id = imported["result"]["items"][0]["source_id"]
+
+    first = knowledge_system.repository.create_knowledge_candidate(
+        domain="work",
+        knowledge_type="project_state",
+        title="PKAS 当前开发状态",
+        content="已经完成全文检索，DeepSeek Agent 尚待接入。",
+        confidence="high",
+        privacy="private",
+        evidence_ids=[source_id],
+    )
+    results = knowledge_system.repository.search("PKAS 当前开发状态", domain="work")
+    assert all(result["document_id"] != first["id"] for result in results)
+    with knowledge_system.database.connect() as connection:
+        connection.execute(
+            "UPDATE knowledge_items SET review_status = 'approved' WHERE id = ?",
+            (first["id"],),
+        )
+        connection.commit()
+    approved = knowledge_system.repository.search("PKAS 当前开发状态", domain="work")
+    item = next(result for result in approved if result["document_id"] == first["id"])
+    assert item["match_strategy"] == "knowledge_item"
+    assert item["evidence_ids"] == [source_id]
+    document = knowledge_system.repository.read_document(first["id"])
+    assert document is not None
+    assert "DeepSeek Agent" in document["text"]
+
+    second = knowledge_system.repository.create_knowledge_candidate(
+        domain="work",
+        knowledge_type="project_state",
+        title="PKAS 当前开发状态",
+        content="全文检索和 DeepSeek Agent 均已接入。",
+        confidence="high",
+        privacy="private",
+        evidence_ids=[source_id],
+    )
+    assert second["supersedes"] == first["id"]
+    active = knowledge_system.repository.search("PKAS 当前开发状态", domain="work")
+    assert all(result["document_id"] != second["id"] for result in active)
+    assert all(result["document_id"] != first["id"] for result in active)

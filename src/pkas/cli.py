@@ -1,5 +1,7 @@
 import json
 import webbrowser
+from dataclasses import asdict
+from getpass import getpass
 from pathlib import Path
 from typing import Annotated
 
@@ -7,6 +9,7 @@ import typer
 import uvicorn
 
 from pkas.config import get_settings
+from pkas.local_secrets import save_user_secret
 from pkas.system import KnowledgeSystem
 
 app = typer.Typer(
@@ -25,6 +28,23 @@ def init() -> None:
     """初始化本地数据库和私有数据目录。"""
     system = KnowledgeSystem.create()
     print_json({"status": "success", "health": system.database.health()})
+
+
+@app.command("configure-embedding")
+def configure_embedding() -> None:
+    """在当前 Windows 用户下用 DPAPI 保存 Embedding 密钥，不写入源码或 .env。"""
+    settings = get_settings()
+    value = getpass("Paste the SiliconFlow API key (input is hidden): ").strip()
+    if len(value) < 20:
+        raise typer.BadParameter("API key is empty or too short")
+    path = save_user_secret(settings, "embedding_api_key", value)
+    print_json(
+        {
+            "status": "success",
+            "summary": "Embedding API key encrypted for the current Windows user.",
+            "secret_path": str(path),
+        }
+    )
 
 
 @app.command()
@@ -93,12 +113,12 @@ def search(
     """检索带原始来源定位的知识片段。"""
     system = KnowledgeSystem.create()
     print_json(
-        system.repository.search(
+        asdict(system.retrieval.search(
             query,
             domain=domain,
             limit=limit,
             include_restricted=include_restricted,
-        )
+        ))
     )
 
 
@@ -106,6 +126,17 @@ def search(
 def stats() -> None:
     """查看资料、工作流、智能体和蒸馏数据概览。"""
     print_json(KnowledgeSystem.create().repository.stats())
+
+
+@app.command("reindex-outdated")
+def reindex_outdated(
+    limit: Annotated[int, typer.Option(help="单次最多重建的旧版文档数量")] = 10_000,
+    yes: Annotated[bool, typer.Option("--yes", help="确认重建派生索引")] = False,
+) -> None:
+    """使用当前解析器重建旧版派生文本和全文索引，不修改来源原件。"""
+    if not yes:
+        raise typer.BadParameter("必须添加 --yes 明确确认重建派生索引")
+    print_json(KnowledgeSystem.create().ingestion.reindex_outdated(limit=limit))
 
 
 @app.command("weflow-exports")

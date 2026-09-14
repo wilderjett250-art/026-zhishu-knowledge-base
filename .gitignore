@@ -16,6 +16,7 @@ data/self/
 data/distill/
 data/index/
 data/runs/
+data/secrets/
 
 # Databases, indexes, caches, and logs
 *.db
@@ -33,6 +34,9 @@ __pycache__/
 node_modules/
 dist/
 build/
+target/
+runtime/
+desktop/src-tauri/gen/
 *.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts

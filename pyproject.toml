@@ -11,6 +11,10 @@ requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12,<5",
   "fastapi>=0.115,<1",
+  "httpx[socks]>=0.28,<1",
+  "langchain-core>=1.5,<2",
+  "langgraph>=1.2,<2",
+  "langgraph-checkpoint-sqlite>=3.1,<4",
   "lxml>=5,<7",
   "mcp[cli]>=2,<3",
   "openpyxl>=3.1,<4",
@@ -19,11 +23,16 @@ dependencies = [
   "pymupdf>=1.25,<2",
   "python-docx>=1.1,<2",
   "python-multipart>=0.0.20,<1",
+  "qdrant-client>=1.15,<2",
+  "tomlkit>=0.13,<1",
   "typer>=0.15,<1",
   "uvicorn[standard]>=0.34,<1",
 ]
 
 [project.optional-dependencies]
+document-ai = [
+  "docling>=2,<3",
+]
 dev = [
   "httpx>=0.28,<1",
   "pytest>=8,<9",
@@ -37,6 +46,11 @@ pkas = "pkas.cli:app"
 pkas-mcp = "pkas.mcp_server:main"
 pkas-codex-notify = "pkas.codex_capture:main"
 pkas-sync-worker = "pkas.sync_worker:main"
+pkas-scheduled-sync-worker = "pkas.scheduled_sync_worker:main"
+pkas-agent-worker = "pkas.agent_worker:main"
+pkas-extraction-eval = "pkas.extraction_eval:main"
+pkas-vector-sync = "pkas.vector_worker:main"
+pkas-core-worker = "pkas.core_worker:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pkas"]
@@ -56,3 +70,5 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 include = ["src", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

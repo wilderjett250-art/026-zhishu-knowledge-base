@@ -42,7 +42,10 @@ class CustomerWorkflowService:
             self.repository.finish_workflow_step(
                 inspect_step,
                 status="completed",
-                summary=f"已核对 {inspection['selected_sessions']} 个 WeFlow XLSX",
+                summary=(
+                    f"已核对 {inspection['selected_sessions']} 个唯一 WeFlow XLSX，"
+                    f"跳过 {inspection['skipped_alias_sessions']} 条重复别名"
+                ),
             )
 
             import_step = self.repository.add_workflow_step(
@@ -67,7 +70,8 @@ class CustomerWorkflowService:
                 import_step,
                 status=final_status,
                 summary=(
-                    f"导入 {len(result['sessions'])} 个会话，新增 {result['imported']} 条消息，"
+                    f"导入 {len(result['sessions'])} 个待归类微信会话，"
+                    f"新增 {result['imported']} 条消息，"
                     f"识别 {result['duplicates']} 条重复消息，失败 {failed_sessions} 个会话"
                 ),
                 artifacts=result["snapshot_paths"],

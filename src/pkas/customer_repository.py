@@ -533,10 +533,19 @@ class CustomerRepository:
             )
             connection.commit()
 
-    def list_customers(self, limit: int = 200) -> list[dict[str, Any]]:
+    def list_customers(
+        self,
+        limit: int = 200,
+        *,
+        review_status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if review_status not in {None, "candidate", "approved"}:
+            raise ValueError("微信会话审核状态无效。")
+        where = "WHERE c.review_status = ?" if review_status else ""
+        params: tuple[Any, ...] = (review_status, limit) if review_status else (limit,)
         with self.database.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT c.*,
                        COALESCE(cv.message_count, 0) AS message_count,
                        cv.id AS conversation_id,
@@ -547,10 +556,11 @@ class CustomerRepository:
                           AND s.status = 'open') AS open_signals
                 FROM customers c
                 LEFT JOIN customer_conversations cv ON cv.customer_id = c.id
+                {where}
                 ORDER BY c.last_message_at DESC, c.updated_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
         return [self._decode_customer(dict(row)) for row in rows]
 
@@ -677,6 +687,7 @@ class CustomerRepository:
         customer_id: str | None = None,
         limit: int = 20,
         include_restricted: bool = False,
+        include_candidates: bool = False,
     ) -> list[dict[str, Any]]:
         query = query.strip()
         if not query:
@@ -686,6 +697,8 @@ class CustomerRepository:
         if customer_id:
             clauses.append("c.id = ?")
             params.append(customer_id)
+        elif not include_candidates:
+            clauses.append("c.review_status = 'approved'")
         if not include_restricted:
             clauses.append("m.privacy <> 'restricted'")
         extra = "".join(f" AND {clause}" for clause in clauses)
@@ -715,13 +728,18 @@ class CustomerRepository:
         except sqlite3.OperationalError:
             rows = []
         if rows:
-            return [dict(row) for row in rows]
+            with self.database.connect() as connection:
+                return self._attach_message_context(
+                    connection, [dict(row) for row in rows], include_restricted
+                )
 
         clauses = ["m.content LIKE ?"]
         fallback_params: list[Any] = [f"%{query}%"]
         if customer_id:
             clauses.append("c.id = ?")
             fallback_params.append(customer_id)
+        elif not include_candidates:
+            clauses.append("c.review_status = 'approved'")
         if not include_restricted:
             clauses.append("m.privacy <> 'restricted'")
         fallback_params.append(limit)
@@ -744,7 +762,55 @@ class CustomerRepository:
                 """,
                 fallback_params,
             ).fetchall()
-        return [dict(row) for row in rows]
+            return self._attach_message_context(
+                connection, [dict(row) for row in rows], include_restricted
+            )
+
+    @staticmethod
+    def _attach_message_context(
+        connection: sqlite3.Connection,
+        matches: list[dict[str, Any]],
+        include_restricted: bool,
+        radius: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Attach bounded adjacent messages so a keyword hit is not an isolated sentence."""
+        privacy = "" if include_restricted else "AND privacy<>'restricted'"
+        fields = (
+            "id AS message_id,snapshot_id,sender_name,is_self,sent_at,"
+            "message_type,content,privacy"
+        )
+        for match in matches:
+            params = (match["conversation_id"], match["sent_at"], match["sent_at"],
+                      match["message_id"], radius)
+            before = connection.execute(
+                f"""SELECT {fields} FROM customer_messages
+                WHERE conversation_id=? {privacy}
+                  AND (sent_at<? OR (sent_at=? AND id<?))
+                ORDER BY sent_at DESC,id DESC LIMIT ?""",
+                params,
+            ).fetchall()
+            after = connection.execute(
+                f"""SELECT {fields} FROM customer_messages
+                WHERE conversation_id=? {privacy}
+                  AND (sent_at>? OR (sent_at=? AND id>?))
+                ORDER BY sent_at ASC,id ASC LIMIT ?""",
+                params,
+            ).fetchall()
+            current = connection.execute(
+                f"SELECT {fields} FROM customer_messages WHERE id=? {privacy}",
+                (match["message_id"],),
+            ).fetchone()
+            context = [dict(row) for row in reversed(before)]
+            if current:
+                context.append(dict(current))
+            context.extend(dict(row) for row in after)
+            for item in context:
+                item["content"] = str(item["content"])[:1000]
+                item["is_match"] = item["message_id"] == match["message_id"]
+            match["context_messages"] = context
+            match["context_count"] = len(context)
+            match["context_window"] = "adjacent-3-v1"
+        return matches
 
     def create_signal(
         self,
@@ -757,7 +823,8 @@ class CustomerRepository:
         evidence_message_ids: list[str],
         confidence: str,
     ) -> dict[str, Any] | None:
-        if not self.get_customer(customer_id):
+        customer = self.get_customer(customer_id)
+        if not customer or customer["review_status"] != "approved":
             return None
         signal_id = new_id("sig")
         now = utc_now()
