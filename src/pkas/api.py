@@ -49,9 +49,21 @@ from pkas.document_policy import (
 from pkas.everything_scanner import status as everything_status
 from pkas.foundation import FoundationService, suggested_scopes
 from pkas.ingest import ImportBoundaryError
-from pkas.intake import IntakeBrowseRequest, IntakePolicy, IntakeRequest, IntakeService
+from pkas.intake import (
+    DEFAULT_RULES,
+    IntakeBrowseRequest,
+    IntakePolicy,
+    IntakeRequest,
+    IntakeService,
+)
 from pkas.machine_catalog import MachineCatalogStart
 from pkas.mcp_inspector import McpInspectorConflict, McpInspectorError, McpInspectorService
+from pkas.processing_profiles import (
+    ProcessingProfileUpdate,
+    list_processing_profiles,
+    load_processing_profile,
+    save_processing_profile,
+)
 from pkas.profile_service import ProfileConflict, ProfileError, ProfileNotFound
 from pkas.runtime_manager import RuntimeManager
 from pkas.schemas import (
@@ -840,9 +852,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (ValueError, OSError) as exc:
             raise HTTPException(409, '当前任务不可修改方案，请重新完成范围预览') from exc
 
+    @app.get("/api/foundation/processing-profiles", response_model=Envelope)
+    def processing_profiles(request: Request) -> Envelope:
+        return success(
+            "已读取四种资料处理方案",
+            list_processing_profiles(system_from(request).settings),
+        )
+
+    @app.put("/api/foundation/processing-profile", response_model=Envelope)
+    def processing_profile_update(
+        payload: ProcessingProfileUpdate, request: Request
+    ) -> Envelope:
+        try:
+            data = save_processing_profile(system_from(request).settings, payload)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return success("资料处理方案已保存；不会自动开始扫描", data)
+
     @app.post("/api/foundation/intake/preview", response_model=Envelope)
     def intake_preview(payload: IntakeRequest, request: Request) -> Envelope:
         try:
+            # The browser sends explicit rules after the profile chooser is
+            # loaded. Older clients omit them; use the saved local profile
+            # instead of silently reverting to the hard-coded defaults.
+            if payload.rules == DEFAULT_RULES:
+                current = load_processing_profile(system_from(request).settings)
+                payload = payload.model_copy(update={"rules": current["rules"]})
             data = request.app.state.intake.preview(payload)
             return success("已开始有界目录预览，尚未入库", data)
         except (ValueError, OSError) as exc:
