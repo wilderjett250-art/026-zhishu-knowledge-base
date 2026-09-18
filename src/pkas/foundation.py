@@ -6,10 +6,13 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
 import time
+from collections import Counter
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar, cast
 
 from pkas.ingest import SKIP_DIRECTORIES
 
@@ -83,6 +86,14 @@ def processing_state(state: str, reason: str | None) -> tuple[str, str]:
 
 
 class FoundationService:
+    # The file manager is a read-only projection of the same SQLite snapshot.
+    # Keep its expensive aggregate in-process only while the database/catalog
+    # files are unchanged, so pagination and drive switching do not rebuild it.
+    _included_snapshot_cache: ClassVar[
+        dict[str, tuple[tuple[tuple[str, int, int], ...], dict]]
+    ] = {}
+    _included_snapshot_lock: ClassVar[threading.Lock] = threading.Lock()
+
     def __init__(self, db_path: Path, machine_catalog_path: Path | None = None):
         self.db_path = db_path
         self.machine_catalog_path = machine_catalog_path
@@ -145,16 +156,18 @@ class FoundationService:
                 {"type": row[0], "count": int(row[1])}
                 for row in c.execute(
                     "SELECT source_type,count(*) FROM sources "
-                    "WHERE status='indexed' AND source_type<>'codex-turn' "
+                    "WHERE status='indexed' "
+                    "AND source_type NOT IN ('codex-turn','thread-summary','thread-journal') "
                     "GROUP BY source_type ORDER BY count(*) DESC"
                 )
             ]
             trend_rows = {
                 row[0]: int(row[1])
                 for row in c.execute(
-                    "SELECT substr(ingested_at,1,10),count(*) FROM sources "
-                    "WHERE status='indexed' AND source_type<>'codex-turn' "
-                    "AND substr(ingested_at,1,10)>=? GROUP BY 1",
+                    "SELECT date(ingested_at,'localtime'),count(*) FROM sources "
+                    "WHERE status='indexed' "
+                    "AND source_type NOT IN ('codex-turn','thread-summary','thread-journal') "
+                    "AND date(ingested_at,'localtime')>=? GROUP BY 1",
                     (first_day.isoformat(),),
                 )
             }
@@ -176,7 +189,8 @@ class FoundationService:
                     FROM sources s
                     LEFT JOIN chunks c ON c.source_id=s.id
                     LEFT JOIN vector_index_state v ON v.chunk_id=c.id
-                    WHERE s.status='indexed' AND s.source_type<>'codex-turn'
+                    WHERE s.status='indexed'
+                      AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
                     GROUP BY s.id
                 )"""
             ).fetchone()
@@ -184,6 +198,16 @@ class FoundationService:
                 c.execute(
                     "SELECT count(*) FROM sources WHERE status='indexed' "
                     "AND source_type NOT IN ('codex-turn','thread-summary','thread-journal')"
+                ).fetchone()[0]
+            )
+            source_aliases = int(
+                c.execute(
+                    """
+                    SELECT count(*) FROM source_aliases a
+                    JOIN sources s ON s.id=a.source_id
+                    WHERE s.status='indexed'
+                      AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
+                    """
                 ).fetchone()[0]
             )
             derived_summaries = int(
@@ -204,6 +228,8 @@ class FoundationService:
             "searchable_documents": int(depth[0]),
             "vectorized_documents": int(depth[1]),
             "original_documents": original_documents,
+            "source_aliases": source_aliases,
+            "represented_original_paths": original_documents + source_aliases,
             "derived_summaries": derived_summaries,
             "searchable_chunks": int(depth[2]),
             "vector_chunks": int(depth[3]),
@@ -246,6 +272,49 @@ class FoundationService:
         finally:
             connection.close()
 
+    def _included_snapshot_fingerprint(self) -> tuple[tuple[str, int, int], ...]:
+        paths = [self.db_path, self.db_path.with_name(f"{self.db_path.name}-wal")]
+        if self.machine_catalog_path:
+            paths.extend(
+                [
+                    self.machine_catalog_path,
+                    self.machine_catalog_path.with_name(
+                        f"{self.machine_catalog_path.name}-wal"
+                    ),
+                ]
+            )
+        fingerprint: list[tuple[str, int, int]] = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                fingerprint.append((str(path.resolve()), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                fingerprint.append((str(path), 0, 0))
+        return tuple(fingerprint)
+
+    def _included_snapshot(self) -> dict:
+        key = str(self.db_path.resolve())
+        fingerprint = self._included_snapshot_fingerprint()
+        with self._included_snapshot_lock:
+            cached = self._included_snapshot_cache.get(key)
+            if cached and cached[0] == fingerprint:
+                return cached[1]
+
+        snapshot = self._included_files_uncached(
+            drive="ALL",
+            limit=10_000_000,
+            offset=0,
+        )
+        # SQLite may create or advance a WAL file while opening the first
+        # read transaction. Cache the post-build fingerprint, otherwise the
+        # next identical page request would rebuild once for no data change.
+        fingerprint = self._included_snapshot_fingerprint()
+        with self._included_snapshot_lock:
+            if len(self._included_snapshot_cache) >= 4:
+                self._included_snapshot_cache.clear()
+            self._included_snapshot_cache[key] = (fingerprint, snapshot)
+        return snapshot
+
     def included_files(
         self,
         *,
@@ -254,6 +323,39 @@ class FoundationService:
         offset: int = 0,
     ) -> dict:
         """Show exactly which sources are represented by the searchable knowledge base."""
+        snapshot = self._included_snapshot()
+        selected_drive = (drive or "ALL").upper()
+        all_items = cast(list[dict], snapshot["items"])
+        filtered = (
+            all_items
+            if selected_drive == "ALL"
+            else [item for item in all_items if item["drive"] == selected_drive]
+        )
+        level_counts = Counter(str(item["level"]) for item in filtered)
+        canonical_level_counts = Counter(
+            str(item["level"]) for item in filtered if not item["is_alias"]
+        )
+        return {
+            **snapshot,
+            "checked_at": datetime.now(UTC).isoformat(),
+            "selected_drive": selected_drive,
+            "items": filtered[offset : offset + limit],
+            "total": len(filtered),
+            "level_counts": dict(level_counts),
+            "canonical_level_counts": dict(canonical_level_counts),
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + limit < len(filtered),
+        }
+
+    def _included_files_uncached(
+        self,
+        *,
+        drive: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """Build one complete file-manager snapshot from the current SQLite state."""
         with self.connect() as c:
             rows = c.execute(
                 """
@@ -269,6 +371,16 @@ class FoundationService:
                 ORDER BY s.original_uri COLLATE NOCASE
                 """
             ).fetchall()
+            aliases = c.execute(
+                """
+                SELECT a.original_uri,a.original_name,a.vault_path,a.source_type,a.byte_size,
+                       a.last_seen_at,a.source_id
+                FROM source_aliases a
+                JOIN sources s ON s.id=a.source_id
+                WHERE s.status='indexed' AND s.source_type<>'codex-turn'
+                ORDER BY a.original_uri COLLATE NOCASE
+                """
+            ).fetchall()
             customer_messages = int(
                 c.execute("SELECT count(*) FROM customer_messages").fetchone()[0]
             )
@@ -276,13 +388,39 @@ class FoundationService:
         catalog_counts = self._catalog_counts()
         items = []
         disk_totals: dict[str, dict[str, int]] = {}
+        canonical = {str(row["id"]): dict(row) for row in rows}
+        representations: list[dict] = []
         for row in rows:
+            item = dict(row)
+            item["row_id"] = f"source:{item['id']}"
+            item["is_alias"] = False
+            item["canonical_source_type"] = item["source_type"]
+            representations.append(item)
+        for alias in aliases:
+            item = dict(alias)
+            source = canonical.get(str(item["source_id"]))
+            if source is None:
+                continue
+            item.update(
+                {
+                    "id": source["id"],
+                    "row_id": f"alias:{item['original_uri']}",
+                    "ingested_at": source["ingested_at"],
+                    "chunks": source["chunks"],
+                    "vectors": source["vectors"],
+                    "is_alias": True,
+                    "canonical_source_type": source["source_type"],
+                }
+            )
+            representations.append(item)
+        representations.sort(key=lambda item: str(item["original_uri"]).casefold())
+        for row in representations:
             item = dict(row)
             source_path = str(item["original_uri"] or "")
             key = self._drive_key(source_path)
             chunks = int(item["chunks"] or 0)
             vectors = int(item["vectors"] or 0)
-            if item["source_type"] in {"thread-summary", "thread-journal"}:
+            if item["canonical_source_type"] in {"thread-summary", "thread-journal"}:
                 level = "summary"
             elif chunks and vectors == chunks:
                 level = "semantic"
@@ -294,7 +432,8 @@ class FoundationService:
                 str(item["vault_path"] or source_path) if key == "DERIVED" else source_path
             )
             normalized = {
-                "id": item["id"],
+                "id": item["row_id"],
+                "source_id": item["id"],
                 "name": item["original_name"],
                 "path": display_path,
                 "source_type": item["source_type"],
@@ -304,12 +443,14 @@ class FoundationService:
                 "vectors": vectors,
                 "level": level,
                 "ingested_at": item["ingested_at"],
+                "is_alias": bool(item["is_alias"]),
             }
             items.append(normalized)
             totals = disk_totals.setdefault(
                 key,
                 {
                     "included_files": 0,
+                    "canonical_files": 0,
                     "included_bytes": 0,
                     "fulltext_files": 0,
                     "semantic_files": 0,
@@ -317,6 +458,8 @@ class FoundationService:
                 },
             )
             totals["included_files"] += 1
+            if not normalized["is_alias"]:
+                totals["canonical_files"] += 1
             totals["included_bytes"] += normalized["byte_size"]
             if level in {"fulltext", "semantic"}:
                 totals["fulltext_files"] += 1
@@ -347,6 +490,7 @@ class FoundationService:
                     "free_bytes": free_bytes,
                     "catalog_files": catalog_files,
                     "included_files": included_files,
+                    "canonical_files": int(totals.get("canonical_files", 0)),
                     "included_bytes": included_bytes,
                     "fulltext_files": int(totals.get("fulltext_files", 0)),
                     "semantic_files": int(totals.get("semantic_files", 0)),
@@ -379,12 +523,20 @@ class FoundationService:
         filtered = items if selected_drive == "ALL" else [
             item for item in items if item["drive"] == selected_drive
         ]
+        level_counts = Counter(str(item["level"]) for item in filtered)
+        canonical_level_counts = Counter(
+            str(item["level"]) for item in filtered if not item["is_alias"]
+        )
         return {
             "checked_at": datetime.now(UTC).isoformat(),
             "selected_drive": selected_drive,
             "disks": disks,
             "items": filtered[offset : offset + limit],
             "total": len(filtered),
+            "canonical_total": len(rows),
+            "alias_total": len(aliases),
+            "level_counts": dict(level_counts),
+            "canonical_level_counts": dict(canonical_level_counts),
             "offset": offset,
             "limit": limit,
             "has_more": offset + limit < len(filtered),
@@ -402,34 +554,63 @@ class FoundationService:
                 "SELECT count(*) FROM sources WHERE status='indexed' AND source_type<>'codex-turn'"
             ).fetchone()[0]
             sources = c.execute(
-                "SELECT id,original_name,original_uri,source_type,metadata_json "
-                "FROM sources WHERE status='indexed' AND source_type<>'codex-turn' "
-                "ORDER BY id LIMIT ? OFFSET ?",
+                "SELECT s.id,s.original_name,s.original_uri,s.source_type,s.metadata_json,"
+                "d.parser_version "
+                "FROM sources s JOIN documents d ON d.source_id=s.id "
+                "WHERE s.status='indexed' AND s.source_type<>'codex-turn' "
+                "ORDER BY s.id LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
-            # A single FTS pass, not one global FTS scan per file.
-            fts_ids = {r[0] for r in c.execute("SELECT chunk_id FROM chunks_fts")}
+            total_chunks = int(c.execute("SELECT count(*) FROM chunks").fetchone()[0])
+            total_fts_rows = int(c.execute("SELECT count(*) FROM chunks_fts").fetchone()[0])
+            # chunks_fts is a virtual table whose rowid is deliberately unrelated
+            # to chunks.rowid.  Fetching every unindexed chunk_id for each ledger
+            # page used to cost a full 190k-row materialization.  The repository
+            # writes chunks and FTS entries in the same transaction, so expose the
+            # fast database-wide count consistency status and keep per-file counts
+            # for chunks/vector records only.
+            fts_consistent = total_chunks == total_fts_rows
+            source_ids = [str(source["id"]) for source in sources]
+            chunks_by_source: dict[str, list[sqlite3.Row]] = {
+                source_id: [] for source_id in source_ids
+            }
+            if source_ids:
+                placeholders = ",".join("?" for _ in source_ids)
+                rows = c.execute(
+                    "SELECT c.id,c.source_id,c.chunker_version,v.chunk_id AS vector_id "
+                    "FROM chunks c LEFT JOIN vector_index_state v ON v.chunk_id=c.id "
+                    f"WHERE c.source_id IN ({placeholders})",
+                    source_ids,
+                ).fetchall()
+                for row in rows:
+                    chunks_by_source[str(row["source_id"])].append(row)
             items = []
             for source in sources:
-                chunks = c.execute(
-                    "SELECT c.id,c.chunker_version,v.chunk_id AS vector_id "
-                    "FROM chunks c LEFT JOIN vector_index_state v ON v.chunk_id=c.id "
-                    "WHERE c.source_id=?",
-                    (source["id"],),
-                ).fetchall()
+                chunks = chunks_by_source[str(source["id"])]
                 n = len(chunks)
-                fulltext = sum(r["id"] in fts_ids for r in chunks)
                 vectors = sum(r["vector_id"] is not None for r in chunks)
                 try:
                     extraction = json.loads(source["metadata_json"]).get("extraction", {})
                     quality = extraction.get("initial_quality", {})
+                    quality_reasons = [
+                        str(reason)
+                        for reason in quality.get("reasons", [])
+                        if isinstance(reason, str)
+                    ][:12]
+                    visual_pages = sorted(
+                        {
+                            int(page)
+                            for page in quality.get("visual_pages", [])
+                            if str(page).isdigit() and int(page) > 0
+                        }
+                    )[:50]
                     attention = bool(
                         extraction.get("warnings")
-                        or quality.get("reasons")
+                        or quality_reasons
                         or extraction.get("block_index_truncated")
                     )
                 except (ValueError, TypeError, AttributeError):
-                    extraction, attention = {}, True
+                    extraction, attention, quality_reasons, visual_pages = {}, True, [], []
                 items.append(
                     {
                         "id": source["id"],
@@ -437,12 +618,20 @@ class FoundationService:
                         "path": source["original_uri"],
                         "type": source["source_type"],
                         "chunks": n,
-                        "fts_chunks": fulltext,
+                        "fts_chunks": n if fts_consistent else None,
                         "vector_chunks": vectors,
-                        "fulltext": "indexed" if n and fulltext == n else "incomplete",
+                        "fulltext": "indexed" if n and fts_consistent else "needs_global_check",
                         "vector": "recorded" if n and vectors == n else "not_fully_recorded",
                         "quality": "attention" if attention else "not_manually_verified",
+                        "quality_reasons": quality_reasons,
+                        "visual_pages": visual_pages,
                         "typed_v2": sum(r["chunker_version"] == "typed-v2" for r in chunks),
+                        "parser_version": source["parser_version"],
+                        "parsing": (
+                            "current"
+                            if source["parser_version"] == "hybrid-v2"
+                            else "legacy_or_unverified"
+                        ),
                     }
                 )
         return {
@@ -450,7 +639,13 @@ class FoundationService:
             "total": total,
             "offset": offset,
             "limit": limit,
-            "note": "全文索引存在不证明提取完整；向量仅核对登记数量，不证明版本新鲜或服务在线。",
+            "note": (
+                "全文索引存在不证明提取完整；当前页按全库切片/FTS 行数一致性显示，"
+                "不再为每次翻页扫描全部 FTS ID。向量仅核对登记数量，不证明服务在线。"
+            ),
+            "fts_consistent": fts_consistent,
+            "total_chunks": total_chunks,
+            "total_fts_rows": total_fts_rows,
         }
 
     def files(self, *, root_id: str, state: str, limit: int = 50, offset: int = 0) -> dict:

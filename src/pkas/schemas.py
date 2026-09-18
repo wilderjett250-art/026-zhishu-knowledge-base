@@ -17,6 +17,11 @@ class Envelope(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+    workspace_path: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="项目专属检索范围；设置后只返回该工作区及其证据来源。",
+    )
     domain: Domain | None = None
     limit: int = Field(default=10, ge=1, le=50)
     include_restricted: bool = False
@@ -136,11 +141,13 @@ class ImportRunRequest(ImportInspectRequest):
 class CatalogSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
     root_id: str | None = None
+    workspace_path: str | None = Field(default=None, max_length=2000)
     limit: int = Field(default=50, ge=1, le=200)
 
 
 class AgentContextRequest(BaseModel):
     task: str = Field(min_length=2, max_length=2000)
+    workspace_path: str | None = Field(default=None, max_length=2000)
     domain: Domain | None = None
     limit: int = Field(default=8, ge=1, le=30)
     include_restricted: bool = False

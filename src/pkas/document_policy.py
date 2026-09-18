@@ -2,16 +2,56 @@
 
 import json
 import os
+import shutil
+from importlib.util import find_spec
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from pydantic import BaseModel, StrictBool
 
 from pkas.config import Settings
+from pkas.parsers import (
+    DOCLING_EXTENSIONS,
+    NATIVE_DOCUMENT_EXTENSIONS,
+    OOXML_PRESENTATION_EXTENSIONS,
+    OOXML_SHEET_EXTENSIONS,
+    OOXML_WORD_EXTENSIONS,
+    VISUAL_EXTENSIONS,
+)
+
+LOCAL_OFFICE_CONVERTER_FORMATS = {".doc", ".ppt", ".xls"}
 
 
 class DocumentPolicyRequest(BaseModel):
     ai_enhancement_enabled: StrictBool
+
+
+def format_capabilities() -> dict:
+    """Expose format boundaries from the real parser registry, not UI copy.
+
+    This is intentionally capability-only: it does not enumerate local files,
+    inspect a document, start a converter or make a network request.
+    """
+    native_groups = (
+        ("办公文档", OOXML_WORD_EXTENSIONS | {".odt", ".rtf", ".pdf"}),
+        ("表格", OOXML_SHEET_EXTENSIONS | {".csv", ".tsv", ".ods"}),
+        ("演示文稿", OOXML_PRESENTATION_EXTENSIONS | {".odp"}),
+        ("邮件与网页数据", {".eml", ".htm", ".html", ".json", ".jsonl"}),
+    )
+    return {
+        "native_groups": [
+            {
+                "label": label,
+                "extensions": sorted(group & NATIVE_DOCUMENT_EXTENSIONS),
+            }
+            for label, group in native_groups
+        ],
+        "visual_review_formats": sorted(VISUAL_EXTENSIONS | {".pdf"}),
+        "local_converter_formats": sorted(LOCAL_OFFICE_CONVERTER_FORMATS),
+        "local_converter_available": shutil.which("soffice") is not None,
+        "optional_converter_formats": sorted(DOCLING_EXTENSIONS - LOCAL_OFFICE_CONVERTER_FORMATS),
+        "optional_converter_available": find_spec("docling") is not None,
+    }
 
 
 def policy_path(settings: Settings) -> Path:
@@ -38,6 +78,7 @@ def document_policy(settings: Settings) -> dict:
         "paddleocr_enabled": enabled and settings.paddleocr_enabled,
         "warning": warning,
         "scope": "document_extraction_only",
+        "format_capabilities": format_capabilities(),
     }
 
 

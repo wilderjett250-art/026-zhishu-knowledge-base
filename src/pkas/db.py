@@ -5,6 +5,8 @@ from pathlib import Path
 
 from pkas.config import Settings, get_settings
 
+CURRENT_SCHEMA_VERSION = 20
+
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_meta (
     key TEXT PRIMARY KEY,
@@ -26,6 +28,21 @@ CREATE TABLE IF NOT EXISTS sources (
     created_at TEXT,
     ingested_at TEXT NOT NULL,
     metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+-- A source keeps the canonical parsed content.  Aliases retain every
+-- original local path that resolves to that same canonical content without
+-- storing a second copy of the document, chunks, or vectors.
+CREATE TABLE IF NOT EXISTS source_aliases (
+    original_uri TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    original_name TEXT NOT NULL,
+    vault_path TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -594,6 +611,7 @@ CREATE TABLE IF NOT EXISTS capability_profile_bindings (
 
 CREATE INDEX IF NOT EXISTS idx_sources_domain ON sources(domain);
 CREATE INDEX IF NOT EXISTS idx_sources_privacy ON sources(privacy);
+CREATE INDEX IF NOT EXISTS idx_source_aliases_source_id ON source_aliases(source_id);
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
@@ -738,6 +756,15 @@ class Database:
                 existing_schema_version = int(row["value"]) if row else 0
             except sqlite3.OperationalError:
                 existing_schema_version = 0
+            # A current database has already completed the expensive schema
+            # creation, column probes and one-time historical cleanup below.
+            # Replaying those writes on every desktop start also made the
+            # lightweight health endpoint compete with a multi-GB FTS database.
+            # A version marker is only written after the migration commits.
+            if existing_schema_version >= CURRENT_SCHEMA_VERSION:
+                self._supersede_internal_codex_records(connection)
+                connection.commit()
+                return
             if existing_schema_version < 15:
                 connection.executescript(
                     """DROP TRIGGER IF EXISTS trg_chunks_vector_insert;
@@ -828,52 +855,10 @@ class Database:
             )
             tokenizer = self._ensure_fts(connection)
             customer_tokenizer = self._ensure_customer_fts(connection)
+            self._supersede_internal_codex_records(connection)
             connection.execute(
-                """
-                UPDATE sources
-                SET status = 'superseded'
-                WHERE source_type = 'codex-turn'
-                  AND status = 'indexed'
-                  AND instr(lower(original_name), 'codex ambient suggestions') > 0
-                  AND instr(
-                      lower(COALESCE(json_extract(metadata_json, '$.cwd'), '')),
-                      '\\windowsapps\\openai.codex_'
-                  ) > 0
-                """
-            )
-            connection.execute(
-                """
-                UPDATE sources
-                SET status = 'superseded'
-                WHERE source_type = 'codex-turn'
-                  AND status = 'indexed'
-                  AND instr(
-                      lower(original_name),
-                      'you are a helpful assistant. you will be presented with a user prompt'
-                  ) > 0
-                  AND instr(lower(original_name), 'short title') > 0
-                """
-            )
-            connection.execute(
-                """
-                UPDATE sources
-                SET status = 'superseded'
-                WHERE source_type = 'codex-turn'
-                  AND status = 'indexed'
-                  AND id IN (
-                      SELECT s.id
-                      FROM sources s
-                      JOIN documents d ON d.source_id = s.id
-                      WHERE instr(
-                          lower(d.text_content),
-                          'you write the one-line activity update displayed beneath '
-                          || 'an existing codex task title'
-                      ) > 0
-                  )
-                """
-            )
-            connection.execute(
-                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', '19')"
+                "INSERT OR REPLACE INTO app_meta(key, value) VALUES('schema_version', ?)",
+                (str(CURRENT_SCHEMA_VERSION),),
             )
             connection.execute(
                 "INSERT OR REPLACE INTO app_meta(key, value) VALUES('fts_tokenizer', ?)",
@@ -884,6 +869,59 @@ class Database:
                 (customer_tokenizer,),
             )
             connection.commit()
+
+    @staticmethod
+    def _supersede_internal_codex_records(connection: sqlite3.Connection) -> None:
+        """Keep known Codex UI/control-plane text out of ordinary retrieval.
+
+        This remains a small, idempotent cleanup on current databases so the
+        startup fast path does not replay the full migration, while newly
+        captured internal records still receive the same safety treatment.
+        """
+        connection.execute(
+            """
+            UPDATE sources
+            SET status = 'superseded'
+            WHERE source_type = 'codex-turn'
+              AND status = 'indexed'
+              AND instr(lower(original_name), 'codex ambient suggestions') > 0
+              AND instr(
+                  lower(COALESCE(json_extract(metadata_json, '$.cwd'), '')),
+                  '\\windowsapps\\openai.codex_'
+              ) > 0
+            """
+        )
+        connection.execute(
+            """
+            UPDATE sources
+            SET status = 'superseded'
+            WHERE source_type = 'codex-turn'
+              AND status = 'indexed'
+              AND instr(
+                  lower(original_name),
+                  'you are a helpful assistant. you will be presented with a user prompt'
+              ) > 0
+              AND instr(lower(original_name), 'short title') > 0
+            """
+        )
+        connection.execute(
+            """
+            UPDATE sources
+            SET status = 'superseded'
+            WHERE source_type = 'codex-turn'
+              AND status = 'indexed'
+              AND id IN (
+                  SELECT s.id
+                  FROM sources s
+                  JOIN documents d ON d.source_id = s.id
+                  WHERE instr(
+                      lower(d.text_content),
+                      'you write the one-line activity update displayed beneath '
+                      || 'an existing codex task title'
+                  ) > 0
+              )
+            """
+        )
 
     @staticmethod
     def _ensure_column(

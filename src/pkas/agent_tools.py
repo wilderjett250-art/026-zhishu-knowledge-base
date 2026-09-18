@@ -11,6 +11,11 @@ from pkas.retrieval import RetrievalService
 
 class SearchKnowledgeInput(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+    workspace_path: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="当前项目工作区；设置后只返回该项目范围内的来源。",
+    )
     domain: str | None = None
     limit: int = Field(default=8, ge=1, le=50)
     include_restricted: bool = False
@@ -19,6 +24,7 @@ class SearchKnowledgeInput(BaseModel):
 class SearchCatalogInput(BaseModel):
     query: str = Field(min_length=1, max_length=500)
     limit: int = Field(default=8, ge=1, le=100)
+    workspace_path: str | None = Field(default=None, max_length=2000)
 
 
 class InspectProjectInput(BaseModel):
@@ -74,6 +80,7 @@ class AgentToolset:
     def _search_knowledge(
         self,
         query: str,
+        workspace_path: str | None = None,
         domain: str | None = None,
         limit: int = 8,
         include_restricted: bool = False,
@@ -82,6 +89,7 @@ class AgentToolset:
         if self.retrieval is not None:
             response = self.retrieval.search(
                 query,
+                workspace_path=workspace_path,
                 domain=domain,
                 limit=limit,
                 include_restricted=include_restricted,
@@ -95,6 +103,7 @@ class AgentToolset:
         else:
             items = self.repository.search(
                 query,
+                workspace_path=workspace_path,
                 domain=domain,
                 limit=limit,
                 include_restricted=include_restricted,
@@ -116,8 +125,17 @@ class AgentToolset:
             "retrieval": retrieval_meta,
         }
 
-    def _search_source_catalog(self, query: str, limit: int = 8) -> dict[str, Any]:
-        items = self.repository.search_source_catalog(query, limit=limit)
+    def _search_source_catalog(
+        self,
+        query: str,
+        limit: int = 8,
+        workspace_path: str | None = None,
+    ) -> dict[str, Any]:
+        items = self.repository.search_source_catalog(
+            query,
+            limit=limit,
+            workspace_path=workspace_path,
+        )
         artifacts = list(
             dict.fromkeys(str(item["source_uri"]) for item in items if item.get("source_uri"))
         )

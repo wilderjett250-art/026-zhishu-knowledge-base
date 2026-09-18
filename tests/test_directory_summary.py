@@ -137,6 +137,60 @@ def test_run_fails_closed_without_explicit_remote_consent(
         )
 
 
+def test_confirmed_run_calls_luna_and_writes_derived_md(
+    test_settings, source_root, monkeypatch
+):
+    file = source_root / "project.md"
+    file.write_text("这是一个采集项目说明", encoding="utf-8")
+    monkeypatch.setattr("pkas.directory_summary.authorize_root", lambda _: source_root.resolve())
+    monkeypatch.setattr("pkas.directory_summary.everything_scan", lambda *args: iter([file]))
+    monkeypatch.setattr("pkas.directory_summary.is_sensitive_path", lambda _: False)
+    monkeypatch.setattr("pkas.directory_summary.linked", lambda _: False)
+    monkeypatch.setattr("pkas.directory_summary.EXCLUDED", set())
+
+    class FakeAgent:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def complete(self, packet):
+            item = packet["items"][0]
+            return {
+                "items": [{
+                    "id": item["id"],
+                    "purpose": "采集项目资料",
+                    "summary": "根据有限文件抽样生成的待复核摘要。",
+                    "topics": ["采集"],
+                    "evidence_id": "file_count",
+                    "uncertainty": "只读取了有限抽样，尚未全文理解。",
+                }]
+            }, "sample-thread"
+
+    monkeypatch.setattr("pkas.directory_summary.CodexAgent", FakeAgent)
+    service = DirectorySummaryService(test_settings)
+    plan = service.preview(DirectorySummaryRequest(path=str(source_root)))
+    result = service.run(
+        plan["id"], DirectorySummaryRunRequest(
+            confirmed=True, allow_remote_processing=True, max_units=10
+        )
+    )
+
+    assert result["state"] == "done"
+    assert result["cloud_called"] is True
+    assert result["derived_md_files_written"] == 1
+    stored = service.read(plan["id"])
+    md = stored["units"][0]["derived_md_path"]
+    assert md.endswith(".md")
+    with open(md, encoding="utf-8") as handle:
+        assert "采集项目资料" in handle.read()
+    assert stored["source_files_written"] == 0
+
+
 def test_api_reports_default_off_and_rejects_unknown_plan(test_settings):
     with TestClient(create_app(test_settings)) as client:
         status = client.get("/api/foundation/directory-summaries")

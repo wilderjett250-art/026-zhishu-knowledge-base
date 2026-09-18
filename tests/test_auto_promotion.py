@@ -1,3 +1,6 @@
+from fastapi.testclient import TestClient
+
+from pkas.api import create_app
 from pkas.auto_promotion import (
     PROMOTION_RESULT_SCHEMA,
     AutoPromotionRequest,
@@ -35,6 +38,24 @@ def _catalog_with_groups(test_settings):
 def test_auto_promotion_schema_required_fields_match_properties():
     item = PROMOTION_RESULT_SCHEMA["properties"]["items"]["items"]
     assert set(item["required"]) == set(item["properties"])
+
+
+def test_latest_auto_promotion_endpoint_does_not_match_dynamic_id_route(test_settings):
+    service = AutoPromotionService(test_settings)
+    service._save(
+        {
+            "id": "a" * 32,
+            "kind": "catalog_auto_promotion",
+            "state": "done",
+            "created_at": "2026-09-14T00:00:00+00:00",
+            "units": [],
+        }
+    )
+    with TestClient(create_app(test_settings)) as client:
+        response = client.get("/api/foundation/auto-promotion/latest")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["id"] == "a" * 32
 
 
 def test_auto_promotion_uses_luna_but_cannot_write_knowledge(test_settings, monkeypatch):
@@ -90,6 +111,7 @@ def test_auto_promotion_uses_luna_but_cannot_write_knowledge(test_settings, monk
     )
 
     assert result["state"] == "done"
+    assert service.latest()["id"] == plan["id"]
     stored = service.read(plan["id"])
     assert stored["source"]["file_reading"] == "none"
     assert stored["remote_called"] is True

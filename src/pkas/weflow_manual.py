@@ -6,6 +6,7 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from pkas.weflow import WeFlowService
 
 STATE_VERSION = 1
 RUNNING_STATUSES = {"queued", "preparing", "exporting", "importing"}
+EXPORT_TOKEN_LIMIT = 1000
 
 
 def _utc_now() -> str:
@@ -40,6 +42,31 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def export_record_token(item: dict[str, Any]) -> str:
+    """Create a stable, non-content fingerprint for one export record."""
+    payload = "\0".join(
+        str(item.get(key) or "")
+        for key in ("session_id", "export_time", "byte_size", "message_count")
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def normalized_export_tokens(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {
+        item
+        for item in value
+        if isinstance(item, str)
+        and len(item) == 64
+        and all(char in "0123456789abcdef" for char in item)
+    }
+
+
+def retained_export_tokens(tokens: set[str]) -> list[str]:
+    return sorted(tokens)[-EXPORT_TOKEN_LIMIT:]
 
 
 class WeFlowManualSyncService:
@@ -75,6 +102,12 @@ class WeFlowManualSyncService:
         records_path = Path(
             str(config.get("records_path") or self.settings.weflow_export_records_path)
         ).expanduser()
+        export_records = self._export_records_status(
+            records_path=records_path,
+            session_ids=set(scope["session_ids"]),
+            export_watermark=int(state.get("export_watermark") or 0),
+            export_tokens=normalized_export_tokens(state.get("export_record_tokens")),
+        )
         return {
             "mode": "manual_only",
             "status": str(state.get("status") or "idle"),
@@ -96,9 +129,71 @@ class WeFlowManualSyncService:
             "latest_message_at": scope["latest_message_at"],
             "last_import_at": scope["last_import_at"],
             "records_available": records_path.is_file(),
+            "export_freshness": export_records["freshness"],
+            "latest_export_at": export_records["latest_export_at"],
+            "usable_export_count": export_records["usable_export_count"],
             "weflow_configured": self._configured_weflow_root(config) is not None,
             "scheduled": False,
             "autostart": False,
+        }
+
+    def _export_records_status(
+        self,
+        *,
+        records_path: Path,
+        session_ids: set[str],
+        export_watermark: int,
+        export_tokens: set[str],
+    ) -> dict[str, Any]:
+        """Return only safe export-record metadata; never reveal sessions or paths."""
+        empty = {
+            "freshness": "records_unavailable",
+            "latest_export_at": None,
+            "usable_export_count": 0,
+        }
+        if not records_path.is_file():
+            return empty
+        if not session_ids:
+            return {**empty, "freshness": "no_sync_scope"}
+        try:
+            catalog = self.weflow.discover_exports(
+                records_path=str(records_path),
+                limit=1000,
+            )
+        except ValueError:
+            return {**empty, "freshness": "records_invalid"}
+
+        relevant = [
+            item
+            for item in catalog["items"]
+            if str(item.get("session_id") or "") in session_ids
+        ]
+        if not relevant:
+            return {**empty, "freshness": "no_usable_export"}
+        latest_export_timestamp = max(
+            (int(item.get("export_time") or 0) for item in relevant),
+            default=0,
+        )
+        freshness = "not_compared"
+        if export_watermark:
+            same_watermark_record_is_new = bool(export_tokens) and any(
+                int(item.get("export_time") or 0) >= export_watermark
+                and export_record_token(item) not in export_tokens
+                for item in relevant
+            )
+            freshness = (
+                "new_export_available"
+                if latest_export_timestamp > export_watermark or same_watermark_record_is_new
+                else "current"
+            )
+        return {
+            "freshness": freshness,
+            "latest_export_at": (
+                datetime.fromtimestamp(latest_export_timestamp, UTC).isoformat()
+                if latest_export_timestamp
+                else None
+            ),
+            "usable_export_count": len(relevant),
         }
 
     def sync_scope(self) -> dict[str, Any]:
@@ -185,6 +280,8 @@ class WeFlowManualSyncService:
             "pkas.weflow_manual_worker",
             "--job-id",
             job_id,
+            "--owner-pid",
+            str(os.getpid()),
             "--weflow-root",
             str(resolved_root),
             "--records-path",

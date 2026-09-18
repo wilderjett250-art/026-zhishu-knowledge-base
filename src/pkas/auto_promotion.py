@@ -134,6 +134,72 @@ class AutoPromotionService:
     def read(self, job_id: str) -> dict:
         return json.loads(self._path(job_id).read_text(encoding="utf-8"))
 
+    def latest(self) -> dict | None:
+        """Return the newest completed plan without creating or running anything.
+
+        The desktop only needs a local read to offer the next file-level batch.
+        Incomplete plans are intentionally not surfaced as a runnable scope:
+        their directory recommendation set is still changing.
+        """
+        if not self.home.exists():
+            return None
+        candidates = []
+        for path in self.home.glob("*.json"):
+            try:
+                plan = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if plan.get("kind") == "catalog_auto_promotion" and plan.get("state") == "done":
+                candidates.append(plan)
+        if not candidates:
+            return None
+        return self._view(max(candidates, key=lambda item: str(item.get("created_at", ""))))
+
+    def inspection_scope(self, job_id: str) -> dict:
+        """Resolve only the Luna-approved "needs inspection" directory identities.
+
+        This is a bridge to the file-level queue, not a file read.  Directory
+        labels alone are deliberately insufficient: the caller gets exact A
+        catalog ``scope_path/top_group`` identities and must still inspect each
+        selected file locally before any classification or promotion.
+        """
+        plan = self.read(job_id)
+        if plan.get("kind") != "catalog_auto_promotion" or plan.get("state") != "done":
+            raise ValueError("自动选择计划尚未完成，不能创建文件级检查队列")
+        overview_id = str(plan.get("source", {}).get("overview_id", ""))
+        overview = self.overviews.read(overview_id)
+        source_units = {str(item["id"]): item for item in overview.get("units", [])}
+        units = []
+        for item in plan.get("units", []):
+            recommendation = item.get("recommendation") or {}
+            if recommendation.get("recommended_mode") != "needs_inspection":
+                continue
+            source = source_units.get(str(item.get("id")))
+            if not source:
+                raise ValueError("自动选择计划与目录概览不一致，请重新生成计划")
+            scope_path = source.get("scope_path")
+            top_group = source.get("top_group")
+            if not isinstance(scope_path, str) or not isinstance(top_group, str):
+                raise ValueError("目录概览缺少A库范围标识，不能安全继续")
+            units.append(
+                {
+                    "id": source["id"],
+                    "scope_path": scope_path,
+                    "top_group": top_group,
+                    "directory": item.get("directory", ""),
+                    "reason": recommendation.get("uncertainty", "目录级证据不足"),
+                }
+            )
+        if not units:
+            raise ValueError("自动选择计划没有需要文件级检查的目录")
+        return {
+            "auto_promotion_id": plan["id"],
+            "overview_id": overview_id,
+            "units": units,
+            "file_reading": "none",
+            "notice": "只返回A库目录身份；创建任务后仍须显式开始才会本地轻读文件。",
+        }
+
     @staticmethod
     def _hard_policy(unit: dict) -> tuple[str, str]:
         """Return the highest recommendation depth allowed by non-AI rules."""

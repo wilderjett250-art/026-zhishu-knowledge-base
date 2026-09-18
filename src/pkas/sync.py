@@ -28,12 +28,15 @@ class SyncService:
         database: Database | None = None,
         repository: Repository | None = None,
         ingestion: IngestionService | None = None,
+        *,
+        initialize: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self.database = database or Database(self.settings)
         self.repository = repository or Repository(self.database)
         self.ingestion = ingestion or IngestionService(self.settings, self.repository)
-        self.database.initialize()
+        if initialize:
+            self.database.initialize()
 
     def _validate_root(self, raw_path: str) -> Path:
         root = Path(raw_path).expanduser()
@@ -168,6 +171,7 @@ class SyncService:
         query: str,
         *,
         root_id: str | None = None,
+        workspace_path: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         clauses = ["i.state <> 'missing'", "i.relative_path LIKE ?"]
@@ -175,6 +179,15 @@ class SyncService:
         if root_id:
             clauses.append("i.root_id = ?")
             params.append(root_id)
+        if workspace_path:
+            try:
+                normalized = str(Path(workspace_path).expanduser().resolve(strict=False))
+            except (OSError, RuntimeError, ValueError):
+                return []
+            normalized = normalized.replace("/", "\\").rstrip("\\").lower()
+            source_uri = "lower(replace(COALESCE(i.source_uri, ''), '/', char(92)))"
+            clauses.append(f"({source_uri} = ? OR {source_uri} LIKE ?)")
+            params.extend([normalized, normalized + "\\%"])
         params.append(max(1, min(limit, 200)))
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -198,10 +211,24 @@ class SyncService:
             raise ValueError("资料源不存在。")
         if not root["enabled"]:
             raise ValueError("资料源已停用。")
-        root_path = self._validate_root(root["root_uri"])
         if root["connector_type"] == "codex_sessions":
-            result = self._scan_codex_sessions(root, root_path)
+            if not self.settings.codex_history_sync_enabled:
+                result = {
+                    "status": "disabled",
+                    "reason": "codex_history_sync_disabled",
+                    "files_seen": 0,
+                    "bytes_read": 0,
+                    "turns_indexed": 0,
+                    "turns_duplicate": 0,
+                    "unchanged": 0,
+                    "errors": 0,
+                    "missing": 0,
+                }
+            else:
+                root_path = self._validate_root(root["root_uri"])
+                result = self._scan_codex_sessions(root, root_path)
         else:
+            root_path = self._validate_root(root["root_uri"])
             result = self._scan_local_files(root, root_path)
         now = utc_now()
         with self.database.connect() as connection:
@@ -677,6 +704,10 @@ class SyncService:
                             event_time=turn["event_time"],
                             source_created_at=turn["event_time"],
                         )
+                        if result.get("source_id"):
+                            self.repository.archive_codex_task_records(
+                                source_ids=[result["source_id"]]
+                            )
                         if result["status"] == "imported":
                             imported_count += 1
                         else:

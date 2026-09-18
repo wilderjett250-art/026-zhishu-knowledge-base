@@ -1,0 +1,14 @@
+.readiness-grid { gap: 18px; }
+.readiness-grid article { padding: 20px; border-radius: 10px; background: #101b24; }
+.readiness-grid article header h3 { font-size: 17px; font-weight: 600; }
+.readiness-grid article header span { font-size: 13px; }
+.readiness-grid article dl { gap: 12px; }
+.readiness-grid article dl div { gap: 12px; }
+.readiness-grid article dt { font-size: 13px; color: #9eafbd; }
+.readiness-grid article dd { font-size: 14px; color: #e0e9ef; }
+.readiness-grid article p, .readiness-grid article footer p,
+.readiness-grid article footer strong { font-size: 13px; line-height: 1.7; }
+.readiness-grid article footer { padding-top: 12px; }
+.readiness-grid article > .quiet-button { margin-top: 12px; padding: 8px 14px; border: 1px solid #395264; border-radius: 6px; font-size: 13px; text-decoration: none; }
+.readiness-grid article > .quiet-button:hover { background: #223846; }
+@media (max-width: 1150px) { .readiness-grid { grid-template-columns: 1fr; } }

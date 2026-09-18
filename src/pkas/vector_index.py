@@ -49,7 +49,7 @@ class VectorSearchResult:
 
 class QdrantVectorIndex:
     provider_name = "qdrant"
-    payload_version = 2
+    payload_version = 3
 
     def __init__(
         self,
@@ -75,17 +75,75 @@ class QdrantVectorIndex:
             from qdrant_client import QdrantClient
         except ImportError:
             raise VectorIndexError("Qdrant 客户端尚未安装。") from None
+        if self.settings.qdrant_mode == "embedded":
+            self.settings.qdrant_storage_path.mkdir(parents=True, exist_ok=True)
+            self._client = QdrantClient(
+                path=str(self.settings.qdrant_storage_path),
+                timeout=self.settings.embedding_timeout_seconds,
+            )
+        else:
+            api_key = (
+                self.settings.qdrant_api_key.get_secret_value()
+                if self.settings.qdrant_api_key
+                else None
+            )
+            self._client = QdrantClient(
+                url=self.settings.qdrant_url,
+                api_key=api_key,
+                timeout=self.settings.embedding_timeout_seconds,
+            )
+        return self._client
+
+    def _get_status_client(self) -> Any:
+        """Use a bounded, uncached client for readiness checks.
+
+        A control-panel refresh must not inherit the long batch embedding timeout
+        when Qdrant is offline. An in-memory/injected test client remains reusable.
+        """
+        if self._client is not None:
+            return self._client
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError:
+            raise VectorIndexError("Qdrant 客户端尚未安装。") from None
+        if self.settings.qdrant_mode == "embedded":
+            self.settings.qdrant_storage_path.mkdir(parents=True, exist_ok=True)
+            return QdrantClient(
+                path=str(self.settings.qdrant_storage_path),
+                timeout=self.settings.embedding_timeout_seconds,
+            )
         api_key = (
             self.settings.qdrant_api_key.get_secret_value()
             if self.settings.qdrant_api_key
             else None
         )
-        self._client = QdrantClient(
+        return QdrantClient(
             url=self.settings.qdrant_url,
             api_key=api_key,
-            timeout=self.settings.embedding_timeout_seconds,
+            timeout=max(0.5, min(2.0, float(self.settings.embedding_timeout_seconds))),
         )
-        return self._client
+
+    def runtime_status(self) -> dict[str, Any]:
+        """Return a fast, read-only Qdrant readiness snapshot without starting it."""
+        if not self.enabled:
+            return {"status": "disabled"}
+        try:
+            client = self._get_status_client()
+            if not self._collection_exists(client):
+                return {"status": "not_indexed"}
+            info = client.get_collection(self.settings.qdrant_collection)
+            vectors = info.config.params.vectors
+            return {
+                "status": "ready",
+                "points": int(info.points_count or 0),
+                "indexed_vectors": int(info.indexed_vectors_count or 0),
+                "dimension": int(getattr(vectors, "size", 0) or 0),
+                "distance": str(getattr(vectors, "distance", "cosine")),
+            }
+        except VectorIndexError as exc:
+            return {"status": "warning", "warning": str(exc)}
+        except Exception:
+            return {"status": "warning", "warning": "Qdrant 状态读取失败。"}
 
     def _collection_exists(self, client: Any) -> bool:
         try:
@@ -119,6 +177,8 @@ class QdrantVectorIndex:
             "domain",
             "privacy",
             "source_type",
+            "chunk_id",
+            "requested_processing_level",
             "document_id",
             "status",
             "embedding_version",
@@ -140,7 +200,12 @@ class QdrantVectorIndex:
                 continue
 
     def _candidates(self) -> list[dict[str, Any]]:
-        clauses = ["s.status = 'indexed'", "s.source_type <> 'codex-turn'"]
+        clauses = [
+            "s.status = 'indexed'",
+            "s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')",
+        ]
+        if self.settings.embedding_scope == "selected_l3":
+            clauses.append("json_extract(s.metadata_json, '$.requested_processing_level') = 'L3'")
         if not self.settings.embedding_allow_restricted_remote_processing:
             clauses.append("c.privacy <> 'restricted'")
         with self.database.connect() as connection:
@@ -148,7 +213,9 @@ class QdrantVectorIndex:
                 f"""
                 SELECT c.id AS chunk_id, c.document_id, c.source_id, c.title,
                        c.text_content, c.locator, c.domain, c.privacy,
-                       s.original_uri, s.vault_path, s.source_type
+                       s.original_uri, s.vault_path, s.source_type,
+                       json_extract(s.metadata_json, '$.requested_processing_level')
+                           AS requested_processing_level
                 FROM chunks c JOIN sources s ON s.id = c.source_id
                 WHERE {' AND '.join(clauses)}
                 ORDER BY c.created_at DESC, c.id
@@ -157,7 +224,12 @@ class QdrantVectorIndex:
         return [dict(row) for row in rows]
 
     def coverage(self) -> dict[str, Any]:
-        clauses = ["s.status = 'indexed'", "s.source_type <> 'codex-turn'"]
+        clauses = [
+            "s.status = 'indexed'",
+            "s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')",
+        ]
+        if self.settings.embedding_scope == "selected_l3":
+            clauses.append("json_extract(s.metadata_json, '$.requested_processing_level') = 'L3'")
         if not self.settings.embedding_allow_restricted_remote_processing:
             clauses.append("c.privacy <> 'restricted'")
         with self.database.connect() as connection:
@@ -170,9 +242,11 @@ class QdrantVectorIndex:
             )
             indexed = int(
                 connection.execute(
-                    """SELECT COUNT(*) AS n FROM vector_index_state
-                    WHERE provider=? AND model=? AND collection_name=?
-                      AND payload_version=?""",
+                    f"""SELECT COUNT(*) AS n FROM vector_index_state v
+                    JOIN chunks c ON c.id=v.chunk_id
+                    JOIN sources s ON s.id=c.source_id
+                    WHERE v.provider=? AND v.model=? AND v.collection_name=?
+                      AND v.payload_version=? AND {' AND '.join(clauses)}""",
                     (
                         self.embedding.provider_name,
                         self.embedding.model_name,
@@ -185,12 +259,51 @@ class QdrantVectorIndex:
             "eligible": eligible,
             "indexed": indexed,
             "pending": max(0, eligible - indexed),
-            "coverage": indexed / eligible if eligible else 1.0,
+            # No eligible L3 material is not the same thing as 100% coverage.
+            # Keep this distinction visible to the control plane and UI.
+            "coverage": indexed / eligible if eligible else None,
         }
 
     def _remove_stale(self, client: Any, candidate_ids: set[str]) -> int:
         if not self._collection_exists(client):
             return 0
+        if self.settings.qdrant_mode == "service":
+            # The HTTP sidecar can delete by payload filter in one server-side
+            # operation.  Scrolling every point is prohibitively slow once the
+            # collection contains historical vectors and also blocks the local
+            # embedded-client path used by isolated tests.
+            from qdrant_client.models import FieldCondition, Filter, MatchAny
+
+            before = int(
+                client.count(
+                    collection_name=self.settings.qdrant_collection,
+                    exact=True,
+                ).count
+            )
+            selector = (
+                Filter(
+                    must_not=[
+                        FieldCondition(
+                            key="chunk_id",
+                            match=MatchAny(any=sorted(candidate_ids)),
+                        )
+                    ]
+                )
+                if candidate_ids
+                else Filter()
+            )
+            client.delete(
+                collection_name=self.settings.qdrant_collection,
+                points_selector=selector,
+                wait=True,
+            )
+            after = int(
+                client.count(
+                    collection_name=self.settings.qdrant_collection,
+                    exact=True,
+                ).count
+            )
+            return max(0, before - after)
         stale_points: list[Any] = []
         offset: Any | None = None
         while True:
@@ -225,6 +338,7 @@ class QdrantVectorIndex:
             "domain": item["domain"],
             "privacy": item["privacy"],
             "source_type": item["source_type"],
+            "requested_processing_level": item.get("requested_processing_level"),
             "status": "indexed",
             "embedding_version": (
                 f"{self.embedding.provider_name}:{self.embedding.model_name}"
@@ -452,6 +566,8 @@ class QdrantVectorIndex:
         domain: str | None,
         limit: int,
         include_restricted: bool,
+        source_type: str | None = None,
+        source_ids: list[str] | None = None,
     ) -> VectorSearchResult:
         if not self.enabled:
             return VectorSearchResult([], "disabled")
@@ -463,12 +579,29 @@ class QdrantVectorIndex:
         except EmbeddingError as exc:
             return VectorSearchResult([], "warning", str(exc))
 
-        from qdrant_client.models import FieldCondition, Filter, MatchValue
+        from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
         conditions = []
         exclusions = []
         if domain:
             conditions.append(FieldCondition(key="domain", match=MatchValue(value=domain)))
+        if source_type:
+            conditions.append(
+                FieldCondition(key="source_type", match=MatchValue(value=source_type))
+            )
+        if source_ids is not None:
+            if not source_ids:
+                return VectorSearchResult([], "scoped_empty")
+            conditions.append(
+                FieldCondition(key="source_id", match=MatchAny(any=sorted(set(source_ids))))
+            )
+        if self.settings.embedding_scope == "selected_l3":
+            # Old collections may still contain points created before the
+            # L3-only policy.  The payload gate prevents those stale points
+            # from re-entering hybrid retrieval before the next reconciliation.
+            conditions.append(
+                FieldCondition(key="requested_processing_level", match=MatchValue(value="L3"))
+            )
         if not include_restricted:
             exclusions.append(
                 FieldCondition(key="privacy", match=MatchValue(value="restricted"))
@@ -483,7 +616,7 @@ class QdrantVectorIndex:
                 collection_name=self.settings.qdrant_collection,
                 query=vector,
                 query_filter=query_filter,
-                limit=max(1, min(limit, 100)),
+                limit=max(1, min(max(limit, limit * 3), 100)),
                 with_payload=True,
             )
         except Exception:
@@ -499,6 +632,8 @@ class QdrantVectorIndex:
                 continue
             privacy = str(item.get("privacy") or "private")
             if not include_restricted and privacy == "restricted":
+                continue
+            if item.get("source_type") in {"thread-summary", "thread-journal"}:
                 continue
             item.pop("ranking_text", None)
             item.update(

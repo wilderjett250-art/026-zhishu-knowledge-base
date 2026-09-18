@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from pkas.config import Settings, get_settings
+from pkas.document_extraction import DOCUMENT_PIPELINE_VERSION
 from pkas.parsers import SUPPORTED_EXTENSIONS, ParsedBlock, ParsedDocument, ParseError, parse_file
 from pkas.repository import Repository
 
@@ -417,7 +418,7 @@ class IngestionService:
         if existing:
             if (
                 existing.get("parser_name") != "normalized-text"
-                and existing.get("parser_version") != "hybrid-v1"
+                and existing.get("parser_version") != DOCUMENT_PIPELINE_VERSION
             ):
                 parsed = parse_file(
                     resolved,
@@ -484,9 +485,19 @@ class IngestionService:
             **stored,
         }
 
-    def reindex_outdated(self, *, limit: int = 10_000) -> dict[str, Any]:
+    def reindex_outdated(
+        self,
+        *,
+        limit: int = 10_000,
+        source_types: set[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
         candidates = self.repository.sources_for_reindex(
-            "hybrid-v1", CHUNKER_VERSION, limit=limit
+            DOCUMENT_PIPELINE_VERSION,
+            CHUNKER_VERSION,
+            limit=limit,
+            source_types=source_types,
+            force=force,
         )
         reindexed = 0
         skipped = 0
@@ -532,8 +543,10 @@ class IngestionService:
             "skipped": skipped,
             "errors": sum(errors.values()),
             "error_types": errors,
-            "parser_version": "hybrid-v1",
+            "parser_version": DOCUMENT_PIPELINE_VERSION,
             "chunker_version": CHUNKER_VERSION,
+            "source_types": sorted(source_types or ()),
+            "forced": force,
         }
 
     def import_text(
@@ -550,11 +563,12 @@ class IngestionService:
         source_created_at: str | None = None,
     ) -> dict[str, Any]:
         """Store normalized text without materializing an intermediate source file."""
+        metadata = metadata or {}
         clean = text.replace("\x00", "").strip()
         if not clean:
             raise ParseError("文本中没有可索引内容。")
         if source_type == "codex-turn":
-            codex_metadata = metadata or {}
+            codex_metadata = metadata
             if (
                 codex_metadata.get("record_kind") != "user_task"
                 or codex_metadata.get("assistant_output_indexed") is not False
@@ -580,11 +594,30 @@ class IngestionService:
         content_hash = hashlib.sha256(raw).hexdigest()
         existing_hash = self.repository.source_by_hash(content_hash)
         if existing_hash:
+            alias = None
+            original_path = str(metadata.get("original_path") or "").strip()
+            if original_path:
+                alias = self.repository.register_source_alias(
+                    source_id=existing_hash["id"],
+                    original_uri=original_path,
+                    original_name=Path(original_path).name or title.strip() or "未命名资料",
+                    vault_path=original_path,
+                    source_type=str(metadata.get("original_source_type") or source_type),
+                    byte_size=int(
+                        metadata.get("original_byte_size") or existing_hash["byte_size"]
+                    ),
+                    metadata={
+                        "original_hash": metadata.get("original_hash"),
+                        "processing_level": metadata.get("requested_processing_level", "L1"),
+                        "derived_kind": metadata.get("derived_kind"),
+                    },
+                )
             return {
                 "status": "duplicate",
                 "source_id": existing_hash["id"],
                 "content_hash": content_hash,
                 "original_uri": original_uri,
+                "alias": alias,
             }
 
         chunks = chunk_text(clean)
@@ -600,7 +633,7 @@ class IngestionService:
             parser_name="normalized-text",
             mime_type="text/markdown",
             event_time=event_time,
-            metadata=metadata or {},
+            metadata=metadata,
         )
         stored = self.repository.add_document(
             original_uri=original_uri,

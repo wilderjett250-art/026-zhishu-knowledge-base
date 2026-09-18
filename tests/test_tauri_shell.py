@@ -59,7 +59,12 @@ def test_backend_lifetime_is_bound_after_tray_creation() -> None:
     assert 'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE' in source
     assert 'AssignProcessToJobObject(job, GetCurrentProcess())' in source
     assert source.index('.build(app)?;') < source.index('bind_backend_lifetime()?;')
-    assert source.index('bind_backend_lifetime()?;') < source.index('if start_backend().is_err()')
+    assert source.index('bind_backend_lifetime()?;') < source.index('std::thread::spawn')
+    assert 'let mut backend = match start_backend()' in source
+    assert 'Err(error) => {' in source
+    assert 'backend_start_failure_message(&error)' in source
+    assert 'if let Ok(Some(_)) = backend.try_wait()' in source
+    assert '本地知识服务启动后提前退出' in source
     assert '退出知枢并停止后台' in source
     assert '检测到旧版独立后台' in source
 

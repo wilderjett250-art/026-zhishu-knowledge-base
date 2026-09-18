@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field
 
 class UnifiedSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+    workspace_path: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="项目专属检索范围；设置后拒绝其他项目来源。",
+    )
     domain: Literal["work", "self", "shared", "distill"] | None = None
     scopes: list[Literal["files", "chats"]] = Field(
         default_factory=lambda: ["files"], min_length=1, max_length=2
@@ -31,6 +36,7 @@ def unified_search(system, request: UnifiedSearchRequest) -> dict:
         response = system.retrieval.search(
             request.query,
             domain=request.domain,
+            workspace_path=request.workspace_path,
             limit=request.limit,
             include_restricted=request.include_restricted,
             rerank_mode=request.rerank_mode,
@@ -50,7 +56,6 @@ def unified_search(system, request: UnifiedSearchRequest) -> dict:
         groups["files"] = {"status": "ok", "results": response.results, "mode": mode}
         results.extend(response.results)
     if "chats" in request.scopes:
-        warnings.append("聊天尚无向量索引，本次仅全文检索；聊天原文不会发送到云端。")
         if request.domain:
             groups["chats"] = {"status": "error", "results": []}
             warnings.append("聊天暂不支持领域过滤，未执行聊天查询；请清空领域后重试。")
@@ -62,8 +67,35 @@ def unified_search(system, request: UnifiedSearchRequest) -> dict:
                     include_candidates=True,
                     include_restricted=request.include_restricted,
                 )
-                groups["chats"] = {"status": "ok", "results": chats, "mode": "fts_only"}
+                semantic = []
+                semantic_mode = "not_requested"
+                if request.include_restricted:
+                    semantic_response = system.customer_semantic.search(
+                        request.query, limit=request.limit
+                    )
+                    semantic = semantic_response.items
+                    semantic_mode = semantic_response.status
+                    if semantic_response.warning:
+                        warnings.append(semantic_response.warning)
+                    else:
+                        warnings.append(
+                            "聊天原文仍留在本机；本次语义检索使用受限的会话摘要向量，"
+                            "查询词会发送到已配置的 Embedding 服务。"
+                        )
+                else:
+                    warnings.append(
+                        "聊天语义摘要属于受限资料；未明确包含受限内容时，本次只使用本地全文检索。"
+                    )
+                chat_mode = "chat_hybrid" if semantic else "fts_only"
+                groups["chats"] = {
+                    "status": "ok",
+                    "results": chats,
+                    "semantic_results": semantic,
+                    "mode": chat_mode,
+                    "semantic_status": semantic_mode,
+                }
                 results.extend(chats)
+                results.extend(semantic)
             except sqlite3.Error:
                 groups["chats"] = {"status": "error", "results": []}
                 warnings.append("聊天索引读取失败，不能视为没有资料。")

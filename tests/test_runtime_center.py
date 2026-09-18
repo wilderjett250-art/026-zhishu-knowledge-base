@@ -1,3 +1,6 @@
+from datetime import UTC, datetime
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -72,3 +75,42 @@ def test_api_usage_and_confirmation_gate(test_settings):
             ).status_code
             == 409
         )
+
+
+def test_runtime_overview_separates_actionable_vector_work(test_settings, tmp_path):
+        with TestClient(create_app(test_settings)) as client:
+            system = client.app.state.system
+            system.settings.embedding_scope = "all_formal"
+            source = tmp_path / "formal.md"
+        source.write_text("正式资料", encoding="utf-8")
+        imported = system.ingestion.import_file(source, domain="work", privacy="private")
+        with system.database.connect() as connection:
+            chunk_id = connection.execute(
+                "SELECT id FROM chunks WHERE source_id=? LIMIT 1", (imported["source_id"],)
+            ).fetchone()["id"]
+            now = datetime.now(UTC).isoformat()
+            connection.execute(
+                """INSERT INTO index_outbox(event_key,operation,entity_type,entity_id,status,
+                attempts,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (uuid4().hex, "upsert", "chunk", chunk_id, "pending", 0, now, now, now),
+            )
+            connection.execute(
+                """INSERT INTO index_outbox(event_key,operation,entity_type,entity_id,status,
+                attempts,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    uuid4().hex,
+                    "reconcile",
+                    "source",
+                    imported["source_id"],
+                    "pending",
+                    0,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+        queues = client.get("/api/runtime/overview").json()["data"]["queues"]
+        assert queues["index_outbox_actionable"]["pending"] >= 1
+        assert queues["index_outbox_background"]["pending"] >= 1

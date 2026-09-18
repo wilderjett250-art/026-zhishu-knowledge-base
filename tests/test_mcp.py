@@ -23,9 +23,6 @@ def test_mcp_tool_annotations_match_side_effects() -> None:
         "list_weflow_customers",
         "get_customer_timeline",
         "search_customer_messages",
-        "list_agent_jobs",
-        "get_agent_token_usage",
-        "get_agent_graph_status",
     }:
         annotations = tools[name].annotations
         assert annotations is not None
@@ -37,7 +34,6 @@ def test_mcp_tool_annotations_match_side_effects() -> None:
         "register_sync_root",
         "scan_sync_root",
         "import_confirmed_weflow_exports",
-        "prepare_agent_context",
         "save_persona_candidate",
         "save_distillation_candidate",
         "prepare_customer_reply_context",
@@ -49,12 +45,16 @@ def test_mcp_tool_annotations_match_side_effects() -> None:
         assert annotations.destructive_hint is False
         assert annotations.open_world_hint is False
 
-    for name in {"run_knowledge_agent", "run_codex_closeout", "resume_agent_run"}:
-        annotations = tools[name].annotations
-        assert annotations is not None
-        assert annotations.read_only_hint is False
-        assert annotations.destructive_hint is False
-        assert annotations.open_world_hint is True
+    for name in {
+        "prepare_agent_context",
+        "run_knowledge_agent",
+        "run_codex_closeout",
+        "get_agent_graph_status",
+        "resume_agent_run",
+        "list_agent_jobs",
+        "get_agent_token_usage",
+    }:
+        assert name not in tools
 
 
 def test_mcp_guard_and_search(
@@ -87,6 +87,7 @@ def test_mcp_guard_and_search(
     assert len(results["data"]) == 1
     assert results["data"][0]["original_uri"] == str(note.resolve())
 
+    knowledge_system.settings.codex_task_capture_enabled = True
     capture_notification(
         {
             "type": "agent-turn-complete",

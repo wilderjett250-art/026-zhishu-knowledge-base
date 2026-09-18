@@ -168,8 +168,8 @@ def test_agent_prompts_are_versioned_grounded_and_injection_aware() -> None:
         "codex-task-closeout",
     }
     assert PLANNER.version == "retrieval-plan-v2"
-    assert SYNTHESIS.version == "evidence-synthesis-v2"
-    assert CLOSEOUT.version == "codex-closeout-v4-user-task-only"
+    assert SYNTHESIS.version == "evidence-synthesis-v3-project-scope"
+    assert CLOSEOUT.version == "codex-closeout-v5-project-scope"
     assert "不可信证据" in PLANNER.system_prompt
     assert "evidence_ids" in SYNTHESIS.system_prompt
     assert "测试通过不等于部署" in CLOSEOUT.system_prompt

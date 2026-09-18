@@ -64,6 +64,7 @@ class IntakeRequest(BaseModel):
     exclusions: list[str] = Field(default_factory=list, max_length=50)
     max_files: int = Field(default=2000, ge=1, le=10000)
     scanner: Literal["native", "everything"] = "native"
+    recovery_root: str | None = Field(default=None, max_length=1000)
 
 
 class IntakeBrowseRequest(BaseModel):
@@ -89,6 +90,7 @@ def category(path: Path) -> str:
         ".xls",
         ".xlsx",
         ".csv",
+        ".tsv",
         ".ppt",
         ".pptx",
         ".txt",
@@ -111,6 +113,34 @@ def linked(path: Path) -> bool:
         p.is_symlink() or (hasattr(p, "is_junction") and p.is_junction())
         for p in [path, *path.parents]
     )
+
+
+def extraction_quality(parsed) -> dict[str, object]:
+    """Expose parser quality without retaining or displaying document body text."""
+    extraction = parsed.metadata.get("extraction")
+    if not isinstance(extraction, dict):
+        return {
+            "status": "not_assessed",
+            "score": None,
+            "reasons": [],
+            "warnings": [],
+            "parser": parsed.parser_name,
+        }
+    initial = extraction.get("initial_quality")
+    initial = initial if isinstance(initial, dict) else {}
+    reasons = [str(item) for item in initial.get("reasons", []) if str(item)]
+    warnings = [str(item) for item in extraction.get("warnings", []) if str(item)]
+    truncated = bool(extraction.get("block_index_truncated"))
+    if truncated:
+        reasons.append("block_metadata_truncated")
+    score = initial.get("score")
+    return {
+        "status": "attention" if reasons or warnings else "ready",
+        "score": score if isinstance(score, (int, float)) else None,
+        "reasons": list(dict.fromkeys(reasons)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "parser": parsed.parser_name,
+    }
 
 
 class IntakeService:
@@ -145,7 +175,18 @@ class IntakeService:
                 json.dump(plan, stream, ensure_ascii=False)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
+            # Windows can briefly deny replacement while a local dashboard or
+            # antivirus scanner is reading the previous JSON.  The plan is
+            # already durable in ``temporary``; retry the atomic replacement
+            # instead of failing an otherwise healthy multi-file intake.
+            for attempt in range(4):
+                try:
+                    os.replace(temporary, path)
+                    return
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.1 * (attempt + 1))
 
     def read(self, job_id):
         with self.guard:
@@ -154,10 +195,76 @@ class IntakeService:
             plan["state"] = "interrupted"
         return plan
 
+    @staticmethod
+    def _outcome_reason(reason: object) -> str:
+        """Return a stable, path-free explanation for large intake batches."""
+        value = str(reason or "")
+        if "疑似凭据" in value:
+            return "疑似凭据，已安全隔离"
+        if "分类后发生变化" in value:
+            return "分类后文件已变化，需增量复查"
+        if "超过20MB" in value or "不支持解析" in value:
+            return "当前格式不支持正文解析或超过20MB"
+        if "解析/读取失败" in value:
+            return "解析或读取失败，需检查格式与权限"
+        if "路径边界" in value or "链接发生变化" in value:
+            return "路径边界或链接发生变化，未处理"
+        if "读取期间原件发生变化" in value:
+            return "读取期间原件发生变化，未处理"
+        return "其他未处理异常，详情见单项状态"
+
+    @staticmethod
+    def _semantic_preflight(plan: dict, items: list[dict]) -> dict:
+        """Describe a pending L3 batch without reading its content or calling a provider.
+
+        A semantic plan has a materially different boundary from local L0/L1/L2
+        work: chunks are derived locally, then sent to the user-configured
+        embedding provider.  Keep this preflight aggregate-only so the desktop
+        can make that boundary visible before the separate confirmation.
+        """
+        pending = [
+            item
+            for item in items
+            if item.get("action") == "semantic" and item.get("state") == "pending"
+        ]
+        source_bytes = sum(int(item.get("bytes") or 0) for item in pending)
+        return {
+            "required_confirmation": bool(pending),
+            "pending_files": len(pending),
+            "source_bytes": source_bytes,
+            "cloud_called": bool(plan.get("cloud_called")),
+            "remote_scope": "仅在确认后发送所选L3资料经本地解析得到的切片文本",
+            "execution_order": [
+                "先校验恢复空间并创建本地 SQLite 恢复点",
+                "本地解析、切块并建立全文索引",
+                "将切片文本发送给已配置的 Embedding 服务",
+                "把返回向量写入本地向量索引并记录覆盖状态",
+            ],
+            "cost_estimate": {
+                "status": "not_available",
+                "reason": "本机未保存服务商单价或预计 Token 数；不会在预检阶段调用服务或产生费用。",
+            },
+        }
+
     def view(self, job_id, offset=0):
         plan = self.read(job_id)
         items = plan.pop("items")
+        plan["recovery_capacity"] = self._recovery_capacity(plan, items)
+        plan["semantic_preflight"] = self._semantic_preflight(plan, items)
         plan["counts"] = dict(Counter(i["state"] for i in items))
+        reason_counts = Counter(
+            self._outcome_reason(item.get("reason"))
+            for item in items
+            if item.get("state") in {"error", "skipped", "deferred"} and item.get("reason")
+        )
+        plan["outcome_summary"] = {
+            "processed": sum(item.get("state") != "pending" for item in items),
+            "pending": sum(item.get("state") == "pending" for item in items),
+            "reason_counts": [
+                {"reason": reason, "count": count}
+                for reason, count in reason_counts.most_common(8)
+            ],
+        }
         plan["total"] = len(items)
         plan["categories"] = {
             key: {
@@ -193,6 +300,28 @@ class IntakeService:
         data = self.settings.data_root.resolve()
         if root == data or data in root.parents:
             raise ValueError("不能把知识库自身数据再次接入")
+        return root
+
+    def _recovery_root(self, value: str | None) -> Path:
+        """Resolve a user-selected recovery location without creating it yet."""
+        if not value or not value.strip():
+            return self.home / "recovery"
+        raw = Path(value).expanduser()
+        if not raw.is_absolute() or str(raw).startswith(("\\\\", "//")) or linked(raw):
+            raise ValueError("恢复点请选择本地绝对路径，不支持网络目录或符号链接")
+        try:
+            parent = raw.parent.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("恢复点的上级目录不可访问") from exc
+        if not parent.is_dir() or linked(parent):
+            raise ValueError("恢复点的上级目录不可访问")
+        root = raw.resolve(strict=False)
+        default_root = (self.home / "recovery").resolve(strict=False)
+        if root == default_root:
+            return root
+        data = self.settings.data_root.resolve()
+        if root == data or data in root.parents:
+            raise ValueError("恢复点不能放在知识库数据目录内")
         return root
 
     def browse(self, request: IntakeBrowseRequest) -> dict:
@@ -260,6 +389,7 @@ class IntakeService:
 
     def preview(self, request: IntakeRequest):
         root = self._authorize_root(request.path)
+        recovery_root = self._recovery_root(request.recovery_root)
         if set(request.rules) != set(DEFAULT_RULES):
             raise ValueError("请为五种资料分类设置处理方式")
         if any(
@@ -293,6 +423,7 @@ class IntakeService:
             "cloud_called": False,
             "original_copy_bytes": 0,
             "recovery_bytes_estimate": self.settings.database_path.stat().st_size,
+            "recovery_root": str(recovery_root),
             "note": "原地引用；本地摘录不是AI总结。向量仅排队，不自动调用API。",
             "scanner": request.scanner,
             "classification_basis": "扩展名规则，不代表已理解正文或项目用途",
@@ -307,7 +438,7 @@ class IntakeService:
     def preview_classified(self, selection: dict):
         """Build an intake plan from a completed classification manifest without rescanning."""
         mode = selection.get("mode")
-        if mode not in {"catalog", "full", "semantic"}:
+        if mode not in {"catalog", "extract", "full", "semantic", "recommended"}:
             raise ValueError("处理方式无效")
         roots = []
         for value in selection.get("roots", []):
@@ -320,9 +451,16 @@ class IntakeService:
             roots.append(resolved)
         if not roots:
             raise ValueError("分类任务没有可复用的资料范围")
+        recovery_root = self._recovery_root(selection.get("recovery_root"))
         data_root = self.settings.data_root.resolve()
         items = []
         for source in selection.get("items", []):
+            action = source.get("recommended_action") if mode == "recommended" else mode
+            if action not in {"catalog", "extract", "full", "semantic"}:
+                # The selector normally removes these sources.  Keep the
+                # preview defensive if a stale or manually edited manifest is
+                # ever passed in, rather than silently choosing a depth.
+                continue
             item = {
                 "path": str(source.get("path", "")),
                 "relative": str(source.get("relative") or source.get("path", "")),
@@ -331,10 +469,11 @@ class IntakeService:
                 "content_category_label": source.get("content_category_label"),
                 "classification_basis": source.get("classification_basis"),
                 "classification_revision": source.get("classification_revision"),
+                "ai_understanding": source.get("ai_understanding"),
                 "summary_file_id": source.get("summary_file_id"),
                 "bytes": int(source.get("bytes", 0)),
                 "mtime_ns": int(source.get("mtime_ns", 0)),
-                "action": mode,
+                "action": action,
                 "state": "pending",
             }
             try:
@@ -355,7 +494,7 @@ class IntakeService:
                 else:
                     item["path"] = str(resolved)
                     item["category"] = category(resolved)
-                    if mode in {"full", "semantic"} and (
+                    if action in {"extract", "full", "semantic"} and (
                         resolved.suffix.lower() not in SUPPORTED_EXTENSIONS
                         or stat.st_size > min(self.settings.max_source_bytes, 20_000_000)
                     ):
@@ -364,6 +503,8 @@ class IntakeService:
                 item.update(state="skipped", reason="文件不可访问或已移出原分类范围")
             items.append(item)
         if not items:
+            if mode == "recommended":
+                raise ValueError("所选资料没有可核验的AI处理建议")
             raise ValueError("所选分类中没有文件")
         plan = {
             "id": uuid.uuid4().hex,
@@ -383,9 +524,14 @@ class IntakeService:
             "cloud_called": False,
             "original_copy_bytes": 0,
             "recovery_bytes_estimate": self.settings.database_path.stat().st_size,
+            "recovery_root": str(recovery_root),
             "source_bytes": sum(item["bytes"] for item in items),
             "actions": dict(Counter(item["action"] for item in items)),
-            "note": "复用已保存分类清单；执行前再次校验原文件。AI分类仅用于筛选，不作为正文入库。",
+            "note": (
+                "复用已保存分类与AI处理建议；执行前再次校验原文件。AI理解只决定处理深度，原文件仍是唯一正文来源。"
+                if mode == "recommended"
+                else "复用已保存分类清单；执行前再次校验原文件。AI分类仅用于筛选，不作为正文入库。"
+            ),
             "scanner": "saved_classification_manifest",
             "classification_basis": "用户选择的用途分类；原文件仍是唯一正文来源",
         }
@@ -599,7 +745,10 @@ class IntakeService:
             plan = self.read(job_id)
             if not confirmed or not plan["scan_complete"]:
                 raise ValueError("必须先完成范围预览，再明确确认执行")
-            if any(i["action"] == "semantic" for i in plan["items"]) and not confirmed_vector:
+            if any(
+                i["action"] == "semantic" and i["state"] == "pending"
+                for i in plan["items"]
+            ) and not confirmed_vector:
                 raise ValueError("选择全文加向量时，必须确认可能调用云端 Embedding")
             if plan["state"] not in {"ready", "cancelled", "interrupted", "failed", "warning"}:
                 raise ValueError("该任务不能执行或已完成")
@@ -609,6 +758,9 @@ class IntakeService:
                 raise ValueError("预览超过24小时，请重新预览")
             if self.thread and self.thread.is_alive():
                 raise ValueError("已有任务运行")
+            capacity = self._recovery_capacity(plan, plan["items"])
+            if not capacity["ready"]:
+                raise ValueError("空间不足以保留恢复点，停止入库")
             for item in plan["items"]:
                 if item["state"] == "error":
                     item["state"] = "pending"
@@ -620,7 +772,69 @@ class IntakeService:
 
     def requires_vector(self, job_id):
         plan = self.read(job_id)
-        return any(item["action"] == "semantic" for item in plan["items"])
+        return any(
+            item["action"] == "semantic" and item["state"] == "pending"
+            for item in plan["items"]
+        )
+
+    def split_semantic(self, job_id):
+        """Move pending L3 items into a separate confirmation-gated plan.
+
+        This keeps a mixed classified plan usable for local L0/L1/L2 intake
+        without silently weakening the separate cloud-embedding confirmation.
+        """
+        with self.guard:
+            plan = self.read(job_id)
+            if plan["state"] != "ready" or not plan["scan_complete"]:
+                raise ValueError("只有尚未执行的完整预览能拆分L3资料")
+            semantic_items = [
+                dict(item)
+                for item in plan["items"]
+                if item["action"] == "semantic" and item["state"] == "pending"
+            ]
+            nonsemantic_pending = any(
+                item["action"] != "semantic" and item["state"] == "pending"
+                for item in plan["items"]
+            )
+            if not semantic_items:
+                raise ValueError("当前计划没有待确认的L3资料")
+            if not nonsemantic_pending:
+                raise ValueError("当前计划只有L3资料，请直接确认向量处理")
+            child_id = uuid.uuid4().hex
+            child = {
+                "id": child_id,
+                "created_at": datetime.now(UTC).isoformat(),
+                "root": plan["root"],
+                "allowed_roots": list(plan.get("allowed_roots", [])),
+                "request": {
+                    **dict(plan.get("request", {})),
+                    "split_from_plan": plan["id"],
+                    "processing_scope": "L3_only",
+                },
+                "state": "ready",
+                "items": semantic_items,
+                "scan_complete": True,
+                "excluded_directories": 0,
+                "cloud_called": False,
+                "original_copy_bytes": 0,
+                "recovery_bytes_estimate": plan.get("recovery_bytes_estimate"),
+                "recovery_root": plan.get("recovery_root"),
+                "source_bytes": sum(int(item.get("bytes") or 0) for item in semantic_items),
+                "actions": {"semantic": len(semantic_items)},
+                "note": "从混合计划拆出的L3资料；必须单独确认Embedding后才会处理。",
+                "scanner": plan.get("scanner"),
+                "classification_basis": plan.get("classification_basis"),
+            }
+            for item in plan["items"]:
+                if item["action"] == "semantic" and item["state"] == "pending":
+                    item["state"] = "deferred"
+                    item["reason"] = f"已拆分到L3确认计划 {child_id}"
+            plan["deferred_semantic_plan_id"] = child_id
+            plan["deferred_semantic_count"] = len(semantic_items)
+            plan["actions"] = dict(Counter(item["action"] for item in plan["items"]))
+            self._save(child)
+            self._save(plan)
+            return self.view(job_id)
 
     def cancel(self, job_id):
         if self.active != job_id:
@@ -633,8 +847,59 @@ class IntakeService:
         if self.thread:
             self.thread.join(timeout=2)
 
+    @staticmethod
+    def _backup_required_free_bytes(*, database_bytes: int, pending_source_bytes: int) -> int:
+        """Capacity needed in addition to the already-existing live database.
+
+        A SQLite backup creates one new copy; the live database is already part
+        of used space and must not be counted a second time. Keep a bounded
+        operating reserve plus a conservative allowance for the selected batch.
+        """
+        operating_reserve = max(512 * 1024 * 1024, min(2 * 1024**3, database_bytes // 10))
+        projected_write = max(64 * 1024 * 1024, pending_source_bytes * 2)
+        return database_bytes + operating_reserve + projected_write
+
+    def _recovery_capacity(self, plan, items) -> dict[str, int | bool | str | None]:
+        """Report the exact recovery-space gate without starting a write job."""
+        database_bytes = self.settings.database_path.stat().st_size
+        pending_source_bytes = sum(
+            int(item.get("bytes") or 0)
+            for item in items
+            if item.get("state") == "pending"
+            and item.get("action") in {"semantic", "full", "extract", "map"}
+        )
+        required_free_bytes = self._backup_required_free_bytes(
+            database_bytes=database_bytes,
+            pending_source_bytes=pending_source_bytes,
+        )
+        try:
+            recovery_root = self._recovery_root(plan.get("recovery_root"))
+            usage_root = recovery_root if recovery_root.exists() else recovery_root.parent
+            available_free_bytes = shutil.disk_usage(usage_root).free
+        except OSError:
+            return {
+                "ready": False,
+                "database_bytes": database_bytes,
+                "pending_source_bytes": pending_source_bytes,
+                "required_free_bytes": required_free_bytes,
+                "available_free_bytes": None,
+                "shortfall_bytes": None,
+                "reason": "无法读取恢复副本所在磁盘的可用空间",
+                "recovery_root": str(plan.get("recovery_root") or self.home / "recovery"),
+            }
+        return {
+            "ready": available_free_bytes >= required_free_bytes,
+            "database_bytes": database_bytes,
+            "pending_source_bytes": pending_source_bytes,
+            "required_free_bytes": required_free_bytes,
+            "available_free_bytes": available_free_bytes,
+            "shortfall_bytes": max(0, required_free_bytes - available_free_bytes),
+            "reason": None,
+            "recovery_root": str(recovery_root),
+        }
+
     def _backup(self, plan):
-        directory = self.home / "recovery" / plan["id"]
+        directory = self._recovery_root(plan.get("recovery_root")) / plan["id"]
         target = directory / "pkas.sqlite"
         if target.exists():
             # Keep the first recovery point on retries, never overwrite it.
@@ -643,7 +908,8 @@ class IntakeService:
                     raise ValueError("恢复点损坏，停止写入")
             return
         source = self.settings.database_path
-        if shutil.disk_usage(self.home).free < source.stat().st_size * 2 + 100_000_000:
+        capacity = self._recovery_capacity(plan, plan["items"])
+        if not capacity["ready"]:
             raise ValueError("空间不足以保留恢复点，停止入库")
         directory.mkdir(parents=True, exist_ok=True)
         partial = directory / "pending.sqlite"
@@ -672,7 +938,7 @@ class IntakeService:
             old = self.read(manifest.stem)
             if old["id"] == plan["id"] or old["state"] != "completed":
                 continue
-            expected = self.home / "recovery" / old["id"] / "pkas.sqlite"
+            expected = self._recovery_root(plan.get("recovery_root")) / old["id"] / "pkas.sqlite"
             if (
                 old.get("recovery") != str(expected)
                 or not old.get("recovery_sha256")
@@ -712,13 +978,36 @@ class IntakeService:
             if old:
                 if old["status"] != "indexed":
                     raise IntakeItemError("已有同内容历史版本，需核查版本状态")
-                return {"state": "duplicate", "source_id": old["id"]}
+                alias = repo.register_source_alias(
+                    source_id=old["id"],
+                    original_uri=str(path),
+                    original_name=path.name,
+                    vault_path=str(path),
+                    source_type=path.suffix.lstrip("."),
+                    byte_size=item["bytes"],
+                    metadata={
+                        "original_hash": digest,
+                        "requested_processing_level": "L3"
+                        if item["action"] == "semantic"
+                        else "L2",
+                        "content_category_id": item.get("content_category_id"),
+                        "content_category_label": item.get("content_category_label"),
+                        "classification_basis": item.get("classification_basis"),
+                        "classification_revision": item.get("classification_revision"),
+                    },
+                )
+                return {
+                    "state": "duplicate",
+                    "source_id": old["id"],
+                    "alias_status": alias["status"],
+                }
         parsed = parse_file(path, settings=self.settings, privacy="private")
         if not parsed.text.strip():
             raise ParseError("没有可提取文字")
         _, secrets = redact_secrets(parsed.text)
         if secrets:
             raise IntakeItemError("内容含疑似凭据，未入库")
+        quality = extraction_quality(parsed)
         if sha256_file(path) != digest:
             raise IntakeItemError("读取期间原件发生变化，请重新预览")
         if item["action"] == "extract":
@@ -740,6 +1029,8 @@ class IntakeService:
                 metadata={
                     "original_path": str(path),
                     "original_hash": digest,
+                    "original_source_type": path.suffix.lstrip("."),
+                    "original_byte_size": item["bytes"],
                     "derived_kind": "extractive_excerpt",
                     "review_status": "unreviewed",
                     "coverage": "partial",
@@ -758,6 +1049,7 @@ class IntakeService:
                 content_category_label=item.get("content_category_label"),
                 classification_basis=item.get("classification_basis"),
                 classification_revision=item.get("classification_revision"),
+                ai_understanding=item.get("ai_understanding"),
                 source_summary_job=plan.get("request", {}).get("source_summary_job"),
             )
             previous = repo.source_by_uri(str(path))
@@ -777,9 +1069,13 @@ class IntakeService:
             if previous and previous["id"] != result["source_id"]:
                 repo.set_source_status(previous["id"], "superseded")
         return {
-            "state": "indexed",
+            # import_text may reuse an existing normalized excerpt with the
+            # same stable URI. Preserve that fact in the plan instead of
+            # reporting a new write merely because parsing succeeded.
+            "state": "duplicate" if result.get("status") == "duplicate" else "indexed",
             "source_id": result["source_id"],
             "storage": "generated_md" if item["action"] == "extract" else "reference",
+            "extraction_quality": quality,
             "vector": (
                 "待本批向量同步"
                 if item["action"] == "semantic"

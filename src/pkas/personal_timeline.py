@@ -103,6 +103,81 @@ class PersonalTimelineService:
         except ValueError as exc:
             raise ValueError("日期必须是 YYYY-MM-DD") from exc
 
+    def readiness(self, days: int = 30) -> dict[str, Any]:
+        """Expose days that have self-authored chat activity but no summary.
+
+        This is deliberately metadata-only: it never reads message bodies,
+        calls Luna, or creates a daily summary.  The user still chooses a day
+        and explicitly triggers the evidence-bound build operation.
+        """
+        days = max(7, min(int(days), 90))
+        since = int((datetime.now().astimezone() - timedelta(days=days - 1)).timestamp())
+        with self.database.connect() as connection:
+            activity_days = connection.execute(
+                """
+                SELECT date(sent_at, 'unixepoch', 'localtime') AS local_date,
+                       count(*) AS message_count, max(sent_at) AS latest_timestamp
+                FROM customer_messages
+                WHERE is_self=1 AND sent_at>=?
+                GROUP BY local_date
+                ORDER BY local_date DESC
+                """,
+                (since,),
+            ).fetchall()
+            summarized = {
+                str(row["local_date"]): int(row["source_message_count"] or 0)
+                for row in connection.execute(
+                    """SELECT local_date,source_message_count
+                    FROM personal_daily_summaries WHERE local_date>=?""",
+                    ((datetime.now().astimezone().date() - timedelta(days=days - 1)).isoformat(),),
+                )
+            }
+            latest_summary = connection.execute(
+                "SELECT max(local_date) FROM personal_daily_summaries"
+            ).fetchone()[0]
+
+        pending_days = []
+        for row in activity_days:
+            local_date = str(row["local_date"])
+            message_count = int(row["message_count"])
+            summarized_count = summarized.get(local_date)
+            if summarized_count is None:
+                pending_reason = "missing_summary"
+            elif message_count > summarized_count:
+                pending_reason = "new_self_messages"
+            else:
+                continue
+            pending_days.append(
+                {
+                    "local_date": local_date,
+                    "message_count": message_count,
+                    "summary_source_message_count": summarized_count,
+                    "pending_reason": pending_reason,
+                    "latest_message_at": datetime.fromtimestamp(
+                        int(row["latest_timestamp"])
+                    ).astimezone().isoformat(),
+                }
+            )
+        latest_timestamp = max(
+            (int(row["latest_timestamp"]) for row in activity_days), default=None
+        )
+        return {
+            "window_days": days,
+            "pending_day_count": len(pending_days),
+            "pending_days": pending_days[:14],
+            "latest_self_message_at": (
+                datetime.fromtimestamp(latest_timestamp).astimezone().isoformat()
+                if latest_timestamp is not None
+                else None
+            ),
+            "latest_summary_date": str(latest_summary) if latest_summary else None,
+            "mode": "manual_luna_build",
+            "note": (
+                "仅提示缺少整理或本人新消息已增加的日期；"
+                "不会自动读取消息正文、调用模型或写入每日总结。"
+            ),
+        }
+
     def _messages_for_day(
         self, local_date: str, limit: int = 90
     ) -> tuple[int, list[dict[str, Any]]]:

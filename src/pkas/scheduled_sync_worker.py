@@ -1,9 +1,11 @@
+import argparse
 import json
 from datetime import UTC, datetime
 from typing import Any
 
 from pkas.scheduled_sync import run_scheduled_sync
 from pkas.system import KnowledgeSystem
+from pkas.weflow_daily import daily_import_is_enabled
 
 
 def _write_report(knowledge_system: KnowledgeSystem, report: dict[str, Any]) -> str:
@@ -19,7 +21,30 @@ def _write_report(knowledge_system: KnowledgeSystem, report: dict[str, Any]) -> 
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the PKAS scheduled sync")
+    parser.add_argument(
+        "--check-daily-authorization",
+        action="store_true",
+        help="check explicit WeFlow daily-import authorization without running sync",
+    )
+    args = parser.parse_args()
     knowledge_system = KnowledgeSystem.create()
+    if args.check_daily_authorization:
+        enabled = daily_import_is_enabled(knowledge_system)
+        print(
+            json.dumps(
+                {
+                    "status": "authorized" if enabled else "disabled",
+                    "daily_import_enabled": enabled,
+                    "content_read": False,
+                    "secret_fields_accessed": False,
+                },
+                ensure_ascii=False,
+            )
+        )
+        if not enabled:
+            raise SystemExit(2)
+        return
     started_at = datetime.now(UTC).isoformat()
     try:
         result = run_scheduled_sync(knowledge_system)

@@ -1,5 +1,6 @@
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -11,6 +12,17 @@ from pkas.vector_index import QdrantVectorIndex, VectorIndexError
 RerankMode = Literal["auto", "never", "always"]
 RetrievalMode = Literal["a", "b", "ab"]
 RerankStatus = Literal["not_needed", "disabled", "applied", "degraded"]
+QueryIntent = Literal["precise_lookup", "cross_source_synthesis", "exploration"]
+
+
+@dataclass(slots=True)
+class QueryPlan:
+    """A local, inspectable retrieval decision; it never rewrites user input."""
+
+    intent: QueryIntent
+    candidate_limit: int
+    prefer_source_diversity: bool
+    reasons: list[str]
 
 
 @dataclass(slots=True)
@@ -27,6 +39,7 @@ class RetrievalHealth:
     rerank_candidate_count: int = 0
     rerank_input_chars: int = 0
     fusion_weights: dict[str, float] = field(default_factory=dict)
+    query_plan: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -109,6 +122,58 @@ class RetrievalService:
             len(query) >= 18 or sum(marker in query for marker in markers) >= 1
         )
 
+    @staticmethod
+    def _plan_query(query: str, limit: int) -> QueryPlan:
+        """Choose retrieval depth from visible query features, not an opaque model call.
+
+        This borrows the useful part of enterprise RAG query planning while keeping
+        the user query verbatim.  It is deliberately deterministic: the console
+        and MCP can show exactly why more candidates were requested.
+        """
+        clean = query.strip()
+        synthesis_markers = (
+            "比较",
+            "对比",
+            "结合",
+            "综合",
+            "分别",
+            "差异",
+            "怎么选",
+            "如何选择",
+            "多个",
+            "所有资料",
+            "跨文档",
+        )
+        has_synthesis_marker = any(marker in clean for marker in synthesis_markers)
+        path_or_identifier_pattern = (
+            r"(?:[A-Za-z]:[\\/]|[\\/]|\.[A-Za-z0-9]{1,8}\b|\b[A-Za-z_][\w-]{2,}\b)"
+        )
+        has_path_or_identifier = bool(re.search(path_or_identifier_pattern, clean))
+        has_exact_marker = any(
+            marker in clean
+            for marker in ("文件", "路径", "目录", "函数", "类", "接口", "报错", "配置")
+        )
+        if has_synthesis_marker:
+            return QueryPlan(
+                intent="cross_source_synthesis",
+                candidate_limit=min(100, max(100, limit * 16)),
+                prefer_source_diversity=True,
+                reasons=["检测到跨资料比较或综合意图，扩大候选并按来源折叠。"],
+            )
+        if has_path_or_identifier or has_exact_marker:
+            return QueryPlan(
+                intent="precise_lookup",
+                candidate_limit=min(100, max(48, limit * 6)),
+                prefer_source_diversity=False,
+                reasons=["检测到文件、路径、标识符或精确定位意图，优先精确全文和目录命中。"],
+            )
+        return QueryPlan(
+            intent="exploration",
+            candidate_limit=min(100, max(80, limit * 12)),
+            prefer_source_diversity=True,
+            reasons=["普通探索问题使用全文与语义的默认候选深度。"],
+        )
+
     def _rerank_limit(self, query: str, candidate_count: int) -> int:
         deep_markers = ("比较", "对比", "综合", "结合", "分别", "差异", "跨文档", "所有")
         is_deep = len(query) >= 32 or sum(marker in query for marker in deep_markers) >= 2
@@ -118,6 +183,30 @@ class RetrievalService:
             else self.vector_index.settings.rerank_candidate_limit
         )
         return min(candidate_count, max(2, configured))
+
+    def _search_lexical(
+        self,
+        query: str,
+        *,
+        domain: str | None,
+        workspace_path: str | None,
+        candidate_limit: int,
+        include_restricted: bool,
+        include_unverified_claims: bool,
+        include_task_records: bool,
+    ) -> list[dict[str, Any]]:
+        lexical = self.repository.search(
+            query,
+            domain=domain,
+            workspace_path=workspace_path,
+            limit=candidate_limit,
+            include_restricted=include_restricted,
+            include_unverified_claims=include_unverified_claims,
+            include_task_records=include_task_records,
+        )
+        if domain is None and workspace_path is None and self.machine_catalog is not None:
+            lexical.extend(self.machine_catalog.search(query, candidate_limit))
+        return lexical
 
     @staticmethod
     def _collapse_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -261,6 +350,7 @@ class RetrievalService:
         coverage: float,
         rerank_candidate_count: int,
         rerank_input_chars: int,
+        query_plan: QueryPlan,
     ) -> RetrievalHealth:
         channels: Counter[str] = Counter()
         for item in results:
@@ -312,6 +402,12 @@ class RetrievalService:
                 "catalog": self.vector_index.settings.fusion_fts_weight,
                 "vector": self.vector_index.settings.fusion_vector_weight,
             },
+            query_plan={
+                "intent": query_plan.intent,
+                "candidate_limit": query_plan.candidate_limit,
+                "prefer_source_diversity": query_plan.prefer_source_diversity,
+                "reasons": query_plan.reasons,
+            },
         )
 
     def search(
@@ -319,6 +415,7 @@ class RetrievalService:
         query: str,
         *,
         domain: str | None = None,
+        workspace_path: str | None = None,
         limit: int = 10,
         include_restricted: bool = False,
         include_unverified_claims: bool = False,
@@ -327,40 +424,98 @@ class RetrievalService:
         include_task_records: bool = False,
         retrieval_mode: RetrievalMode = "ab",
     ) -> RetrievalResponse:
-        candidate_limit = min(100, max(limit * 12, 80))
-        lexical = []
-        if retrieval_mode in {"a", "ab"}:
-            lexical = self.repository.search(
-                query,
-                domain=domain,
-                limit=candidate_limit,
-                include_restricted=include_restricted,
-                include_unverified_claims=include_unverified_claims,
-                include_task_records=include_task_records,
-            )
-            if domain is None and self.machine_catalog is not None:
-                lexical.extend(self.machine_catalog.search(query, candidate_limit))
+        query_plan = self._plan_query(query, limit)
+        candidate_limit = query_plan.candidate_limit
+        lexical: list[dict[str, Any]] = []
         warnings: list[str] = []
         semantic_items: list[dict[str, Any]] = []
-        if retrieval_mode in {"b", "ab"}:
-            try:
-                semantic = self.vector_index.search(
+        vector_coverage: dict[str, Any] | None = None
+        semantic_allowed = retrieval_mode in {"b", "ab"} and self.vector_index.enabled
+        scoped_source_ids = (
+            self.repository.source_ids_for_workspace(workspace_path)
+            if workspace_path
+            else None
+        )
+        if workspace_path and not scoped_source_ids:
+            warnings.append("当前项目范围没有已索引资料，已阻止跨项目召回。")
+            semantic_allowed = False
+        if semantic_allowed:
+            # Do the cheap SQLite eligibility check before opening embedded
+            # Qdrant or spending an Embedding request.  In the normal L3-only
+            # mode, zero eligible chunks means semantic retrieval is not
+            # applicable, not a reason to load an old/stale collection.
+            vector_coverage = self.vector_index.coverage()
+            if not vector_coverage["eligible"]:
+                semantic_allowed = False
+            elif not vector_coverage["indexed"]:
+                semantic_allowed = False
+                warnings.append("已选择语义资料，但向量索引尚未完成；本次先使用全文检索。")
+
+        # Both channels are read-only.  Run them concurrently only when the
+        # caller requested hybrid retrieval; the merge and ranking below remain
+        # unchanged, so this reduces wall-clock time without changing results.
+        if retrieval_mode == "ab" and semantic_allowed:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pkas-search") as pool:
+                lexical_future = pool.submit(
+                    self._search_lexical,
+                    query,
+                    domain=domain,
+                    workspace_path=workspace_path,
+                    candidate_limit=candidate_limit,
+                    include_restricted=include_restricted,
+                    include_unverified_claims=include_unverified_claims,
+                    include_task_records=include_task_records,
+                )
+                semantic_future = pool.submit(
+                    self.vector_index.search,
                     query,
                     domain=domain,
                     limit=candidate_limit,
                     include_restricted=include_restricted,
+                    source_ids=scoped_source_ids,
                 )
-            except VectorIndexError as exc:
-                warnings.append(str(exc))
-            else:
-                semantic_items = semantic.items
-                if semantic.warning:
-                    warnings.append(semantic.warning)
+                lexical = lexical_future.result()
+                try:
+                    semantic = semantic_future.result()
+                except VectorIndexError as exc:
+                    warnings.append(str(exc))
+                else:
+                    semantic_items = semantic.items
+                    if semantic.warning:
+                        warnings.append(semantic.warning)
+        else:
+            if retrieval_mode in {"a", "ab"}:
+                lexical = self._search_lexical(
+                    query,
+                    domain=domain,
+                    workspace_path=workspace_path,
+                    candidate_limit=candidate_limit,
+                    include_restricted=include_restricted,
+                    include_unverified_claims=include_unverified_claims,
+                    include_task_records=include_task_records,
+                )
+            if semantic_allowed:
+                try:
+                    semantic = self.vector_index.search(
+                        query,
+                        domain=domain,
+                        limit=candidate_limit,
+                        include_restricted=include_restricted,
+                        source_ids=scoped_source_ids,
+                    )
+                except VectorIndexError as exc:
+                    warnings.append(str(exc))
+                else:
+                    semantic_items = semantic.items
+                    if semantic.warning:
+                        warnings.append(semantic.warning)
 
-        if not include_task_records:
-            semantic_items = [
-                item for item in semantic_items if item.get("source_type") != "codex-turn"
-            ]
+        semantic_items = [
+            item
+            for item in semantic_items
+            if item.get("source_type") not in {"thread-summary", "thread-journal"}
+            and (include_task_records or item.get("source_type") != "codex-turn")
+        ]
         merged: dict[str, dict[str, Any]] = {}
         channel_weights = {
             "fts": max(0.0, self.vector_index.settings.fusion_fts_weight),
@@ -437,11 +592,15 @@ class RetrievalService:
                         radius=1,
                         max_chars=4000,
                     )
-        coverage = (
-            self.vector_index.coverage()["coverage"]
-            if retrieval_mode in {"b", "ab"} and self.vector_index.enabled
-            else 1.0
-        )
+        if retrieval_mode in {"b", "ab"} and self.vector_index.enabled:
+            if vector_coverage is None:
+                vector_coverage = self.vector_index.coverage()
+            coverage = vector_coverage["coverage"]
+            # A query can still be healthy when no material has been selected
+            # for semantic indexing; that is an applicability state, not a miss.
+            coverage = 1.0 if coverage is None else coverage
+        else:
+            coverage = 1.0
         health = self._health(
             results,
             candidate_count=chunk_candidate_count,
@@ -450,6 +609,7 @@ class RetrievalService:
             coverage=coverage,
             rerank_candidate_count=rerank_candidate_count,
             rerank_input_chars=rerank_input_chars,
+            query_plan=query_plan,
         )
         warnings.extend(health.reasons)
         mode = {

@@ -28,9 +28,10 @@ def _timestamp(value: Any) -> int:
 
 
 class CustomerRepository:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, *, initialize: bool = True) -> None:
         self.database = database
-        self.database.initialize()
+        if initialize:
+            self.database.initialize()
 
     def upsert_connector(
         self,

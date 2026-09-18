@@ -41,6 +41,7 @@ from pkas.directory_summary import (
     DirectorySummaryRunRequest,
     DirectorySummaryService,
 )
+from pkas.document_extraction import DOCUMENT_PIPELINE_VERSION
 from pkas.document_policy import (
     DocumentPolicyRequest,
     disable_enhancement,
@@ -56,7 +57,7 @@ from pkas.intake import (
     IntakeRequest,
     IntakeService,
 )
-from pkas.machine_catalog import MachineCatalogStart
+from pkas.machine_catalog import MachineCatalogStart, eligible_scopes
 from pkas.mcp_inspector import McpInspectorConflict, McpInspectorError, McpInspectorService
 from pkas.processing_profiles import (
     ProcessingProfileUpdate,
@@ -65,6 +66,12 @@ from pkas.processing_profiles import (
     save_processing_profile,
 )
 from pkas.profile_service import ProfileConflict, ProfileError, ProfileNotFound
+from pkas.project_map import (
+    ProjectMapCreateRequest,
+    ProjectMapPromotionRequest,
+    ProjectMapRunRequest,
+    ProjectMapService,
+)
 from pkas.runtime_manager import RuntimeManager
 from pkas.schemas import (
     AgentCloseoutRequest,
@@ -199,7 +206,8 @@ def capability_knowledge_stats(system: KnowledgeSystem) -> dict[str, Any]:
             "knowledge_chunks": int(
                 connection.execute(
                     """SELECT COUNT(*) FROM chunks c JOIN sources s ON s.id=c.source_id
-                    WHERE s.status='indexed' AND s.source_type<>'codex-turn'"""
+                    WHERE s.status='indexed'
+                      AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')"""
                 ).fetchone()[0]
             ),
             "workflow_runs": int(
@@ -219,7 +227,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         system = KnowledgeSystem.create(resolved_settings)
-        system.database.initialize()
         app.state.system = system
         app.state.mcp_inspector = McpInspectorService(system.settings.client_home)
         app.state.runtime_manager = RuntimeManager(resolved_settings)
@@ -296,7 +303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "coverage": "使用统计暂不可用，不代表零调用",
             }
         with request.app.state.system.database.connect() as connection:
-            data["queues"] = {
+            queues = {
                 table: {
                     row[0]: row[1]
                     for row in connection.execute(
@@ -305,6 +312,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
                 for table in ("index_outbox", "agent_jobs", "workflow_runs")
             }
+            vector_settings = request.app.state.system.rag.vector_index.settings
+            scope_clause = ""
+            if vector_settings.embedding_scope == "selected_l3":
+                scope_clause = (
+                    " AND json_extract(s.metadata_json, "
+                    "'$.requested_processing_level') = 'L3'"
+                )
+            restricted_clause = ""
+            if not vector_settings.embedding_allow_restricted_remote_processing:
+                restricted_clause = " AND c.privacy <> 'restricted'"
+            actionable = {
+                row[0]: row[1]
+                for row in connection.execute(
+                    f"""SELECT o.status,COUNT(*)
+                    FROM index_outbox o
+                    JOIN chunks c ON c.id=o.entity_id
+                    JOIN sources s ON s.id=c.source_id
+                    WHERE o.entity_type='chunk' AND o.operation='upsert'
+                      AND s.status='indexed'
+                      AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
+                      {scope_clause}{restricted_clause}
+                    GROUP BY o.status"""
+                ).fetchall()
+            }
+            all_outbox = queues["index_outbox"]
+            queues["index_outbox_actionable"] = actionable
+            queues["index_outbox_background"] = {
+                status: max(0, int(count) - int(actionable.get(status, 0)))
+                for status, count in all_outbox.items()
+            }
+            data["queues"] = queues
         return success("已读取统一运行中心", data)
 
     @app.post("/api/runtime/services/{service}", response_model=Envelope)
@@ -326,13 +364,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def mcp_inspector_from(request: Request) -> McpInspectorService:
         return request.app.state.mcp_inspector
 
+    def agent_route(method: str, path: str, **kwargs):
+        """Do not expose the legacy PKAS Agent API in the normal product."""
+
+        register = getattr(app, method)
+
+        def decorate(function):
+            if resolved_settings.agent_runtime_enabled:
+                return register(path, **kwargs)(function)
+            return function
+
+        return decorate
+
     @app.get("/api/health", response_model=Envelope)
     def health(request: Request) -> Envelope:
         system = system_from(request)
         details: dict[str, Any] = dict(system.database.health())
         details["app_version"] = system.settings.app_version
         details["document_extraction"] = {
-            "pipeline": "hybrid-v1",
+            "pipeline": DOCUMENT_PIPELINE_VERSION,
             **document_policy(system.settings),
             "restricted_remote_enabled": (
                 system.settings.document_allow_restricted_remote_processing
@@ -726,12 +776,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def intake_recent(request: Request) -> Envelope:
         return success("分类接入记录", request.app.state.intake.recent())
 
-    @app.get('/api/foundation/everything', response_model=Envelope)
+    @app.get("/api/foundation/everything", response_model=Envelope)
     def everything_component(request: Request) -> Envelope:
         data = everything_status(system_from(request).settings.project_root)
-        return success('Everything 组件状态', data)
+        return success("Everything 组件状态", data)
 
-    @app.post('/api/foundation/intake/browse', response_model=Envelope)
+    @app.post("/api/foundation/intake/browse", response_model=Envelope)
     def intake_browse(payload: IntakeBrowseRequest, request: Request) -> Envelope:
         try:
             data = request.app.state.intake.browse(payload)
@@ -739,29 +789,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from None
         return success("已读取目录第一层；尚未递归扫描或入库", data)
 
-    @app.get('/api/foundation/directory-summaries', response_model=Envelope)
+    @app.get("/api/foundation/directory-summaries", response_model=Envelope)
     def directory_summary_status(request: Request) -> Envelope:
         service = DirectorySummaryService(system_from(request).settings)
         return success("已读取目录摘要策略；默认不调用云端", service.status())
 
-    @app.post('/api/foundation/directory-summaries/catalog-overview', response_model=Envelope)
-    def directory_catalog_overview(
-        payload: CatalogOverviewRequest, request: Request
-    ) -> Envelope:
+    @app.post("/api/foundation/directory-summaries/catalog-overview", response_model=Envelope)
+    def directory_catalog_overview(payload: CatalogOverviewRequest, request: Request) -> Envelope:
         try:
             data = DirectorySummaryService(system_from(request).settings).create_catalog_overview(
                 payload
             )
         except (ValueError, OSError, sqlite3.Error) as exc:
-            raise HTTPException(409, str(exc) if isinstance(exc, ValueError)
-                                else "无法读取A库索引") from None
+            raise HTTPException(
+                409, str(exc) if isinstance(exc, ValueError) else "无法读取A库索引"
+            ) from None
         return success("已从A库生成全盘目录概览计划；尚未调用模型", data)
 
-    @app.get('/api/foundation/content-categories', response_model=Envelope)
+    @app.get("/api/foundation/content-categories", response_model=Envelope)
     def content_categories(request: Request) -> Envelope:
         return success("内容用途分类", load_taxonomy(system_from(request).settings.data_root))
 
-    @app.post('/api/foundation/content-categories', response_model=Envelope)
+    @app.post("/api/foundation/content-categories", response_model=Envelope)
     def content_categories_save(payload: TaxonomyUpdate, request: Request) -> Envelope:
         try:
             result = save_taxonomy(system_from(request).settings.data_root, payload)
@@ -769,7 +818,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "分类无法保存或已被修改，请刷新后重试") from None
         return success("分类已保存，下次检查使用新规则；旧记录保留原分类", result)
 
-    @app.post('/api/foundation/content-categories/restore', response_model=Envelope)
+    @app.post("/api/foundation/content-categories/restore", response_model=Envelope)
     def content_categories_restore(payload: TaxonomyRestore, request: Request) -> Envelope:
         try:
             result = restore_system_taxonomy(system_from(request).settings.data_root, payload)
@@ -777,7 +826,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "系统分类无法恢复或已被修改，请刷新后重试") from None
         return success("已恢复系统基准分类；修改前版本仍保留为恢复点", result)
 
-    @app.get('/api/foundation/directory-summaries/{job_id}', response_model=Envelope)
+    @app.get("/api/foundation/directory-summaries/{job_id}", response_model=Envelope)
     def directory_summary_read(job_id: str, request: Request) -> Envelope:
         try:
             result = DirectorySummaryService(system_from(request).settings).read(job_id)
@@ -785,16 +834,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "检查记录不存在") from None
         return success("已读取检查记录", result)
 
-    @app.post('/api/foundation/auto-promotion', response_model=Envelope)
+    @app.post("/api/foundation/auto-promotion", response_model=Envelope)
     def auto_promotion_create(payload: AutoPromotionRequest, request: Request) -> Envelope:
         try:
             result = AutoPromotionService(system_from(request).settings).create(payload)
         except (ValueError, OSError) as exc:
-            raise HTTPException(409, str(exc) if isinstance(exc, ValueError)
-                                else "自动选择计划无法保存") from None
+            raise HTTPException(
+                409, str(exc) if isinstance(exc, ValueError) else "自动选择计划无法保存"
+            ) from None
         return success("已生成自动选择计划；尚未调用Luna，也未读取原文件", result)
 
-    @app.get('/api/foundation/auto-promotion/{job_id}', response_model=Envelope)
+    @app.get("/api/foundation/auto-promotion/latest", response_model=Envelope)
+    def auto_promotion_latest(request: Request) -> Envelope:
+        result = AutoPromotionService(system_from(request).settings).latest()
+        return success("已读取最近完成的自动选择计划", result)
+
+    @app.get("/api/foundation/auto-promotion/{job_id}", response_model=Envelope)
     def auto_promotion_read(job_id: str, request: Request) -> Envelope:
         try:
             result = AutoPromotionService(system_from(request).settings).read(job_id)
@@ -802,31 +857,97 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "自动选择计划不存在") from None
         return success("已读取自动选择计划", result)
 
-    @app.post('/api/foundation/auto-promotion/{job_id}/run', response_model=Envelope)
+    @app.post("/api/foundation/auto-promotion/{job_id}/run", response_model=Envelope)
     def auto_promotion_run(
         job_id: str, payload: AutoPromotionRunRequest, request: Request
     ) -> Envelope:
         try:
             result = AutoPromotionService(system_from(request).settings).run(job_id, payload)
         except (ValueError, OSError) as exc:
-            raise HTTPException(409, str(exc) if isinstance(exc, ValueError)
-                                else "自动选择任务无法保存") from None
+            raise HTTPException(
+                409, str(exc) if isinstance(exc, ValueError) else "自动选择任务无法保存"
+            ) from None
         return success("Luna已完成本批目录级建议；未直接入库", result)
 
+    @app.post("/api/foundation/project-map", response_model=Envelope)
+    def project_map_create(payload: ProjectMapCreateRequest, request: Request) -> Envelope:
+        try:
+            result = ProjectMapService(system_from(request).settings).create(payload)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            raise HTTPException(
+                409, str(exc) if isinstance(exc, ValueError) else "项目总览候选无法生成"
+            ) from None
+        return success("已从已验证的文件理解档案生成项目候选；尚未调用模型", result)
+
+    @app.get("/api/foundation/project-map/latest", response_model=Envelope)
+    def project_map_latest(request: Request) -> Envelope:
+        return success(
+            "已读取最近项目总览候选", ProjectMapService(system_from(request).settings).latest()
+        )
+
+    @app.get("/api/foundation/project-map/{project_map_id}", response_model=Envelope)
+    def project_map_read(project_map_id: str, request: Request) -> Envelope:
+        try:
+            result = ProjectMapService(system_from(request).settings).read(project_map_id)
+        except (ValueError, OSError):
+            raise HTTPException(404, "项目总览候选不存在") from None
+        return success("已读取项目总览候选", result)
+
+    @app.post("/api/foundation/project-map/{project_map_id}/refresh", response_model=Envelope)
+    def project_map_refresh(project_map_id: str, request: Request) -> Envelope:
+        try:
+            result = ProjectMapService(system_from(request).settings).refresh(project_map_id)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            raise HTTPException(
+                409, str(exc) if isinstance(exc, ValueError) else "项目总览增量刷新无法保存"
+            ) from None
+        return success("已增量核对已验证资料；变化项目需重新生成项目卡", result)
+
     @app.post(
-        '/api/foundation/directory-summaries/{job_id}/classification', response_model=Envelope
+        "/api/foundation/project-map/{project_map_id}/promote-preview",
+        response_model=Envelope,
     )
-    def directory_classification_edit(job_id: str, payload: ClassificationEdit,
-                                      request: Request) -> Envelope:
+    def project_map_promote_preview(
+        project_map_id: str, payload: ProjectMapPromotionRequest, request: Request
+    ) -> Envelope:
+        try:
+            selection = ProjectMapService(system_from(request).settings).promotion_selection(
+                project_map_id, payload
+            )
+            result = request.app.state.intake.preview_classified(selection)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            raise HTTPException(
+                409, str(exc) if isinstance(exc, ValueError) else "项目入库预览无法生成"
+            ) from None
+        return success("已按项目候选生成入库预览；尚未写入知识库", result)
+
+    @app.post("/api/foundation/project-map/{project_map_id}/run", response_model=Envelope)
+    def project_map_run(
+        project_map_id: str, payload: ProjectMapRunRequest, request: Request
+    ) -> Envelope:
+        try:
+            result = ProjectMapService(system_from(request).settings).run(project_map_id, payload)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from None
+        return success("Luna已完成本批项目候选理解；未进入普通检索", result)
+
+    @app.post(
+        "/api/foundation/directory-summaries/{job_id}/classification", response_model=Envelope
+    )
+    def directory_classification_edit(
+        job_id: str, payload: ClassificationEdit, request: Request
+    ) -> Envelope:
         try:
             result = DirectorySummaryService(system_from(request).settings).edit_classification(
-                job_id, payload)
+                job_id, payload
+            )
         except (ValueError, OSError) as exc:
-            raise HTTPException(409, str(exc) if isinstance(exc, ValueError)
-                                else "记录无法保存") from None
+            raise HTTPException(
+                409, str(exc) if isinstance(exc, ValueError) else "记录无法保存"
+            ) from None
         return success("文件分类已更新", result)
 
-    @app.post('/api/foundation/directory-summaries/preview', response_model=Envelope)
+    @app.post("/api/foundation/directory-summaries/preview", response_model=Envelope)
     def directory_summary_preview(payload: DirectorySummaryRequest, request: Request) -> Envelope:
         try:
             data = DirectorySummaryService(system_from(request).settings).preview(payload)
@@ -834,7 +955,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from None
         return success("目录检查记录已生成；已抽样正文，未调用模型", data)
 
-    @app.post('/api/foundation/directory-summaries/{job_id}/run', response_model=Envelope)
+    @app.post("/api/foundation/directory-summaries/{job_id}/run", response_model=Envelope)
     def directory_summary_run(
         job_id: str, payload: DirectorySummaryRunRequest, request: Request
     ) -> Envelope:
@@ -844,13 +965,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from None
         return success("目录摘要任务已提交", data)
 
-    @app.post('/api/foundation/intake-policy/{job_id}', response_model=Envelope)
+    @app.post("/api/foundation/intake-policy/{job_id}", response_model=Envelope)
     def intake_policy(job_id: str, payload: IntakePolicy, request: Request) -> Envelope:
         try:
             data = request.app.state.intake.policy(job_id, payload)
-            return success('已更新处理方案，尚未入库', data)
+            return success("已更新处理方案，尚未入库", data)
         except (ValueError, OSError) as exc:
-            raise HTTPException(409, '当前任务不可修改方案，请重新完成范围预览') from exc
+            raise HTTPException(409, "当前任务不可修改方案，请重新完成范围预览") from exc
 
     @app.get("/api/foundation/processing-profiles", response_model=Envelope)
     def processing_profiles(request: Request) -> Envelope:
@@ -873,7 +994,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def intake_preview(payload: IntakeRequest, request: Request) -> Envelope:
         try:
             # The browser sends explicit rules after the profile chooser is
-            # loaded. Older clients omit them; use the saved local profile
+            # loaded.  Older clients omit them; use the saved local profile
             # instead of silently reverting to the hard-coded defaults.
             if payload.rules == DEFAULT_RULES:
                 current = load_processing_profile(system_from(request).settings)
@@ -891,22 +1012,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "任务不存在") from exc
 
     @app.post("/api/foundation/intake/{job_id}/{action}", response_model=Envelope)
-    def intake_action(job_id: str, action: Literal["confirm", "cancel"], request: Request,
-                      confirmed: bool = Query(False),
-                      confirmed_vector: bool = Query(False)) -> Envelope:
+    def intake_action(
+        job_id: str,
+        action: Literal["confirm", "cancel", "split_l3"],
+        request: Request,
+        confirmed: bool = Query(False),
+        confirmed_vector: bool = Query(False),
+    ) -> Envelope:
         try:
             service = request.app.state.intake
-            if (
-                action == "confirm"
-                and confirmed_vector
-                and service.requires_vector(job_id)
-            ):
+            if action == "confirm" and confirmed_vector and service.requires_vector(job_id):
                 request.app.state.runtime_manager.ensure_qdrant_ready()
-            data = (
-                service.run(job_id, confirmed, confirmed_vector)
-                if action == "confirm"
-                else service.cancel(job_id)
-            )
+            data = {
+                "confirm": lambda: service.run(job_id, confirmed, confirmed_vector),
+                "cancel": lambda: service.cancel(job_id),
+                "split_l3": lambda: service.split_semantic(job_id),
+            }[action]()
             return success("已提交操作", data)
         except (ValueError, OSError) as exc:
             detail = str(exc) if isinstance(exc, ValueError) else "任务无法读取"
@@ -915,6 +1036,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/foundation/scopes", response_model=Envelope)
     def foundation_scopes() -> Envelope:
         return success("默认范围建议，尚未授权或扫描", suggested_scopes())
+
+    @app.get("/api/foundation/auto-sources", response_model=Envelope)
+    def foundation_auto_sources(request: Request) -> Envelope:
+        scopes = eligible_scopes()
+        return success(
+            "已准备自动资料范围；尚未开始扫描",
+            {
+                "scopes": scopes,
+                "policy": (
+                    "C盘只处理用户常用目录；其他本地固定盘按根目录建立A库索引；"
+                    "系统目录、缓存、依赖、构建产物和敏感路径自动排除。"
+                ),
+                "profile": load_processing_profile(system_from(request).settings),
+                "requires_path_input": False,
+                "scan_started": False,
+            },
+        )
 
     @app.get("/api/foundation/machine-catalog", response_model=Envelope)
     def machine_catalog_status(request: Request) -> Envelope:
@@ -976,9 +1114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return success("只读资料台账；未触发扫描", data)
 
     @app.get("/api/foundation/analytics", response_model=Envelope)
-    def foundation_analytics(
-        request: Request, days: int = Query(30, ge=7, le=90)
-    ) -> Envelope:
+    def foundation_analytics(request: Request, days: int = Query(30, ge=7, le=90)) -> Envelope:
         try:
             data = FoundationService(system_from(request).settings.database_path).analytics(days)
         except sqlite3.Error as exc:
@@ -1003,8 +1139,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return success("已读取知识库实际纳入范围；未扫描原文件", data)
 
     @app.get("/api/foundation/documents", response_model=Envelope)
-    def foundation_documents(request: Request, limit: int = Query(50, ge=1, le=100),
-                             offset: int = Query(0, ge=0, le=1000000)) -> Envelope:
+    def foundation_documents(
+        request: Request,
+        limit: int = Query(50, ge=1, le=100),
+        offset: int = Query(0, ge=0, le=1000000),
+    ) -> Envelope:
         try:
             service = FoundationService(system_from(request).settings.database_path)
             data = service.documents(limit, offset)
@@ -1013,13 +1152,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return success("当前有效文件的全文与向量登记状态", data)
 
     @app.get("/api/foundation/files", response_model=Envelope)
-    def foundation_files(request: Request, root_id: str,
-                         state: Literal["cataloged", "indexed", "skipped", "missing", "error"],
-                         limit: int = Query(50, ge=1, le=100),
-                         offset: int = Query(0, ge=0, le=1000000)) -> Envelope:
+    def foundation_files(
+        request: Request,
+        root_id: str,
+        state: Literal["cataloged", "indexed", "skipped", "missing", "error"],
+        limit: int = Query(50, ge=1, le=100),
+        offset: int = Query(0, ge=0, le=1000000),
+    ) -> Envelope:
         try:
             data = FoundationService(system_from(request).settings.database_path).files(
-                root_id=root_id, state=state, limit=limit, offset=offset)
+                root_id=root_id, state=state, limit=limit, offset=offset
+            )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except sqlite3.Error as exc:
@@ -1046,6 +1189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         items = system_from(request).sync.search_catalog(
             payload.query,
             root_id=payload.root_id,
+            workspace_path=payload.workspace_path,
             limit=payload.limit,
         )
         return success(f"在资料地图中找到 {len(items)} 个文件", items)
@@ -1119,17 +1263,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return warning("搜索索引重建失败", result)
         return success(f"已重建 {result['indexed_chunks']} 个知识片段的索引", result)
 
-    @app.post("/api/agent/context", response_model=Envelope)
+    @agent_route("post", "/api/agent/context", response_model=Envelope)
     def agent_context(payload: AgentContextRequest, request: Request) -> Envelope:
         result = system_from(request).agent.prepare_context(
             task=payload.task,
+            workspace_path=payload.workspace_path,
             domain=payload.domain,
             limit=payload.limit,
             include_restricted=payload.include_restricted,
         )
         return success(result["summary"], result)
 
-    @app.post("/api/agent/run", response_model=Envelope)
+    @agent_route("post", "/api/agent/run", response_model=Envelope)
     def run_agent(payload: AgentRunRequest, request: Request) -> Envelope:
         result = system_from(request).agent.run(
             task=payload.task,
@@ -1147,7 +1292,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return success(result["result"]["summary"], result)
 
-    @app.post("/api/agent/closeout", response_model=Envelope)
+    @agent_route("post", "/api/agent/closeout", response_model=Envelope)
     def closeout_agent(payload: AgentCloseoutRequest, request: Request) -> Envelope:
         result = system_from(request).agent.closeout_codex_turn(
             source_id=payload.source_id,
@@ -1161,7 +1306,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return success("已生成带证据状态的未审核知识候选", result)
 
-    @app.get("/api/agent/runs/{run_id}/graph", response_model=Envelope)
+    @agent_route("get", "/api/agent/runs/{run_id}/graph", response_model=Envelope)
     def agent_graph_status(run_id: str, request: Request) -> Envelope:
         try:
             result = system_from(request).agent.graph_status(run_id)
@@ -1169,7 +1314,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return success("已读取 LangGraph Agent 检查点状态", result)
 
-    @app.post("/api/agent/runs/{run_id}/resume", response_model=Envelope)
+    @agent_route("post", "/api/agent/runs/{run_id}/resume", response_model=Envelope)
     def resume_agent(run_id: str, request: Request) -> Envelope:
         result = system_from(request).agent.resume(run_id)
         if result["status"] != "completed":
@@ -1180,7 +1325,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return success("LangGraph Agent 已从检查点恢复并完成", result)
 
-    @app.get("/api/agent/jobs", response_model=Envelope)
+    @agent_route("get", "/api/agent/jobs", response_model=Envelope)
     def agent_jobs(
         request: Request,
         limit: int = Query(default=100, ge=1, le=500),
@@ -1188,7 +1333,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         items = system_from(request).repository.list_agent_jobs(limit)
         return success(f"已读取 {len(items)} 个 Agent 后台任务", items)
 
-    @app.get("/api/agent/usage", response_model=Envelope)
+    @agent_route("get", "/api/agent/usage", response_model=Envelope)
     def agent_usage(request: Request) -> Envelope:
         system = system_from(request)
         usage = system.repository.llm_usage_since(datetime.now(UTC).date().isoformat())
@@ -1197,7 +1342,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         usage["output_token_budget"] = system.settings.agent_daily_output_token_budget
         return success("已读取今日 Agent Token 使用量", usage)
 
-    @app.get("/api/agent/runs", response_model=Envelope)
+    @agent_route("get", "/api/agent/runs", response_model=Envelope)
     def agent_runs(
         request: Request,
         limit: int = Query(default=50, ge=1, le=200),
@@ -1231,6 +1376,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> Envelope:
         items = system_from(request).personal_timeline.list_days(limit)
         return success(f"已读取 {len(items)} 天个人活动", items)
+
+    @app.get("/api/personal-timeline/status", response_model=Envelope)
+    def personal_timeline_status(request: Request) -> Envelope:
+        result = system_from(request).personal_timeline.readiness()
+        return success("已读取个人时间线待整理状态；未调用模型", result)
 
     @app.get("/api/personal-timeline/{local_date}", response_model=Envelope)
     def personal_timeline_day(local_date: str, request: Request) -> Envelope:

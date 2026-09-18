@@ -73,7 +73,7 @@ PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "custom": {
         "label": "自定义方案",
         "short_label": "当前电脑",
-        "description": "保留用户自己决定的处理边界；可以在扫描预览后逐类修改。",
+        "description": "先让 AI 对文件做速判和摘要，再由用户确认哪些内容进入知识库。",
         "rules": {
             "markdown": "full",
             "documents": "full",
@@ -81,7 +81,7 @@ PROFILE_DEFINITIONS: dict[str, dict[str, Any]] = {
             "images": "catalog",
             "other": "catalog",
         },
-        "highlights": ["当前电脑默认方案", "扫描后可逐类调整", "不自动扩大采集范围"],
+        "highlights": ["AI 先给出用途和分类建议", "确认后生成 MD 并入库", "不自动扩大采集范围"],
     },
 }
 
@@ -134,21 +134,32 @@ def load_processing_profile(settings: Settings) -> dict[str, Any]:
         exclusions = stored.get("exclusions", [])
         if not isinstance(exclusions, list):
             exclusions = []
-        return _view(profile_id, rules, exclusions)
+        return _view(profile_id, rules, exclusions, configured=True)
     except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
-        return _view("custom", dict(PROFILE_DEFINITIONS["custom"]["rules"]), [])
+        return _view("custom", dict(PROFILE_DEFINITIONS["custom"]["rules"]), [], configured=False)
 
 
-def _view(profile_id: str, rules: dict[str, str], exclusions: list[str]) -> dict[str, Any]:
+def _view(
+    profile_id: str,
+    rules: dict[str, str],
+    exclusions: list[str],
+    *,
+    configured: bool,
+) -> dict[str, Any]:
     definition = PROFILE_DEFINITIONS[profile_id]
     return {
         "profile_id": profile_id,
         "label": definition["label"],
         "short_label": definition["short_label"],
         "description": definition["description"],
+        "selection_flow": (
+            "ai_review_then_confirm" if profile_id == "custom" else "preset"
+        ),
+        "requires_ai_review": profile_id == "custom",
         "rules": dict(rules),
         "exclusions": list(exclusions),
         "highlights": list(definition["highlights"]),
+        "configured": configured,
     }
 
 
@@ -163,13 +174,21 @@ def list_processing_profiles(settings: Settings) -> dict[str, Any]:
                 "label": definition["label"],
                 "short_label": definition["short_label"],
                 "description": definition["description"],
+                "selection_flow": (
+                    "ai_review_then_confirm" if profile_id == "custom" else "preset"
+                ),
+                "requires_ai_review": profile_id == "custom",
                 "rules": dict(current["rules"] if profile_id == "custom" else definition["rules"]),
                 "exclusions": list(current["exclusions"] if profile_id == "custom" else []),
                 "highlights": list(definition["highlights"]),
                 "selected": profile_id == current["profile_id"],
             }
         )
-    return {"current": current, "profiles": profiles}
+    return {
+        "current": current,
+        "profiles": profiles,
+        "first_run_required": not current["configured"],
+    }
 
 
 def save_processing_profile(settings: Settings, request: ProcessingProfileUpdate) -> dict[str, Any]:

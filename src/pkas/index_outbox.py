@@ -26,8 +26,66 @@ class IndexOutbox:
             "pending": counts.get("pending", 0),
             "processing": counts.get("processing", 0),
             "completed": counts.get("completed", 0),
+            "deferred": counts.get("deferred", 0),
             "failed": counts.get("failed", 0),
         }
+
+    def _resolve_reconciled_events(self, before: str) -> dict[str, int]:
+        """Close old events after a successful full vector reconciliation.
+
+        The outbox is a durable change log, not a second vector index.  Older
+        events can remain after a rebuild or a change of embedding scope.  Once
+        ``vector_index.sync`` has reconciled the current eligible set, those
+        events must not remain visible as actionable work.  Upserts outside the
+        configured embedding scope are retained as ``deferred`` evidence of the
+        policy; the rest are completed.  The timestamp fence keeps changes
+        committed during the reconciliation available for the next cycle.
+        """
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            params = [before]
+            settings = getattr(self.vector_index, "settings", None)
+            embedding_scope = getattr(settings, "embedding_scope", "all_formal")
+            allow_restricted = bool(
+                getattr(settings, "embedding_allow_restricted_remote_processing", False)
+            )
+            scope_clause = ""
+            if embedding_scope == "selected_l3":
+                scope_clause = (
+                    " AND json_extract(s.metadata_json, "
+                    "'$.requested_processing_level') = 'L3'"
+                )
+            restricted_clause = ""
+            if not allow_restricted:
+                restricted_clause = " AND c.privacy <> 'restricted'"
+
+            cursor = connection.execute(
+                f"""UPDATE index_outbox
+                    SET status='deferred', last_error_code='outside_embedding_scope',
+                        updated_at=?
+                    WHERE status='pending' AND operation='upsert'
+                      AND entity_type='chunk' AND updated_at <= ?
+                      AND entity_id NOT IN (
+                          SELECT c.id FROM chunks c
+                          JOIN sources s ON s.id=c.source_id
+                          WHERE s.status='indexed'
+                            AND s.source_type NOT IN
+                                ('codex-turn','thread-summary','thread-journal')
+                            {scope_clause}{restricted_clause}
+                      )""",
+                (now, *params),
+            )
+            deferred = int(cursor.rowcount)
+            cursor = connection.execute(
+                """UPDATE index_outbox
+                   SET status='completed', last_error_code=NULL, updated_at=?
+                   WHERE status='pending' AND updated_at <= ?""",
+                (now, before),
+            )
+            completed = int(cursor.rowcount)
+            connection.commit()
+        return {"completed": completed, "deferred": deferred}
 
     def requeue_stale(self, stale_minutes: int = 15) -> int:
         cutoff = (datetime.now(UTC) - timedelta(minutes=stale_minutes)).isoformat()
@@ -121,6 +179,7 @@ class IndexOutbox:
 
     def _process_locked(self, limit: int) -> dict[str, Any]:
         requeued = self.requeue_stale()
+        reconciliation_started = utc_now()
         rows = self.claim(limit)
         if not rows:
             return {
@@ -131,7 +190,11 @@ class IndexOutbox:
                 "stats": self.stats(),
             }
         try:
-            result = self.vector_index.sync(max_chunks=None)
+            # Keep the durable queue bounded.  The previous implementation
+            # claimed a small batch but asked the vector index to process every
+            # eligible chunk, which made a large backlog look stuck and could
+            # consume an unbounded embedding budget in one run.
+            result = self.vector_index.sync(max_chunks=max(1, min(limit, 5000)))
         except VectorIndexError as exc:
             self._retry_claimed(rows, type(exc).__name__)
             return {
@@ -143,11 +206,20 @@ class IndexOutbox:
                 "stats": self.stats(),
             }
         coverage = self.vector_index.coverage()
-        if result.get("status") == "completed" and int(coverage["pending"]) == 0:
+        fully_reconciled = (
+            result.get("status") == "completed" and int(result.get("pending") or 0) == 0
+        )
+        if result.get("status") == "completed":
             self._finish_claimed([int(row["id"]) for row in rows])
+            resolved = (
+                self._resolve_reconciled_events(reconciliation_started)
+                if fully_reconciled
+                else {"completed": 0, "deferred": 0}
+            )
             status = "completed"
         else:
             self._retry_claimed(rows, "vector_sync_incomplete")
+            resolved = {"completed": 0, "deferred": 0}
             status = "warning"
         return {
             "status": status,
@@ -156,5 +228,7 @@ class IndexOutbox:
             "requeued_stale": requeued,
             "vector": result,
             "coverage": coverage,
+            "reconciled": fully_reconciled,
+            "resolved_events": resolved,
             "stats": self.stats(),
         }

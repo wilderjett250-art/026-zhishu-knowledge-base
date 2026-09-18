@@ -195,6 +195,13 @@ def capture_notification(
     if payload.get("type") != "agent-turn-complete":
         return {"status": "ignored", "reason": "unsupported_event"}
 
+    # A Codex turn is working history, not knowledge.  Capturing it is only
+    # available as an explicit archive operation; normal installations must
+    # never silently add every user request to the primary database.
+    resolved_settings = settings or (ingestion.settings if ingestion else Settings())
+    if not resolved_settings.codex_task_capture_enabled:
+        return {"status": "ignored", "reason": "codex_task_capture_disabled"}
+
     thread_id = str(payload.get("thread-id") or payload.get("thread_id") or "unknown-thread")
     turn_id = str(payload.get("turn-id") or payload.get("turn_id") or "unknown-turn")
     user_text = _text_from_value(payload.get("input-messages") or payload.get("input_messages"))
@@ -215,7 +222,7 @@ def capture_notification(
         cwd=cwd,
         capture_mode="notify",
     )
-    service = ingestion or IngestionService(settings=settings)
+    service = ingestion or IngestionService(settings=resolved_settings)
     result = service.import_text(
         text=turn["text"],
         title=turn["title"],
@@ -227,6 +234,10 @@ def capture_notification(
         event_time=turn["event_time"],
         source_created_at=turn["event_time"],
     )
+    # Even explicitly captured task records are archive-only.  They can support
+    # a later, user-confirmed closeout, but cannot enter ordinary retrieval.
+    if result.get("source_id"):
+        service.repository.archive_codex_task_records(source_ids=[result["source_id"]])
     return result
 
 

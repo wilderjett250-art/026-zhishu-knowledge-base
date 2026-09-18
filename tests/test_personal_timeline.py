@@ -68,6 +68,53 @@ def test_candidate_selection_only_uses_self_and_removes_noise(knowledge_system):
     assert [item["id"] for item in candidates] == [kept]
 
 
+def test_readiness_only_lists_self_message_days_without_summaries(knowledge_system):
+    service = PersonalTimelineService(
+        knowledge_system.database, knowledge_system.settings
+    )
+    local_now = datetime.now().astimezone()
+    day = local_now.date().isoformat()
+    _seed(
+        knowledge_system,
+        text="今天继续整理知识库资料",
+        sent_at=int(local_now.replace(hour=11, minute=0, second=0).timestamp()),
+    )
+
+    readiness = service.readiness(7)
+
+    assert readiness["mode"] == "manual_luna_build"
+    assert readiness["pending_day_count"] == 1
+    assert readiness["pending_days"][0]["local_date"] == day
+    assert readiness["pending_days"][0]["message_count"] == 1
+    assert readiness["pending_days"][0]["pending_reason"] == "missing_summary"
+
+
+def test_readiness_marks_a_day_stale_after_new_self_messages(knowledge_system):
+    service = PersonalTimelineService(
+        knowledge_system.database, knowledge_system.settings
+    )
+    local_now = datetime.now().astimezone()
+    day = local_now.date().isoformat()
+    base = int(local_now.replace(hour=9, minute=0, second=0).timestamp())
+    _seed(knowledge_system, text="今天处理项目资料", sent_at=base)
+    now = datetime.now().astimezone().isoformat()
+    with knowledge_system.database.connect() as connection:
+        connection.execute(
+            """INSERT INTO personal_daily_summaries VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (day, "旧整理", "[]", "[]", 1, 1, 1, "test", "fake", "unreviewed", now, now),
+        )
+        connection.commit()
+
+    assert service.readiness(7)["pending_day_count"] == 0
+    _seed(knowledge_system, text="下午继续核对导入结果", sent_at=base + 3600)
+
+    readiness = service.readiness(7)
+    assert readiness["pending_day_count"] == 1
+    assert readiness["pending_days"][0]["pending_reason"] == "new_self_messages"
+    assert readiness["pending_days"][0]["summary_source_message_count"] == 1
+    assert readiness["pending_days"][0]["message_count"] == 2
+
+
 def test_validation_rejects_unknown_evidence():
     result = {
         "factual_summary": "处理项目",

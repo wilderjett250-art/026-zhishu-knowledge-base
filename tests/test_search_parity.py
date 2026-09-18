@@ -13,7 +13,19 @@ def test_exe_mcp_identical_contract(
 ):
     p = source_root / "pump.md"
     p.write_text("Pump sensor precision requirements", encoding="utf-8")
-    knowledge_system.ingestion.import_file(p, domain="work", privacy="private")
+    imported = knowledge_system.ingestion.import_file(p, domain="work", privacy="private")
+    if semantic:
+        with knowledge_system.database.connect() as connection:
+            connection.execute(
+                """UPDATE sources
+                   SET metadata_json = json_set(
+                       COALESCE(metadata_json, '{}'),
+                       '$.requested_processing_level', 'L3'
+                   )
+                 WHERE id = ?""",
+                (imported["source_id"],),
+            )
+            connection.commit()
     monkeypatch.setattr(mcp, "system", lambda: knowledge_system)
 
     def vector(self, query, **kwargs):
@@ -25,6 +37,13 @@ def test_exe_mcp_identical_contract(
     from pkas.vector_index import QdrantVectorIndex
 
     monkeypatch.setattr(QdrantVectorIndex, "search", vector)
+    if semantic:
+        monkeypatch.setattr(QdrantVectorIndex, "enabled", property(lambda self: True))
+        monkeypatch.setattr(
+            QdrantVectorIndex,
+            "coverage",
+            lambda self: {"eligible": 1, "indexed": 1, "pending": 0, "coverage": 1.0},
+        )
     with TestClient(create_app(test_settings)) as client:
         parameters = {"query": "sensor", "limit": 10, "rerank_mode": rerank_mode}
         api = client.post("/api/foundation/search", json=parameters).json()["data"]

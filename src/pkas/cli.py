@@ -132,11 +132,27 @@ def stats() -> None:
 def reindex_outdated(
     limit: Annotated[int, typer.Option(help="单次最多重建的旧版文档数量")] = 10_000,
     yes: Annotated[bool, typer.Option("--yes", help="确认重建派生索引")] = False,
+    source_type: Annotated[
+        list[str] | None,
+        typer.Option("--source-type", help="仅重建指定资料类型，可重复填写"),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="允许重建当前版本的指定资料类型")
+    ] = False,
 ) -> None:
     """使用当前解析器重建旧版派生文本和全文索引，不修改来源原件。"""
     if not yes:
         raise typer.BadParameter("必须添加 --yes 明确确认重建派生索引")
-    print_json(KnowledgeSystem.create().ingestion.reindex_outdated(limit=limit))
+    selected_types = {item.strip().lower() for item in (source_type or []) if item.strip()}
+    if force and not selected_types:
+        raise typer.BadParameter("--force 必须与至少一个 --source-type 一起使用")
+    print_json(
+        KnowledgeSystem.create().ingestion.reindex_outdated(
+            limit=limit,
+            source_types=selected_types or None,
+            force=force,
+        )
+    )
 
 
 @app.command("weflow-exports")

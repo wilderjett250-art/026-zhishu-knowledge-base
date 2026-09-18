@@ -84,6 +84,17 @@ def disable_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     return {"status": "disabled", "enabled": False, "state_path": str(state_path)}
 
 
+def daily_import_is_enabled(knowledge_system: KnowledgeSystem) -> bool:
+    """Return whether an explicit WeFlow daily-import authorization exists.
+
+    The scheduled Windows runner uses this as a fail-closed preflight so it
+    never launches WeFlow merely because a task was registered. No message
+    content or secret fields are read here.
+    """
+    state = _load_state(knowledge_system)
+    return bool(state and state.get("enabled"))
+
+
 def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     state = _load_state(knowledge_system)
     if state is None or not state.get("enabled"):

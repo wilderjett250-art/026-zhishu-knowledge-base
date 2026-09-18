@@ -353,13 +353,6 @@ class CapabilityRegistry:
                 "records": int(qdrant.get("points", 0) or 0),
             },
             {
-                "id": "agent-runtime",
-                "name": "Agent Runtime",
-                "status": "available",
-                "engine": "LangGraph + DeepSeek",
-                "records": int(counts.get("agent_runs", 0)),
-            },
-            {
                 "id": "workflow-engine",
                 "name": "工作流引擎",
                 "status": "available",

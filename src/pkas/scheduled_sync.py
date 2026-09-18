@@ -70,6 +70,9 @@ def run_scheduled_sync(
 ) -> dict[str, Any]:
     """Import completed WeFlow exports and gate full refreshes to six hours."""
     current_ms = _now_ms() if now_ms is None else int(now_ms)
+    # Test calls inject a deterministic clock; production calls should record
+    # the successful watermark at the end of the cycle, not at its start.
+    completion_ms = _now_ms() if now_ms is None else current_ms
     current_boot = current_boot_id(now_ms=current_ms) if boot_id is None else int(boot_id)
     state = _load_state(knowledge_system)
     last_success = int(state.get("last_success_at_ms") or 0)
@@ -102,7 +105,8 @@ def run_scheduled_sync(
         status = "completed"
 
     if completed and full_result is not None:
-        state["last_success_at_ms"] = current_ms
+        state["last_success_at_ms"] = completion_ms
+        state["last_completed_at_ms"] = completion_ms
         if current_boot > 0:
             state["last_boot_id"] = current_boot
     state["last_attempt_at_ms"] = current_ms

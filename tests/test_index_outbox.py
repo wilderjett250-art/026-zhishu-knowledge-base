@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +11,12 @@ from pkas.vector_index import VectorIndexError
 class SuccessfulVectorIndex:
     enabled = True
 
+    def __init__(self):
+        self.calls = []
+
     def sync(self, *, max_chunks: int | None = None) -> dict[str, Any]:
-        assert max_chunks is None
+        self.calls.append(max_chunks)
+        assert max_chunks is not None
         return {"status": "completed", "pending": 0}
 
     def coverage(self) -> dict[str, Any]:
@@ -23,6 +28,15 @@ class FailingVectorIndex(SuccessfulVectorIndex):
         raise VectorIndexError("temporary vector outage")
 
 
+class ScopedVectorSettings:
+    embedding_scope = "selected_l3"
+    embedding_allow_restricted_remote_processing = False
+
+
+class ScopedVectorIndex(SuccessfulVectorIndex):
+    settings = ScopedVectorSettings()
+
+
 def test_chunk_commit_enqueues_and_worker_completes_vector_event(
     knowledge_system: KnowledgeSystem,
     source_root: Path,
@@ -32,13 +46,15 @@ def test_chunk_commit_enqueues_and_worker_completes_vector_event(
 
     knowledge_system.ingestion.import_file(note, domain="work", privacy="private")
     pending = knowledge_system.outbox.stats()
-    outbox = IndexOutbox(knowledge_system.database, SuccessfulVectorIndex())  # type: ignore[arg-type]
+    vector = SuccessfulVectorIndex()
+    outbox = IndexOutbox(knowledge_system.database, vector)  # type: ignore[arg-type]
     result = outbox.process()
 
     assert pending["pending"] >= 1
     assert result["status"] == "completed"
     assert result["completed"] >= 1
     assert result["stats"]["pending"] == 0
+    assert vector.calls == [500]
 
 
 def test_vector_failure_requeues_claimed_events_without_losing_them(
@@ -93,3 +109,31 @@ def test_codex_user_task_does_not_enqueue_vector_work(
     )
 
     assert knowledge_system.outbox.stats()["pending"] == 0
+
+
+def test_successful_full_reconciliation_closes_old_scope_events(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    note = source_root / "scope.md"
+    note.write_text("只保留全文，不进入语义向量范围。", encoding="utf-8")
+    knowledge_system.ingestion.import_file(note, domain="work", privacy="private")
+    now = datetime.now(UTC).isoformat()
+    with knowledge_system.database.connect() as connection:
+        chunk_id = connection.execute("SELECT id FROM chunks LIMIT 1").fetchone()[0]
+        connection.execute(
+            "UPDATE chunks SET id=id WHERE id=?", (chunk_id,)
+        )
+        connection.execute(
+            "UPDATE index_outbox SET updated_at=? WHERE status='pending'", (now,)
+        )
+        connection.commit()
+
+    vector = ScopedVectorIndex()
+    outbox = IndexOutbox(knowledge_system.database, vector)  # type: ignore[arg-type]
+    result = outbox.process()
+
+    assert result["reconciled"] is True
+    assert result["completed"] >= 1
+    assert result["resolved_events"]["completed"] >= 0
+    assert "deferred" in result["stats"]

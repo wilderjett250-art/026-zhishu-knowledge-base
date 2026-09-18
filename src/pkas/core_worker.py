@@ -6,7 +6,6 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pkas.agent_worker import run_agent_jobs
 from pkas.local_lock import WindowsFileLock
 from pkas.sync_worker import run_sync
 from pkas.system import KnowledgeSystem
@@ -18,7 +17,7 @@ def run_core_cycle(
     system: KnowledgeSystem,
     *,
     include_sync: bool = False,
-    process_agents: bool = True,
+    process_agents: bool = False,
 ) -> dict[str, object]:
     system.database.initialize()
     started_at = datetime.now(UTC).isoformat()
@@ -35,23 +34,18 @@ def run_core_cycle(
             "daily_closeout": result["daily_closeout"],
         }
     outbox = system.outbox.process(limit=1000)
-    agent = (
-        run_agent_jobs(system, max_jobs=1)
-        if process_agents and system.settings.deepseek_enabled
-        else {"status": "skipped", "reason": "disabled_for_cycle"}
-    )
-    warning = outbox["status"] != "completed" or agent["status"] in {"warning", "failed"}
+    warning = outbox["status"] != "completed"
     return {
         "status": "warning" if warning else "completed",
         "started_at": started_at,
         "completed_at": datetime.now(UTC).isoformat(),
         "index_outbox": outbox,
-        "agent_jobs": agent,
+        "agent_jobs": {"status": "disabled", "reason": "codex_is_the_interactive_agent"},
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="PKAS 单一后台同步、索引与 Agent 进程")
+    parser = argparse.ArgumentParser(description="PKAS 单一后台同步与索引进程")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--interval-seconds", type=int, default=300)
     parser.add_argument("--include-sync", action="store_true")

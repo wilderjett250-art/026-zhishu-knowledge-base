@@ -133,16 +133,32 @@ def test_vector_status_explains_policy_exclusions(
     restricted = source_root / "restricted.md"
     private.write_text("允许进入远程向量化的普通资料。", encoding="utf-8")
     restricted.write_text("默认只保留本地全文检索的受限资料。", encoding="utf-8")
-    knowledge_system.ingestion.import_file(
+    private_result = knowledge_system.ingestion.import_file(
         private,
         domain="work",
         privacy="private",
     )
-    knowledge_system.ingestion.import_file(
+    restricted_result = knowledge_system.ingestion.import_file(
         restricted,
         domain="work",
         privacy="restricted",
     )
+    # Production vectors are intentionally limited to an explicit L3 intake
+    # decision. Model that decision here so this test isolates the separate
+    # restricted-data policy rather than accidentally testing the L3 gate.
+    with knowledge_system.database.connect() as connection:
+        connection.executemany(
+            """
+            UPDATE sources
+            SET metadata_json = json_set(
+                COALESCE(metadata_json, '{}'),
+                '$.requested_processing_level', 'L3'
+            )
+            WHERE id = ?
+            """,
+            [(private_result["source_id"],), (restricted_result["source_id"],)],
+        )
+        connection.commit()
 
     status = knowledge_system.rag.status()
 

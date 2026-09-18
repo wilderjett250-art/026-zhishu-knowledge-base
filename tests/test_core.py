@@ -43,6 +43,36 @@ def test_import_search_deduplicate_and_provenance(
     assert Path(results[0]["vault_path"]).is_file()
 
 
+def test_project_scoped_search_does_not_cross_recall_same_named_projects(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    project_a = source_root / "project-a"
+    project_b = source_root / "project-b"
+    project_a.mkdir()
+    project_b.mkdir()
+    (project_a / "status.md").write_text(
+        "项目 Alpha 已完成接口验证。", encoding="utf-8"
+    )
+    (project_b / "status.md").write_text(
+        "项目 Beta 已完成接口验证。", encoding="utf-8"
+    )
+    first = knowledge_system.ingestion.import_file(
+        project_a / "status.md", domain="work", privacy="private"
+    )
+    second = knowledge_system.ingestion.import_file(
+        project_b / "status.md", domain="work", privacy="private"
+    )
+
+    scoped = knowledge_system.repository.search(
+        "已完成接口验证", domain="work", workspace_path=str(project_a)
+    )
+
+    assert scoped
+    assert {item["source_id"] for item in scoped} == {first["source_id"]}
+    assert all(item["source_id"] != second["source_id"] for item in scoped)
+
+
 def test_exact_source_name_is_ranked_before_mentions(
     knowledge_system: KnowledgeSystem,
     source_root: Path,
@@ -68,7 +98,7 @@ def test_exact_source_name_is_ranked_before_mentions(
     assert results[0]["match_strategy"] == "exact_source_name"
 
 
-def test_dashboard_and_source_list_use_document_title_for_uuid_files(
+def test_auto_draft_thread_summaries_stay_out_of_dashboard_and_search(
     knowledge_system: KnowledgeSystem,
     source_root: Path,
 ) -> None:
@@ -87,14 +117,14 @@ def test_dashboard_and_source_list_use_document_title_for_uuid_files(
         )
         connection.commit()
 
-    recent = knowledge_system.repository.stats()["recent_sources"][0]
+    recent = knowledge_system.repository.stats()["recent_sources"]
     listed = knowledge_system.repository.list_sources(status="indexed")[0]
 
-    assert recent["title"] == "Unity 动作来源排查"
-    assert recent["document_id"].startswith("doc_")
+    assert recent == []
     assert listed["title"] == "Unity 动作来源排查"
-    assert listed["document_id"] == recent["document_id"]
+    assert listed["document_id"].startswith("doc_")
     assert listed["original_name"] == source.name
+    assert knowledge_system.repository.search("正文可读取", domain="work") == []
 
 
 def test_natural_language_search_broadens_locally_without_losing_provenance(

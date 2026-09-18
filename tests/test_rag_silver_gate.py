@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from scripts.run_rag_silver_gate import (
     _diagnose_case,
     _load_gate,

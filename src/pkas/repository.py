@@ -16,6 +16,7 @@ CODEX_TURN_EVIDENCE_WARNING = (
     "修改、测试、部署或验收状态必须通过当前文件、Git、测试输出或外部回执核验。"
 )
 CODEX_USER_TASK_MIGRATION_KEY = "codex_turn_user_task_only_v1"
+CODEX_TURN_ARCHIVE_MIGRATION_KEY = "codex_turn_archive_v1"
 
 
 def _extract_codex_user_task_text(text: str) -> str | None:
@@ -43,9 +44,10 @@ def new_id(prefix: str) -> str:
 
 
 class Repository:
-    def __init__(self, database: Database | None = None) -> None:
+    def __init__(self, database: Database | None = None, *, initialize: bool = True) -> None:
         self.database = database or Database()
-        self.database.initialize()
+        if initialize:
+            self.database.initialize()
         if self.get_app_meta("document_title_repair_v1") != "completed":
             self.repair_hashed_document_titles()
             self.set_app_meta("document_title_repair_v1", "completed")
@@ -67,6 +69,10 @@ class Repository:
                     json.dumps(empty_result, ensure_ascii=False),
                 )
                 self.set_app_meta(CODEX_USER_TASK_MIGRATION_KEY, "completed")
+        if self.get_app_meta(CODEX_USER_TASK_MIGRATION_KEY) == "completed":
+            # Also run on later boots: an old integration or a manually imported
+            # archive record must never remain searchable after restart.
+            self.archive_codex_task_records()
 
     def get_app_meta(self, key: str) -> str | None:
         with self.database.connect() as connection:
@@ -83,6 +89,60 @@ class Repository:
                 (key, value),
             )
             connection.commit()
+
+    def archive_codex_task_records(
+        self,
+        *,
+        source_ids: list[str] | None = None,
+    ) -> dict[str, int | str]:
+        """Keep raw Codex task records for audit, outside the knowledge lane.
+
+        The operation preserves source bytes and documents.  It only moves
+        records out of the ``indexed`` state, which excludes them from FTS,
+        vector indexing, normal retrieval, daily closeout and statistics.
+        """
+        normalized_ids = list(dict.fromkeys(source_ids or []))
+        clauses = ["source_type = 'codex-turn'", "status = 'indexed'"]
+        params: list[Any] = []
+        if normalized_ids:
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            clauses.append(f"id IN ({placeholders})")
+            params.extend(normalized_ids)
+        where_clause = " AND ".join(clauses)
+        with self.database.connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS count FROM sources WHERE {where_clause}",
+                params,
+            ).fetchone()
+            archived = int(row["count"])
+            if archived:
+                connection.execute(
+                    f"UPDATE sources SET status = 'archived' WHERE {where_clause}",
+                    params,
+                )
+                self._audit(
+                    connection,
+                    "codex_task_records_archived",
+                    "source",
+                    "codex-turn",
+                    {"records_archived": archived},
+                )
+            if not normalized_ids:
+                migration = connection.execute(
+                    "SELECT value FROM app_meta WHERE key = ?",
+                    (CODEX_TURN_ARCHIVE_MIGRATION_KEY,),
+                ).fetchone()
+                if migration is None:
+                    connection.execute(
+                        "INSERT INTO app_meta(key, value) VALUES(?, ?)",
+                        (CODEX_TURN_ARCHIVE_MIGRATION_KEY, "completed"),
+                    )
+            connection.commit()
+        return {
+            "status": "completed",
+            "records_archived": archived,
+            "scope": "selected" if normalized_ids else "all_indexed_codex_turns",
+        }
 
     def repair_hashed_document_titles(self) -> int:
         with self.database.connect() as connection:
@@ -444,6 +504,85 @@ class Repository:
             ).fetchone()
         return dict(row) if row else None
 
+    def register_source_alias(
+        self,
+        *,
+        source_id: str,
+        original_uri: str,
+        original_name: str,
+        vault_path: str,
+        source_type: str,
+        byte_size: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """Record another original path for existing canonical content.
+
+        An alias is provenance only: it has no independent document, chunks,
+        FTS row, or vector rows.  This keeps deduplicated content searchable
+        once while making every accepted input path auditable and coverable.
+        """
+        if not original_uri.strip():
+            raise ValueError("资料别名缺少原始路径。")
+        if byte_size < 0:
+            raise ValueError("资料别名文件大小无效。")
+        now = utc_now()
+        serialized_metadata = json.dumps(metadata or {}, ensure_ascii=False)
+        with self.database.connect() as connection:
+            canonical = connection.execute(
+                "SELECT id, content_hash FROM sources WHERE id = ?",
+                (source_id,),
+            ).fetchone()
+            if not canonical:
+                raise ValueError("资料别名指向的规范资料不存在。")
+            source_at_uri = connection.execute(
+                "SELECT id, content_hash FROM sources WHERE original_uri = ?",
+                (original_uri,),
+            ).fetchone()
+            if source_at_uri:
+                if source_at_uri["content_hash"] != canonical["content_hash"]:
+                    raise ValueError("原始路径已有不同内容版本，需重新预览后处理。")
+                return {"status": "canonical", "source_id": source_at_uri["id"]}
+            current = connection.execute(
+                "SELECT source_id FROM source_aliases WHERE original_uri = ?",
+                (original_uri,),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO source_aliases(
+                    original_uri, source_id, original_name, vault_path, source_type,
+                    byte_size, metadata_json, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(original_uri) DO UPDATE SET
+                    source_id = excluded.source_id,
+                    original_name = excluded.original_name,
+                    vault_path = excluded.vault_path,
+                    source_type = excluded.source_type,
+                    byte_size = excluded.byte_size,
+                    metadata_json = excluded.metadata_json,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    original_uri,
+                    source_id,
+                    original_name,
+                    vault_path,
+                    source_type,
+                    byte_size,
+                    serialized_metadata,
+                    now,
+                    now,
+                ),
+            )
+            self._audit(
+                connection,
+                "source_alias_registered",
+                "source",
+                source_id,
+                {"original_uri": original_uri, "status": "updated" if current else "created"},
+            )
+            connection.commit()
+        return {"status": "updated" if current else "created", "source_id": source_id}
+
     @staticmethod
     def _annotate_evidence_status(item: dict[str, Any]) -> dict[str, Any]:
         if item.get("source_type") == "codex-turn":
@@ -463,6 +602,22 @@ class Repository:
                 (original_uri,),
             ).fetchone()
         return dict(row) if row else None
+
+    def source_ids_for_workspace(self, workspace_path: str) -> list[str]:
+        """Return indexed source IDs belonging to one authorized project scope."""
+        scope_sql, scope_params = self._workspace_scope_sql(workspace_path)
+        if not scope_sql:
+            return []
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT s.id
+                FROM sources AS s
+                WHERE s.status = 'indexed' AND {scope_sql}
+                """,
+                scope_params,
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     def set_source_status(self, source_id: str, status: str) -> None:
         if status not in {"indexed", "superseded"}:
@@ -838,26 +993,41 @@ class Repository:
         parser_version: str,
         chunker_version: str,
         limit: int = 10_000,
+        *,
+        source_types: set[str] | None = None,
+        force: bool = False,
     ) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT s.id, s.original_name, s.vault_path, s.source_type, s.privacy,
-                       d.parser_name, d.parser_version
-                FROM sources s JOIN documents d ON d.source_id = s.id
-                WHERE s.status <> 'superseded'
-                  AND d.parser_name <> 'normalized-text'
-                  AND (
+            conditions = [
+                "s.status <> 'superseded'",
+                "d.parser_name <> 'normalized-text'",
+            ]
+            parameters: list[Any] = []
+            if not force:
+                conditions.append(
+                    """(
                     d.parser_version <> ?
                     OR EXISTS (
                         SELECT 1 FROM chunks c
                         WHERE c.document_id=d.id AND c.chunker_version <> ?
                     )
-                  )
-                ORDER BY s.ingested_at ASC
-                LIMIT ?
-                """,
-                (parser_version, chunker_version, max(1, min(limit, 100_000))),
+                    )"""
+                )
+                parameters.extend([parser_version, chunker_version])
+            if source_types:
+                placeholders = ",".join("?" for _ in source_types)
+                conditions.append(f"s.source_type IN ({placeholders})")
+                parameters.extend(sorted(source_types))
+            parameters.append(max(1, min(limit, 100_000)))
+            rows = connection.execute(
+                """
+                SELECT s.id, s.original_name, s.vault_path, s.source_type, s.privacy,
+                       d.parser_name, d.parser_version
+                FROM sources s JOIN documents d ON d.source_id = s.id
+                WHERE """
+                + " AND ".join(conditions)
+                + " ORDER BY s.ingested_at ASC LIMIT ?",
+                parameters,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -929,12 +1099,14 @@ class Repository:
                 counts[table] = connection.execute(statement).fetchone()["count"]
             counts["knowledge_sources"] = connection.execute(
                 """SELECT COUNT(*) AS count FROM sources
-                WHERE status='indexed' AND source_type<>'codex-turn'"""
+                WHERE status='indexed'
+                  AND source_type NOT IN ('codex-turn','thread-summary','thread-journal')"""
             ).fetchone()["count"]
             counts["knowledge_chunks"] = connection.execute(
                 """SELECT COUNT(*) AS count FROM chunks c
                 JOIN sources s ON s.id=c.source_id
-                WHERE s.status='indexed' AND s.source_type<>'codex-turn'"""
+                WHERE s.status='indexed'
+                  AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')"""
             ).fetchone()["count"]
             counts["codex_user_tasks"] = connection.execute(
                 """SELECT COUNT(*) AS count FROM sources
@@ -947,7 +1119,8 @@ class Repository:
                     """
                     SELECT domain, COUNT(*) AS count
                     FROM sources
-                    WHERE status='indexed' AND source_type<>'codex-turn'
+                    WHERE status='indexed'
+                      AND source_type NOT IN ('codex-turn','thread-summary','thread-journal')
                     GROUP BY domain
                     """
                 ).fetchall()
@@ -965,7 +1138,8 @@ class Repository:
                         WHERE latest.source_id=s.id
                         ORDER BY latest.created_at DESC LIMIT 1
                     )
-                    WHERE s.status='indexed' AND s.source_type<>'codex-turn'
+                    WHERE s.status='indexed'
+                      AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
                     ORDER BY s.ingested_at DESC LIMIT 8
                     """
                 ).fetchall()
@@ -1065,11 +1239,46 @@ class Repository:
             return '""'
         return " AND ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
 
+    @staticmethod
+    def _workspace_scope_sql(
+        workspace_path: str | None,
+        *,
+        alias: str = "s",
+    ) -> tuple[str, list[str]]:
+        """Build an exact-or-descendant source scope for a project workspace.
+
+        Project scope is deliberately path based and deterministic.  A source is
+        eligible only when its original file URI or captured Codex working
+        directory is the requested workspace or one of its descendants.  This
+        keeps a similarly named project in another directory from satisfying a
+        project-specific question.
+        """
+        if not workspace_path or not str(workspace_path).strip():
+            return "", []
+        try:
+            normalized = str(Path(workspace_path).expanduser().resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            return "1 = 0", []
+        normalized = normalized.replace("/", "\\").rstrip("\\").lower()
+        if not normalized:
+            return "1 = 0", []
+        original = f"lower(replace(COALESCE({alias}.original_uri, ''), '/', char(92)))"
+        cwd = (
+            f"lower(replace(COALESCE(json_extract({alias}.metadata_json, '$.cwd'), ''), "
+            "'/', char(92)))"
+        )
+        return (
+            f"(({original} = ? OR {original} LIKE ?) "
+            f"OR ({cwd} = ? OR {cwd} LIKE ?))",
+            [normalized, normalized + "\\%", normalized, normalized + "\\%"],
+        )
+
     def _search_exact_source_name(
         self,
         query: str,
         *,
         domain: str | None,
+        workspace_path: str | None,
         include_restricted: bool,
         include_codex_turns: bool,
     ) -> list[dict[str, Any]]:
@@ -1082,8 +1291,13 @@ class Repository:
         if domain:
             clauses.append("c.domain = ?")
             params.append(domain)
+        scope_sql, scope_params = self._workspace_scope_sql(workspace_path)
+        if scope_sql:
+            clauses.append(scope_sql)
+            params.extend(scope_params)
         if not include_restricted:
             clauses.append("c.privacy <> 'restricted'")
+        clauses.append("s.source_type NOT IN ('thread-summary','thread-journal')")
         if not include_codex_turns:
             clauses.append("s.source_type <> 'codex-turn'")
         with self.database.connect() as connection:
@@ -1187,6 +1401,7 @@ class Repository:
         *,
         expression: str,
         domain: str | None,
+        workspace_path: str | None,
         limit: int,
         include_restricted: bool,
         include_codex_turns: bool,
@@ -1200,8 +1415,13 @@ class Repository:
         if domain:
             clauses.append("c.domain = ?")
             params.append(domain)
+        scope_sql, scope_params = self._workspace_scope_sql(workspace_path)
+        if scope_sql:
+            clauses.append(scope_sql)
+            params.extend(scope_params)
         if not include_restricted:
             clauses.append("c.privacy <> 'restricted'")
+        clauses.append("s.source_type NOT IN ('thread-summary','thread-journal')")
         if not include_codex_turns:
             clauses.append("s.source_type <> 'codex-turn'")
         where_extra = "".join(f" AND {clause}" for clause in clauses)
@@ -1246,10 +1466,11 @@ class Repository:
         query: str,
         *,
         domain: str | None = None,
+        workspace_path: str | None = None,
         limit: int = 10,
         include_restricted: bool = False,
         include_unverified_claims: bool = False,
-        include_task_records: bool = True,
+        include_task_records: bool = False,
     ) -> list[dict[str, Any]]:
         # Kept for API compatibility. Codex assistant outputs are no longer indexed at all,
         # so there are no unverified assistant claims to opt into.
@@ -1264,18 +1485,21 @@ class Repository:
         exact_sources = self._search_exact_source_name(
             query,
             domain=domain,
+            workspace_path=workspace_path,
             include_restricted=include_restricted,
             include_codex_turns=include_codex_turns,
         )
         knowledge_results = self._search_knowledge_items(
             query,
             domain=domain,
+            workspace_path=workspace_path,
             limit=limit,
             include_restricted=include_restricted,
         )
         rows = self._search_chunks_fts(
             expression=self._fts_expression(query),
             domain=domain,
+            workspace_path=workspace_path,
             limit=limit,
             include_restricted=include_restricted,
             include_codex_turns=include_codex_turns,
@@ -1288,6 +1512,7 @@ class Repository:
         rows = self._search_chunks_fts(
             expression=self._broad_fts_expression(query),
             domain=domain,
+            workspace_path=workspace_path,
             limit=limit,
             include_restricted=include_restricted,
             include_codex_turns=include_codex_turns,
@@ -1302,8 +1527,13 @@ class Repository:
         if domain:
             like_clauses.append("c.domain = ?")
             like_params.append(domain)
+        scope_sql, scope_params = self._workspace_scope_sql(workspace_path)
+        if scope_sql:
+            like_clauses.append(scope_sql)
+            like_params.extend(scope_params)
         if not include_restricted:
             like_clauses.append("c.privacy <> 'restricted'")
+        like_clauses.append("s.source_type NOT IN ('thread-summary','thread-journal')")
         if not include_codex_turns:
             like_clauses.append("s.source_type <> 'codex-turn'")
         like_params.append(limit)
@@ -1333,6 +1563,7 @@ class Repository:
         query: str,
         *,
         domain: str | None,
+        workspace_path: str | None,
         limit: int,
         include_restricted: bool,
     ) -> list[dict[str, Any]]:
@@ -1341,6 +1572,17 @@ class Repository:
         if domain:
             clauses.append("domain = ?")
             params.append(domain)
+        if workspace_path:
+            scope_sql, scope_params = self._workspace_scope_sql(workspace_path)
+            clauses.append(
+                "EXISTS ("
+                "SELECT 1 FROM evidence_links AS scoped_evidence "
+                "JOIN sources AS s ON s.id = scoped_evidence.evidence_id "
+                "WHERE scoped_evidence.subject_id = knowledge_items.id "
+                f"AND {scope_sql}"
+                ")"
+            )
+            params.extend(scope_params)
         if not include_restricted:
             clauses.append("privacy <> 'restricted'")
         params.append(min(500, max(50, limit * 10)))
@@ -1362,14 +1604,23 @@ class Repository:
             evidence_by_item: dict[str, list[str]] = {}
             if rows:
                 placeholders = ",".join("?" for _ in rows)
+                evidence_scope_sql, evidence_scope_params = self._workspace_scope_sql(
+                    workspace_path,
+                    alias="sources",
+                )
+                evidence_scope_clause = (
+                    f" AND {evidence_scope_sql}" if evidence_scope_sql else ""
+                )
                 evidence_rows = connection.execute(
                     f"""
-                    SELECT subject_id, evidence_id
+                    SELECT evidence_links.subject_id, evidence_links.evidence_id
                     FROM evidence_links
-                    WHERE subject_id IN ({placeholders})
-                    ORDER BY weight DESC, created_at ASC
+                    JOIN sources ON sources.id = evidence_links.evidence_id
+                    WHERE evidence_links.subject_id IN ({placeholders})
+                    {evidence_scope_clause}
+                    ORDER BY evidence_links.weight DESC, evidence_links.created_at ASC
                     """,
-                    [row["id"] for row in rows],
+                    [row["id"] for row in rows] + evidence_scope_params,
                 ).fetchall()
                 for evidence in evidence_rows:
                     evidence_by_item.setdefault(evidence["subject_id"], []).append(
@@ -2382,22 +2633,40 @@ class Repository:
         matches.sort(key=lambda item: item[0], reverse=True)
         return matches[0][1]
 
-    def search_source_catalog(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+    def search_source_catalog(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        workspace_path: str | None = None,
+    ) -> list[dict[str, Any]]:
         clean = query.strip()
         if not clean:
             return []
+        clauses = ["i.state <> 'missing'", "i.relative_path LIKE ?"]
+        params: list[Any] = [f"%{clean}%"]
+        if workspace_path:
+            try:
+                normalized = str(Path(workspace_path).expanduser().resolve(strict=False))
+            except (OSError, RuntimeError, ValueError):
+                return []
+            normalized = normalized.replace("/", "\\").rstrip("\\").lower()
+            source_uri = "lower(replace(COALESCE(i.source_uri, ''), '/', char(92)))"
+            clauses.append(f"({source_uri} = ? OR {source_uri} LIKE ?)")
+            params.extend([normalized, normalized + "\\%"])
+        params.append(max(1, min(limit, 100)))
         with self.database.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT i.id, i.root_id, r.name AS root_name, r.connector_type,
                        i.source_uri, i.relative_path, i.byte_size, i.modified_ns,
                        i.state, i.source_id, i.last_seen_at
                 FROM sync_items i JOIN sync_roots r ON r.id = i.root_id
-                WHERE i.state <> 'missing' AND i.relative_path LIKE ?
+                WHERE {' AND '.join(clauses)}
                 ORDER BY i.modified_ns DESC
                 LIMIT ?
                 """,
-                (f"%{clean}%", max(1, min(limit, 100))),
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 

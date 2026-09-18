@@ -3,7 +3,12 @@ from fastapi.testclient import TestClient
 
 from pkas.api import create_app
 from pkas.document_extraction import DocumentExtractionPipeline
-from pkas.document_policy import disable_enhancement, document_policy, policy_path
+from pkas.document_policy import (
+    disable_enhancement,
+    document_policy,
+    format_capabilities,
+    policy_path,
+)
 
 
 def test_local_default_blocks_legacy_extractors(test_settings, source_root, monkeypatch):
@@ -45,11 +50,27 @@ def test_saved_off_overrides_legacy_config_and_corruption_fails_closed(test_sett
     assert status["warning"]
 
 
+def test_format_capabilities_match_local_parser_boundaries():
+    capabilities = format_capabilities()
+    native = {
+        extension
+        for group in capabilities["native_groups"]
+        for extension in group["extensions"]
+    }
+    assert {".rtf", ".odt", ".ods", ".odp", ".docx", ".xlsx", ".pptx", ".pdf"} <= native
+    assert set(capabilities["local_converter_formats"]) == {".doc", ".xls", ".ppt"}
+    assert ".msg" in capabilities["optional_converter_formats"]
+    assert capabilities["local_converter_formats"] == [".doc", ".ppt", ".xls"]
+    assert ".pdf" in capabilities["visual_review_formats"]
+
+
 def test_api_default_and_persistence_without_fake_luna(test_settings):
     with TestClient(create_app(test_settings)) as client:
         response = client.get("/api/settings/document-parsing")
         assert response.status_code == 200
         assert response.json()["data"]["mode"] == "local"
+        native_groups = response.json()["data"]["format_capabilities"]["native_groups"]
+        assert ".odt" in native_groups[0]["extensions"]
         response = client.post(
             "/api/settings/document-parsing", json={"ai_enhancement_enabled": True}
         )

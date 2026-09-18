@@ -212,6 +212,7 @@ class AgentGraphRuntime:
                 self.host.tools.search_knowledge.invoke(
                     {
                         "query": state["task"],
+                        "workspace_path": state.get("workspace_path"),
                         "domain": state.get("selected_domain"),
                         "limit": 8,
                         "include_restricted": state.get("include_restricted", False),
@@ -316,6 +317,7 @@ class AgentGraphRuntime:
                 self.host.tools.search_knowledge.invoke(
                     {
                         "query": query,
+                        "workspace_path": state.get("workspace_path"),
                         "domain": state.get("selected_domain"),
                         "limit": 8,
                         "include_restricted": state.get("include_restricted", False),
@@ -329,7 +331,13 @@ class AgentGraphRuntime:
         for query in planner["catalog_queries"]:
             tool_result = cast(
                 dict[str, Any],
-                self.host.tools.search_source_catalog.invoke({"query": query, "limit": 8}),
+                self.host.tools.search_source_catalog.invoke(
+                    {
+                        "query": query,
+                        "limit": 8,
+                        "workspace_path": state.get("workspace_path"),
+                    }
+                ),
             )
             for item in tool_result["items"]:
                 catalog_by_path[item["source_uri"]] = item

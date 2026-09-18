@@ -9,7 +9,7 @@ from typing import Any
 from pkas.db import Database
 from pkas.repository import utc_now
 from pkas.retrieval import RetrievalService
-from pkas.vector_index import QdrantVectorIndex, VectorIndexError
+from pkas.vector_index import QdrantVectorIndex
 
 
 class RagObservabilityService:
@@ -168,7 +168,11 @@ class RagObservabilityService:
                 row["domain"]: row["n"]
                 for row in connection.execute(
                     """SELECT c.domain, COUNT(*) AS n FROM vector_index_state v
-                    JOIN chunks c ON c.id=v.chunk_id GROUP BY c.domain ORDER BY c.domain"""
+                    JOIN chunks c ON c.id=v.chunk_id
+                    JOIN sources s ON s.id=c.source_id
+                    WHERE s.status='indexed'
+                      AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
+                    GROUP BY c.domain ORDER BY c.domain"""
                 ).fetchall()
             }
             structure = {
@@ -187,7 +191,8 @@ class RagObservabilityService:
                     for row in connection.execute(
                         """SELECT chunk_kind, COUNT(*) AS n FROM chunks c
                         JOIN sources s ON s.id=c.source_id
-                        WHERE s.status='indexed' AND s.source_type<>'codex-turn'
+                        WHERE s.status='indexed'
+                          AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
                         GROUP BY chunk_kind ORDER BY chunk_kind"""
                     ).fetchall()
                 },
@@ -196,7 +201,8 @@ class RagObservabilityService:
                     for row in connection.execute(
                         """SELECT chunker_version, COUNT(*) AS n FROM chunks c
                         JOIN sources s ON s.id=c.source_id
-                        WHERE s.status='indexed' AND s.source_type<>'codex-turn'
+                        WHERE s.status='indexed'
+                          AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
                         GROUP BY chunker_version ORDER BY chunker_version"""
                     ).fetchall()
                 },
@@ -204,7 +210,7 @@ class RagObservabilityService:
             matrix_rows = connection.execute(
                 """SELECT c.domain, s.source_type, c.privacy,
                 COUNT(*) AS total_chunks,
-                SUM(CASE WHEN s.source_type<>'codex-turn'
+                SUM(CASE WHEN s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
                     AND (? OR c.privacy<>'restricted') THEN 1 ELSE 0 END)
                     AS eligible_chunks,
                 SUM(CASE WHEN v.chunk_id IS NOT NULL THEN 1 ELSE 0 END)
@@ -214,6 +220,7 @@ class RagObservabilityService:
                     AND v.provider=? AND v.model=? AND v.collection_name=?
                     AND v.payload_version=?
                 WHERE s.status='indexed'
+                  AND s.source_type NOT IN ('codex-turn','thread-summary','thread-journal')
                 GROUP BY c.domain, s.source_type, c.privacy
                 ORDER BY c.domain, s.source_type, c.privacy""",
                 (
@@ -235,10 +242,18 @@ class RagObservabilityService:
                 item["pending_chunks"] = max(0, eligible - indexed)
                 item["coverage"] = indexed / eligible if eligible else None
                 coverage_matrix.append(item)
-            excluded_codex = sum(
-                item["total_chunks"]
-                for item in coverage_matrix
-                if item["source_type"] == "codex-turn"
+            excluded_codex = int(
+                connection.execute(
+                    """SELECT COUNT(*) FROM chunks c JOIN sources s ON s.id=c.source_id
+                    WHERE s.status='indexed' AND s.source_type='codex-turn'"""
+                ).fetchone()[0]
+            )
+            excluded_derived = int(
+                connection.execute(
+                    """SELECT COUNT(*) FROM chunks c JOIN sources s ON s.id=c.source_id
+                    WHERE s.status='indexed'
+                      AND s.source_type IN ('thread-summary','thread-journal')"""
+                ).fetchone()[0]
             )
             excluded_restricted = sum(
                 item["total_chunks"]
@@ -263,14 +278,20 @@ class RagObservabilityService:
                     "records": int(
                         connection.execute(
                             """SELECT COUNT(*) FROM chunks c JOIN sources s
-                            ON s.id=c.source_id WHERE s.status='indexed'"""
+                            ON s.id=c.source_id WHERE s.status='indexed'
+                            AND s.source_type NOT IN (
+                                'codex-turn','thread-summary','thread-journal'
+                            )"""
                         ).fetchone()[0]
                     ),
                     "indexed": int(
                         connection.execute(
                             """SELECT COUNT(*) FROM chunks_fts f JOIN chunks c
                             ON c.id=f.chunk_id JOIN sources s ON s.id=c.source_id
-                            WHERE s.status='indexed'"""
+                            WHERE s.status='indexed'
+                              AND s.source_type NOT IN (
+                                  'codex-turn','thread-summary','thread-journal'
+                              )"""
                         ).fetchone()[0]
                     ),
                     "physical_rows": int(
@@ -327,36 +348,17 @@ class RagObservabilityService:
                     "semantic": False,
                 },
             }
-        qdrant: dict[str, Any] = {"status": "disabled"}
-        if self.vector_index.enabled:
-            try:
-                client = self.vector_index._get_client()
-                if self.vector_index._collection_exists(client):
-                    info = client.get_collection(
-                        self.vector_index.settings.qdrant_collection
-                    )
-                    vectors = info.config.params.vectors
-                    qdrant = {
-                        "status": "ready",
-                        "points": int(info.points_count or 0),
-                        "indexed_vectors": int(info.indexed_vectors_count or 0),
-                        "dimension": int(getattr(vectors, "size", 0) or 0),
-                        "distance": str(getattr(vectors, "distance", "cosine")),
-                    }
-                else:
-                    qdrant = {"status": "not_indexed"}
-            except VectorIndexError as exc:
-                qdrant = {"status": "warning", "warning": str(exc)}
-            except Exception:
-                qdrant = {"status": "warning", "warning": "Qdrant 状态读取失败。"}
+        qdrant = self.vector_index.runtime_status()
+        coverage_value = coverage["coverage"]
         return {
             "provider": self.vector_index.embedding.provider_name,
             "model": self.vector_index.embedding.model_name,
+            "scope": self.vector_index.settings.embedding_scope,
             "collection": self.vector_index.settings.qdrant_collection,
             "eligible_chunks": coverage["eligible"],
             "indexed_chunks": coverage["indexed"],
             "pending_chunks": coverage["pending"],
-            "coverage": round(coverage["coverage"], 6),
+            "coverage": round(coverage_value, 6) if coverage_value is not None else None,
             "domains": domains,
             "coverage_matrix": coverage_matrix,
             "coverage_scope": {
@@ -367,6 +369,7 @@ class RagObservabilityService:
                 "vector_eligible_chunks": int(coverage["eligible"]),
                 "vector_indexed_chunks": int(coverage["indexed"]),
                 "excluded_codex_user_tasks": excluded_codex,
+                "excluded_thread_derivatives": excluded_derived,
                 "excluded_restricted_policy": excluded_restricted,
                 "sources_without_chunks": sources_without_chunks,
                 "restricted_embedding_enabled": allow_restricted,

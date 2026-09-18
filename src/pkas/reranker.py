@@ -1,9 +1,9 @@
-import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any, Protocol
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import httpx
 
 from pkas.config import Settings
 from pkas.local_secrets import LocalSecretError, load_user_secret
@@ -31,6 +31,8 @@ class Reranker(Protocol):
 @dataclass(slots=True)
 class SiliconFlowReranker:
     settings: Settings
+    _http_client: httpx.Client | None = field(default=None, init=False, repr=False)
+    _http_client_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     @property
     def model_name(self) -> str:
@@ -50,6 +52,18 @@ class SiliconFlowReranker:
     def enabled(self) -> bool:
         return bool(self.settings.rerank_enabled and self._api_key())
 
+    def _get_http_client(self) -> httpx.Client:
+        with self._http_client_lock:
+            if self._http_client is None:
+                self._http_client = httpx.Client()
+            return self._http_client
+
+    def _close_http_client(self) -> None:
+        with self._http_client_lock:
+            if self._http_client is not None:
+                self._http_client.close()
+                self._http_client = None
+
     def rerank(self, query: str, documents: Sequence[str], top_n: int) -> RerankResponse:
         clean_query = query.strip()
         clean_documents = [document.strip() for document in documents]
@@ -59,33 +73,29 @@ class SiliconFlowReranker:
         if not self.enabled or not api_key:
             raise RerankError("云端 Rerank 尚未在本机启用或配置。")
         endpoint = f"{self.settings.embedding_base_url.rstrip('/')}/rerank"
-        body = json.dumps(
-            {
-                "model": self.model_name,
-                "query": clean_query,
-                "documents": clean_documents,
-                "top_n": max(1, min(top_n, len(clean_documents))),
-                "return_documents": False,
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        request = Request(
-            endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": "Bearer " + api_key,
-                "Content-Type": "application/json",
-            },
-        )
+        payload = {
+            "model": self.model_name,
+            "query": clean_query,
+            "documents": clean_documents,
+            "top_n": max(1, min(top_n, len(clean_documents))),
+            "return_documents": False,
+        }
         try:
-            with urlopen(request, timeout=self.settings.rerank_timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            raise RerankError(f"Rerank 服务返回 HTTP {exc.code}。") from None
-        except (URLError, TimeoutError, OSError, ValueError):
+            response = self._get_http_client().post(
+                endpoint,
+                json=payload,
+                headers={"Authorization": "Bearer " + api_key},
+                timeout=self.settings.rerank_timeout_seconds,
+            )
+            if not 200 <= response.status_code < 300:
+                raise RerankError(f"Rerank 服务返回 HTTP {response.status_code}。")
+            response_payload = response.json()
+        except httpx.HTTPError:
+            self._close_http_client()
             raise RerankError("Rerank 服务连接或响应解析失败。") from None
-        results = payload.get("results")
+        except (TimeoutError, OSError, ValueError):
+            raise RerankError("Rerank 服务连接或响应解析失败。") from None
+        results = response_payload.get("results")
         if not isinstance(results, list):
             raise RerankError("Rerank 服务返回了无效结果。")
         scores: list[tuple[int, float]] = []
@@ -98,4 +108,4 @@ class SiliconFlowReranker:
             if index < 0 or index >= len(clean_documents):
                 raise RerankError("Rerank 服务返回了越界排序项。")
             scores.append((index, score))
-        return RerankResponse(scores=scores, usage=dict(payload.get("meta") or {}))
+        return RerankResponse(scores=scores, usage=dict(response_payload.get("meta") or {}))

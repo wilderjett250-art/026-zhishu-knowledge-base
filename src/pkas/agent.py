@@ -80,6 +80,7 @@ class AgentService:
         query: str,
         *,
         domain: str | None,
+        workspace_path: str | None = None,
         limit: int,
         include_restricted: bool,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -87,6 +88,7 @@ class AgentService:
             return (
                 self.repository.search(
                     query,
+                    workspace_path=workspace_path,
                     domain=domain,
                     limit=limit,
                     include_restricted=include_restricted,
@@ -99,6 +101,7 @@ class AgentService:
             )
         response = self.retrieval.search(
             query,
+            workspace_path=workspace_path,
             domain=domain,
             limit=limit,
             include_restricted=include_restricted,
@@ -126,6 +129,7 @@ class AgentService:
         *,
         task: str,
         domain: str | None,
+        workspace_path: str | None = None,
         limit: int,
         include_restricted: bool,
     ) -> dict[str, Any]:
@@ -139,6 +143,7 @@ class AgentService:
         results, retrieval_meta = self._search_knowledge(
             task,
             domain=selected_domain,
+            workspace_path=workspace_path,
             limit=limit,
             include_restricted=include_restricted,
         )
@@ -528,6 +533,7 @@ class AgentService:
             initial_results, initial_retrieval_meta = self._search_knowledge(
                 safe_task,
                 domain=selected_domain,
+                workspace_path=workspace_path,
                 limit=8,
                 include_restricted=include_restricted,
             )
@@ -585,6 +591,7 @@ class AgentService:
                 planner_content,
                 initial_results=initial_results,
                 domain=selected_domain,
+                workspace_path=workspace_path,
                 include_restricted=include_restricted,
             )
             context["evidence"] = evidence
@@ -820,6 +827,7 @@ class AgentService:
         *,
         initial_results: list[dict[str, Any]],
         domain: str | None,
+        workspace_path: str | None,
         include_restricted: bool,
     ) -> dict[str, list[dict[str, Any]]]:
         knowledge_by_key: dict[str, dict[str, Any]] = {}
@@ -829,6 +837,7 @@ class AgentService:
             items, _retrieval_meta = self._search_knowledge(
                 query,
                 domain=domain,
+                workspace_path=workspace_path,
                 limit=8,
                 include_restricted=include_restricted,
             )

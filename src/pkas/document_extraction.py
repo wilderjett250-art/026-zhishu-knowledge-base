@@ -1,7 +1,11 @@
 import base64
 import importlib.util
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -24,6 +28,8 @@ from pkas.parsers import (
 )
 
 PaddleTransport = Callable[[dict[str, Any]], dict[str, Any]]
+LOCAL_OFFICE_CONVERSION_FORMATS = {".doc": "docx", ".xls": "xlsx", ".ppt": "pptx"}
+DOCUMENT_PIPELINE_VERSION = "hybrid-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +59,7 @@ def assess_extraction(
     extension = path.suffix.lower()
     reasons: list[str] = []
     visual_pages: list[int] = []
-    needs_docling = extension in DOCLING_EXTENSIONS
+    needs_docling = extension in DOCLING_EXTENSIONS and parsed is None
     needs_visual = extension in VISUAL_EXTENSIONS
     score = 1.0
 
@@ -65,10 +71,16 @@ def assess_extraction(
         if clean_chars == 0:
             reasons.append("empty_native_text")
             score -= 0.75
+        if extension in VISUAL_EXTENSIONS:
+            reasons.append("visual_pixels_not_read")
+            score = min(score, 0.15)
         replacement_count = parsed.text.count("�")
         if replacement_count:
             reasons.append("replacement_characters")
             score -= min(0.3, replacement_count / max(1, clean_chars))
+        if parsed.metadata.get("json_structure_not_read"):
+            reasons.append("invalid_json_text_fallback")
+            score -= 0.15
 
         if extension == ".pdf":
             for item in parsed.metadata.get("page_stats", []):
@@ -83,9 +95,14 @@ def assess_extraction(
                 needs_visual = True
 
         embedded_images = int(parsed.metadata.get("embedded_image_count", 0))
-        if embedded_images and extension in {".docx", ".pptx", ".xlsx"}:
+        image_descriptions = min(
+            embedded_images,
+            int(parsed.metadata.get("embedded_image_description_count", 0)),
+        )
+        uncovered_images = embedded_images - image_descriptions
+        if uncovered_images and extension in {".docx", ".pptx", ".xlsx"}:
             reasons.append("embedded_images_not_ocrd")
-            score -= min(0.2, embedded_images * 0.02)
+            score -= min(0.2, uncovered_images * 0.02)
             needs_docling = True
         if int(parsed.metadata.get("chart_count", 0)):
             reasons.append("charts_need_semantic_parsing")
@@ -176,6 +193,77 @@ class DoclingExtractor:
             raise
         except Exception as exc:
             raise ParseError(f"Docling 解析失败：{exc}") from exc
+
+
+class LocalOfficeConverter:
+    """Convert legacy Office files locally, only while an explicit import reads them."""
+
+    name = "libreoffice-headless"
+
+    @staticmethod
+    def executable() -> Path | None:
+        candidates = [shutil.which("soffice")]
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(variable)
+            if root:
+                candidates.append(str(Path(root) / "LibreOffice" / "program" / "soffice.exe"))
+        for value in candidates:
+            if value and Path(value).is_file():
+                return Path(value)
+        return None
+
+    def available(self) -> bool:
+        return self.executable() is not None
+
+    def parse(self, path: Path, runtime_root: Path) -> ParsedDocument:
+        extension = path.suffix.lower()
+        target = LOCAL_OFFICE_CONVERSION_FORMATS.get(extension)
+        executable = self.executable()
+        if target is None:
+            raise ParseError("当前旧格式没有本地转换规则。")
+        if executable is None:
+            raise ParseError("未发现LibreOffice，旧格式无法在本地转换。")
+        before = path.stat()
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryDirectory(prefix="office-", dir=runtime_root) as temporary:
+                output = Path(temporary)
+                completed = subprocess.run(
+                    [
+                        str(executable),
+                        "--headless",
+                        "--convert-to",
+                        target,
+                        "--outdir",
+                        str(output),
+                        str(path),
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=90,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                converted = output / f"{path.stem}.{target}"
+                if completed.returncode != 0 or not converted.is_file():
+                    raise ParseError("LibreOffice未能转换该旧格式文件。")
+                parsed = parse_native_file(converted)
+        except subprocess.TimeoutExpired as exc:
+            raise ParseError("LibreOffice转换超时，原文件未修改。") from exc
+        except ParseError:
+            raise
+        except OSError as exc:
+            raise ParseError("LibreOffice本地转换无法启动。") from exc
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ParseError("转换期间原文件发生变化，请重新预览。")
+        parsed.parser_name = f"{self.name}+{parsed.parser_name}"
+        parsed.metadata.update(
+            converted_from=extension,
+            converter=self.name,
+            converter_ephemeral=True,
+        )
+        return parsed
 
 
 class PaddleOCRExtractor:
@@ -383,7 +471,7 @@ def _merge_documents(
     metadata = dict(base.metadata)
     metadata["source_extension"] = path.suffix.lower()
     metadata["extraction"] = {
-        "pipeline_version": "hybrid-v1",
+        "pipeline_version": DOCUMENT_PIPELINE_VERSION,
         "extractors": extractors,
         "initial_quality": assessment.as_dict(),
         "warnings": warnings,
@@ -395,7 +483,7 @@ def _merge_documents(
         title=base.title or path.stem,
         text=text,
         parser_name="+".join(extractors),
-        parser_version="hybrid-v1",
+        parser_version=DOCUMENT_PIPELINE_VERSION,
         mime_type=base.mime_type,
         language=base.language,
         event_time=base.event_time,
@@ -414,6 +502,7 @@ class DocumentExtractionPipeline:
     ) -> None:
         self.settings = settings or get_settings()
         self.docling = DoclingExtractor()
+        self.office = LocalOfficeConverter()
         self.paddle = PaddleOCRExtractor(self.settings, paddle_transport)
 
     def parse(self, path: Path, *, privacy: str = "private") -> ParsedDocument:
@@ -424,11 +513,21 @@ class DocumentExtractionPipeline:
         visual: ParsedDocument | None = None
         warnings: list[str] = []
 
-        if extension in TEXT_EXTENSIONS or extension in NATIVE_DOCUMENT_EXTENSIONS:
+        if (
+            extension in TEXT_EXTENSIONS
+            or extension in NATIVE_DOCUMENT_EXTENSIONS
+            or extension in VISUAL_EXTENSIONS
+        ):
             try:
                 native = parse_native_file(path)
             except UnsupportedFormatError:
                 native = None
+        elif extension in LOCAL_OFFICE_CONVERSION_FORMATS:
+            try:
+                runtime_root = self.settings.data_root / "runtime" / "office-conversion"
+                native = self.office.parse(path, runtime_root)
+            except ParseError as exc:
+                warnings.append(f"libreoffice:{type(exc).__name__}")
 
         assessment = assess_extraction(
             path,

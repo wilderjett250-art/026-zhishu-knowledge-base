@@ -4,6 +4,11 @@ from pkas.agent import AgentService
 from pkas.backup_manager import BackupManager
 from pkas.config import Settings, get_settings
 from pkas.customer_repository import CustomerRepository
+from pkas.customer_semantic import (
+    CHAT_VECTOR_COLLECTION,
+    ChatSummaryVectorIndex,
+    CustomerSemanticIndex,
+)
 from pkas.customer_service import CustomerService
 from pkas.customer_workflows import CustomerWorkflowService
 from pkas.db import Database
@@ -49,12 +54,17 @@ class KnowledgeSystem:
     readiness: CoreReadinessService
     machine_catalog: MachineCatalog
     personal_timeline: PersonalTimelineService
+    customer_semantic: CustomerSemanticIndex
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> "KnowledgeSystem":
         resolved_settings = settings or get_settings()
         database = Database(resolved_settings)
-        repository = Repository(database)
+        # The full application owns startup initialization.  The repositories
+        # retain their standalone-safe default, but must not each replay the
+        # schema setup against the same SQLite connection path at startup.
+        database.initialize()
+        repository = Repository(database, initialize=False)
         embedding = SiliconFlowEmbeddingProvider(resolved_settings)
         vector_index = QdrantVectorIndex(
             resolved_settings,
@@ -66,10 +76,27 @@ class KnowledgeSystem:
         machine_catalog = MachineCatalog(resolved_settings)
         retrieval = RetrievalService(repository, vector_index, reranker, machine_catalog)
         ingestion = IngestionService(resolved_settings, repository)
+        chat_index_settings = resolved_settings.model_copy(
+            update={"qdrant_collection": CHAT_VECTOR_COLLECTION}
+        )
+        chat_embedding = SiliconFlowEmbeddingProvider(chat_index_settings)
+        chat_vector_index = ChatSummaryVectorIndex(
+            chat_index_settings,
+            database,
+            repository,
+            chat_embedding,
+        )
+        customer_semantic = CustomerSemanticIndex(
+            settings=resolved_settings,
+            database=database,
+            repository=repository,
+            ingestion=ingestion,
+            vector_index=chat_vector_index,
+        )
         workflows = WorkflowService(repository, ingestion)
         agent = AgentService(repository, settings=resolved_settings, retrieval=retrieval)
         distillation = DistillationService(resolved_settings, repository)
-        customers = CustomerRepository(database)
+        customers = CustomerRepository(database, initialize=False)
         weflow = WeFlowService(
             settings=resolved_settings,
             customers=customers,
@@ -88,6 +115,7 @@ class KnowledgeSystem:
             database=database,
             repository=repository,
             ingestion=ingestion,
+            initialize=False,
         )
         rag = RagObservabilityService(database, vector_index, retrieval)
         outbox = IndexOutbox(database, vector_index)
@@ -124,4 +152,5 @@ class KnowledgeSystem:
             readiness=readiness,
             machine_catalog=machine_catalog,
             personal_timeline=personal_timeline,
+            customer_semantic=customer_semantic,
         )

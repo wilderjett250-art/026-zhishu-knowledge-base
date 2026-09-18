@@ -62,6 +62,25 @@ def test_all_task_installers_honor_local_autostart_policy() -> None:
     assert guard_name in bootstrap
 
 
+def test_scheduled_sync_is_a_hidden_daily_trigger() -> None:
+    installer = (ROOT / "scripts" / "install_scheduled_sync.ps1").read_text(
+        encoding="utf-8"
+    )
+    runner = (ROOT / "scripts" / "run_scheduled_sync.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[string]$DailyAt = '00:00'" in installer
+    assert "New-ScheduledTaskTrigger -Daily -At $dailyTime" in installer
+    assert "loginTrigger" not in installer
+    assert "watchdogTrigger" not in installer
+    assert "-check-daily-authorization" in runner
+    assert "$dailyImportEnabled -and $weflowProcesses.Count -eq 0" in runner
+    bootstrap = (ROOT / "scripts" / "bootstrap_windows.ps1").read_text(encoding="utf-8")
+    assert "[string]$DailyAt = '00:00'" in bootstrap
+    assert "-DailyAt $DailyAt" in bootstrap
+
+
 def test_autostart_policy_gate_fails_closed(tmp_path: Path) -> None:
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
     assert powershell is not None

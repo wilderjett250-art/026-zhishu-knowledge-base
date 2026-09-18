@@ -1,6 +1,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,8 +48,14 @@ class Settings(BaseSettings):
     embedding_api_key: SecretStr | None = None
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_model: str = "BAAI/bge-m3"
+    # Full text is the default knowledge lane.  Only explicitly selected L3
+    # material enters the vector lane, keeping remote embedding work bounded.
+    embedding_scope: Literal["all_formal", "selected_l3"] = "selected_l3"
     embedding_timeout_seconds: int = 60
     embedding_batch_size: int = 32
+    embedding_max_attempts: int = 6
+    embedding_retry_base_seconds: float = 5.0
+    embedding_retry_max_seconds: float = 60.0
     embedding_allow_restricted_remote_processing: bool = False
     rerank_enabled: bool = True
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
@@ -59,20 +66,35 @@ class Settings(BaseSettings):
     rerank_total_char_budget: int = 60_000
     fusion_fts_weight: float = 1.0
     fusion_vector_weight: float = 1.0
+    # The bundled Qdrant runs as a local HTTP sidecar so the EXE, dashboard and
+    # Codex MCP can share one collection.  Embedded mode remains available for
+    # isolated tests, but it is unsafe as the production default because the
+    # local storage folder has a single-process lock.
+    qdrant_mode: Literal["embedded", "service"] = "service"
+    qdrant_path: Path | None = None
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: SecretStr | None = None
     qdrant_collection: str = "pkas_chunks_v1"
+    # Codex itself is the interactive agent.  PKAS keeps its former
+    # LangGraph/DeepSeek orchestration disabled so the product stays focused
+    # on cataloguing, indexing and evidence-backed retrieval.
+    agent_runtime_enabled: bool = False
     agent_daily_input_token_budget: int = 200_000
     agent_daily_output_token_budget: int = 20_000
     agent_min_output_tokens_per_call: int = 128
     agent_max_context_chars: int = 24_000
     agent_max_tool_rounds: int = 4
-    agent_daily_closeout_enabled: bool = True
+    # Codex conversation data is an archive lane, not ordinary knowledge.  It is
+    # deliberately opt-in so a fresh installation never turns every task into
+    # searchable context or background model work.
+    codex_task_capture_enabled: bool = False
+    codex_history_sync_enabled: bool = False
+    agent_daily_closeout_enabled: bool = False
     agent_daily_timezone: str = "local"
     agent_daily_max_jobs: int = 1
     agent_daily_max_sources_per_thread: int = 3
     agent_daily_max_sources_total: int = 30
-    thread_journal_enabled: bool = True
+    thread_journal_enabled: bool = False
     thread_journal_interval_seconds: int = 7 * 24 * 60 * 60
     thread_journal_backlog_interval_seconds: int = 60
     thread_journal_batch_files: int = 8
@@ -101,6 +123,10 @@ class Settings(BaseSettings):
     @property
     def web_dist(self) -> Path:
         return self.project_root / "web" / "dist"
+
+    @property
+    def qdrant_storage_path(self) -> Path:
+        return self.qdrant_path or (self.data_root / "vector" / "qdrant")
 
     @property
     def client_home(self) -> Path:

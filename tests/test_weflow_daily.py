@@ -4,7 +4,12 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from pkas.system import KnowledgeSystem
-from pkas.weflow_daily import authorize_daily_import, disable_daily_import, run_daily_import
+from pkas.weflow_daily import (
+    authorize_daily_import,
+    daily_import_is_enabled,
+    disable_daily_import,
+    run_daily_import,
+)
 
 
 def _create_daily_export(source_root: Path, *, export_time: int) -> tuple[Path, Path]:
@@ -73,6 +78,7 @@ def test_daily_import_starts_after_authorization_and_deduplicates(
     )
     assert authorization["status"] == "authorized"
     assert authorization["privacy"] == "restricted"
+    assert daily_import_is_enabled(knowledge_system) is True
 
     initial = run_daily_import(knowledge_system)
     assert initial["status"] == "completed"
@@ -106,6 +112,7 @@ def test_daily_import_can_be_disabled(
     )
     disabled = disable_daily_import(knowledge_system)
     assert disabled["enabled"] is False
+    assert daily_import_is_enabled(knowledge_system) is False
     result = run_daily_import(knowledge_system)
     assert result["status"] == "disabled"
     assert result["candidate_sessions"] == 0

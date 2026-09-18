@@ -200,6 +200,7 @@ class MachineCatalog:
                 CREATE INDEX IF NOT EXISTS idx_catalog_group
                 ON files(scope_path,top_group,state);
                 CREATE INDEX IF NOT EXISTS idx_catalog_kind ON files(category,extension);
+                CREATE INDEX IF NOT EXISTS idx_catalog_extension_state ON files(extension,state);
                 CREATE INDEX IF NOT EXISTS idx_catalog_modified ON files(modified_ns DESC);
                 CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
                     name, relative_path, extension, category,
