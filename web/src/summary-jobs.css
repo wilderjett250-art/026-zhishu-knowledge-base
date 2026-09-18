@@ -1,0 +1,71 @@
+.summary-jobs { display: flex; flex-direction: column; gap: 12px; }
+.assembly-pipeline { order:-2; display:grid; gap:16px; padding:20px; border:1px solid #315766; border-radius:12px; background:linear-gradient(135deg,rgba(44,208,197,.08),rgba(8,19,26,.86) 42%); }
+.assembly-pipeline header small { color:#43d8ce; font:9px Consolas,monospace; letter-spacing:.14em; }
+.assembly-pipeline header h3 { margin:5px 0 4px; font-size:20px; }
+.assembly-pipeline header p,.pipeline-gap { color:#9ab0bc; font-size:12px; line-height:1.7; }
+.pipeline-stages { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr); gap:12px; align-items:center; }
+.pipeline-stages article { display:grid; gap:5px; min-height:96px; padding:14px; border:1px solid #2d4d59; border-radius:9px; background:#0a1921; }
+.pipeline-stages article span { color:#6fded5; font-size:10px; }
+.pipeline-stages article strong { color:#eff9fb; font-size:24px; }
+.pipeline-stages article small { color:#8098a5; font-size:10px; }
+.pipeline-stages>i { color:#68848f; font-style:normal; font-size:10px; white-space:nowrap; }
+.pipeline-gap { margin:0; padding:10px 12px; border-left:3px solid #cf9b55; background:rgba(207,155,85,.07); }
+.append-only-policy { display:flex; gap:12px; align-items:flex-start; padding:11px 12px; border:1px solid #33746d; border-radius:8px; background:rgba(51,116,109,.09); }
+.append-only-policy strong { color:#75ded5; white-space:nowrap; }
+.append-only-policy span,.assembly-lock-note { color:#9eb4bf; font-size:11px; line-height:1.6; }
+.assembly-lock-note { margin:0; padding:9px 11px; border-left:2px solid #48c9bf; background:rgba(72,201,191,.06); }
+.summary-jobs h3, .summary-jobs p { margin: 0; }
+.summary-jobs > label, .summary-jobs details label { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #9db1bf; }
+.summary-jobs input:not([type=checkbox]), .summary-jobs select, .summary-jobs textarea { background: #0d1c25; color: #e6f0f6; border: 1px solid #34505f; border-radius: 7px; padding: 9px 11px; font: inherit; }
+.summary-jobs > label input:not([type=checkbox]), .summary-jobs > label select { flex: 1; min-width: 240px; }
+.summary-jobs textarea { display: block; width: 100%; min-height: 76px; resize: vertical; box-sizing: border-box; margin-bottom: 8px; }
+.summary-jobs td { vertical-align: top; overflow-wrap: anywhere; }
+.summary-jobs th:first-child { width: 34%; }
+.summary-jobs th:nth-child(2) { width: 22%; }
+.summary-jobs th:last-child { width: 44%; }
+.summary-jobs td select { max-width: 100%; }
+.summary-jobs button { align-self: flex-start; }
+.summary-jobs details { border-top: 1px solid #243c49; padding-top: 10px; }
+.summary-jobs details label { margin-top: 10px; }
+.summary-jobs td details p { white-space: pre-wrap; max-height: 240px; overflow: auto; }
+.promotion-panel { order:-1; display: grid; gap: 14px; padding: 0; overflow: hidden; border: 1px solid #367269; border-radius: 12px; background: rgba(10, 25, 33, .88); }
+.promotion-panel>header { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; padding:18px 20px; border-bottom:1px solid #294952; background:linear-gradient(120deg,rgba(54,216,207,.12),transparent 60%); }
+.promotion-panel>header small { color:#45d7cc; font:9px Consolas,monospace; letter-spacing:.14em; }
+.promotion-panel>header h3 { margin-top:4px; font-size:18px; }
+.promotion-panel>header p { margin-top:7px; color:#91a9b5; font-size:12px; }
+.promotion-panel>header>span { padding:6px 9px; border:1px solid #367269; border-radius:999px; color:#78ded5; font-size:10px; white-space:nowrap; }
+.promotion-panel > label { display: flex; align-items: center; gap: 12px; color: #9db1bf; }
+.assembly-workbench { display:grid; grid-template-columns:minmax(330px,.95fr) minmax(360px,1.05fr); min-height:420px; }
+.assembly-tree { max-height:520px; padding:12px; overflow:auto; border-right:1px solid #29434f; background:#09151c; }
+.assembly-branch { margin-bottom:8px; border:1px solid #263f4b; border-radius:8px; overflow:hidden; }
+.assembly-parent,.assembly-branch>div>label { display:grid; grid-template-columns:auto minmax(0,1fr); gap:9px; align-items:center; cursor:pointer; }
+.assembly-parent { padding:11px 12px; background:#10242d; }
+.assembly-parent span,.assembly-branch>div>label span { display:grid; gap:3px; min-width:0; }
+.assembly-parent small,.assembly-branch>div>label small { color:#75909d; font-size:10px; }
+.assembly-branch>div { padding:5px; }
+.assembly-branch>div>label { margin:3px 0; padding:9px 10px 9px 28px; border:1px solid transparent; border-radius:6px; color:#aec1ca; }
+.assembly-branch>div>label:hover { background:#10212a; }
+.assembly-branch>div>label.selected { border-color:#347e75; background:rgba(54,216,207,.08); color:#f0fbfb; }
+.assembly-settings { display:grid; align-content:start; gap:14px; padding:20px; }
+.assembly-settings>label { display:grid; gap:8px; color:#a5bac4; font-size:12px; }
+.assembly-mode-note { padding:14px; border:1px solid #29434f; border-radius:8px; background:#0b1820; }
+.assembly-mode-note strong { color:#e6f4f5; }
+.assembly-mode-note p { margin-top:6px; color:#8da5b1; font-size:11px; }
+.assembly-selection { display:grid; grid-template-columns:1fr auto; gap:4px 14px; padding:14px; border-left:3px solid #42d5c7; background:#0c1b23; }
+.assembly-selection span { color:#78939f; font-size:10px; }
+.assembly-selection strong { grid-column:1; font-size:19px; }
+.assembly-selection small { grid-column:2; grid-row:1/3; align-self:center; color:#8db0ba; }
+.assembly-preview-button { width:100%; justify-content:center; padding:11px !important; border-color:#39978d !important; background:linear-gradient(120deg,rgba(54,216,207,.2),rgba(54,216,207,.06)) !important; }
+.project-map-panel { display:grid; gap:14px; margin:18px 0; padding:20px; border:1px solid #376b74; border-radius:12px; background:linear-gradient(135deg,rgba(53,190,219,.09),rgba(8,20,28,.94) 42%); }
+.project-map-panel>header { display:flex; gap:18px; justify-content:space-between; align-items:flex-start; }.project-map-panel>header small { color:#55d8e6; font:9px Consolas,monospace; letter-spacing:.14em; }.project-map-panel h3,.project-map-panel p { margin:0; }.project-map-panel h3 { margin-top:5px; font-size:18px; }.project-map-panel>header p { max-width:720px; margin-top:7px; color:#9ab2bd; font-size:12px; line-height:1.7; }
+.project-map-status { display:flex; flex-wrap:wrap; gap:7px; align-items:center; }.project-map-status span { padding:5px 8px; border:1px solid #315261; border-radius:99px; color:#a9c9d2; font-size:11px; }.project-map-status small { margin-left:auto; color:#7597a2; }.project-map-run,.project-map-actions { display:grid; gap:10px; }.project-map-run { grid-template-columns:1fr auto; align-items:center; padding:12px; border:1px solid #294954; border-radius:8px; background:#0a1720; color:#a7c0c9; font-size:12px; }
+.project-map-workbench { display:grid; grid-template-columns:minmax(420px,1.4fr) minmax(270px,.6fr); border:1px solid #294954; border-radius:10px; overflow:hidden; }.project-map-cards { display:grid; gap:8px; max-height:680px; overflow:auto; padding:12px; background:#08141b; }.project-map-cards article { display:grid; gap:7px; padding:13px; border:1px solid #294652; border-radius:8px; background:#0c1c25; }.project-map-cards article.selected { border-color:#43c9bf; box-shadow:inset 0 0 0 1px rgba(67,201,191,.2); }.project-map-card-head { display:grid; grid-template-columns:auto 1fr; gap:9px; align-items:start; cursor:pointer; }.project-map-card-head span { display:grid; gap:3px; }.project-map-card-head small,.project-map-cards p,.project-map-cards footer { color:#94acb6; font-size:11px; line-height:1.6; }.project-map-cards p b { color:#d4e8eb; }.project-map-cards footer { display:flex; justify-content:space-between; gap:12px; border-top:1px solid #243f4a; padding-top:7px; }.project-map-cards footer em { color:#6f8d99; font-style:normal; text-align:right; }
+.project-map-actions { align-content:start; padding:16px; background:#0b1921; }.project-map-actions label { display:grid; gap:7px; color:#a5bdc7; font-size:12px; }.project-map-actions select { background:#0d1c25; color:#e6f0f6; border:1px solid #34505f; border-radius:7px; padding:9px 11px; font:inherit; }.project-map-actions>div { display:grid; gap:3px; padding:12px; border-left:3px solid #54d8df; background:#0d2029; }.project-map-actions>div span,.project-map-actions>div small,.project-map-actions>p { color:#8fa9b4; font-size:11px; line-height:1.6; }.project-map-actions>div strong { font-size:22px; }.project-map-preview { display:grid; gap:7px; padding:12px; border:1px solid #397873; border-radius:8px; background:rgba(45,155,143,.08); }.project-map-preview p { color:#9bb7bf; font-size:11px; line-height:1.6; }.project-map-empty,.project-map-error,.project-map-notice { padding:10px 12px; border-radius:7px; font-size:12px; }.project-map-empty { color:#8fa9b4; background:#0a1820; }.project-map-error { color:#ffc2bb; border:1px solid #914f4b; background:rgba(130,48,41,.15); }.project-map-notice { color:#a3ddd8; border-left:2px solid #43c9bf; background:rgba(67,201,191,.07); }
+@media (max-width:900px) { .project-map-panel>header,.project-map-workbench { grid-template-columns:1fr; display:grid; }.project-map-status small { width:100%; margin-left:0; }.project-map-run { grid-template-columns:1fr; }.project-map-cards { max-height:none; } }
+.category-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 9px; }
+.category-picker label { display: flex; align-items: flex-start; gap: 9px; padding: 11px; border: 1px solid #29434f; border-radius: 9px; cursor: pointer; }
+.category-picker label.selected { border-color: #36d8cf; background: rgba(54, 216, 207, .08); }
+.category-picker span { display: grid; gap: 3px; color: #e6f0f6; }
+.category-picker small { color: #86a0ae; }
+.promotion-preview { padding: 13px; border-left: 3px solid #36d8cf; background: #0b1921; }
+@media (max-width:900px) { .pipeline-stages { grid-template-columns:1fr; } .pipeline-stages>i { padding-left:14px; } .append-only-policy { display:grid; } .assembly-workbench { grid-template-columns:1fr; } .assembly-tree { border-right:0; border-bottom:1px solid #29434f; } }

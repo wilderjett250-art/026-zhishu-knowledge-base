@@ -1,0 +1,19 @@
+{
+  "protocol": "source-located-silver-v1",
+  "expected_case_count": 150,
+  "top_k": 5,
+  "diagnostic_depth": 20,
+  "rerank_mode": "auto",
+  "minimum_hit_rate": 0.95,
+  "minimum_mrr": 0.82,
+  "required_categories": [
+    "business",
+    "code",
+    "general",
+    "hardware",
+    "operations",
+    "project",
+    "table"
+  ],
+  "note": "银标门禁只验证已绑定来源的召回，不替代人工逐结果相关性金标。"
+}
