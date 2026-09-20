@@ -1,0 +1,23 @@
+[package]
+name = "zhishu-desktop"
+version = "0.1.0"
+description = "PKAS personal AI control plane desktop shell"
+authors = ["PKAS"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2.4.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "知枢",
+  "version": "0.1.0",
+  "identifier": "com.zhishu.pkas",
+  "build": {
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Productivity",
+    "shortDescription": "本地个人知识库",
+    "longDescription": "帮助个人整理本机资料、建立可追溯的全文与向量索引，并连接兼容的 AI 客户端。",
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../../src/pkas/": "pkas-app/src/pkas/",
+      "../../pyproject.toml": "pkas-app/pyproject.toml",
+      "../../uv.lock": "pkas-app/uv.lock",
+      "../../README.md": "pkas-app/README.md",
+      "../../web/dist/": "pkas-app/web/dist/",
+      "../../runtime/tauri-payload/": "pkas-app/runtime/",
+      "../../tools/everything/": "pkas-app/tools/everything/",
+      "../../scripts/configure_weflow_manual.mjs": "pkas-app/scripts/configure_weflow_manual.mjs"
+    },
+    "useLocalToolsDir": true,
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
