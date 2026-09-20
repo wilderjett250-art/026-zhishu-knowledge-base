@@ -1,5 +1,6 @@
 import { FormEvent, lazy, ReactNode, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { api, Envelope, post } from "./api";
+import { PRODUCT } from "./brand";
 import DesktopTitlebar from "./DesktopTitlebar";
 
 const CapabilityCenter = lazy(() => import("./CapabilityCenter"));
@@ -15,7 +16,7 @@ type Json = Record<string, any>;
 const nav: Array<{ id: Page; label: string; mark: string }> = [
   { id: "home", label: "总览", mark: "OV" },
   { id: "foundation", label: "资料底座", mark: "DB" },
-  { id: "runtime", label: "运行状态", mark: "RT" },
+  { id: "runtime", label: "运行中心", mark: "RT" },
   { id: "readiness", label: "系统检查", mark: "QA" },
   { id: "capabilities", label: "能力中心", mark: "CP" },
   { id: "knowledge", label: "知识与来源", mark: "KN" },
@@ -38,7 +39,7 @@ function initialPage(): Page {
 const pageMeta: Record<Page, { eyebrow: string; title: string; intro: string }> = {
   foundation: { eyebrow: "KNOWLEDGE FOUNDATION", title: "资料从哪里来，为什么搜不到", intro: "分清已接入范围、目录台账、全文索引与向量登记。" },
   home: { eyebrow: "PERSONAL INTELLIGENCE OS", title: "你的知识，在同一个坐标系里", intro: "资料、证据、工作流和长期自我模型都由你控制。" },
-  runtime: { eyebrow: "RUNTIME", title: "现在能不能用，需要你做什么", intro: "常用状态放在前面；技术进程、历史任务和调用明细按需展开。" },
+  runtime: { eyebrow: "SERVICE CENTER", title: "知识库运行中心", intro: "先看服务是否就绪、资料是否待处理；技术明细按需展开。" },
   readiness: { eyebrow: "SYSTEM STATUS", title: "系统检查", intro: "查看资料索引、检索与客户端的状态，定位需要处理的问题。" },
   capabilities: { eyebrow: "UNIVERSAL CONTROL PLANE", title: "管理所有 AI 客户端的能力", intro: "统一发现 Skill、MCP、知识、向量、Agent 与接入状态。" },
   knowledge: { eyebrow: "KNOWLEDGE ATLAS", title: "从答案返回原始证据", intro: "全文检索业务与自我资料，并沿来源路径回到原文。" },
@@ -147,7 +148,7 @@ function App() {
       <aside className="sidebar">
         <button className="brand" onClick={() => navigate("home")} aria-label="返回总览">
           <span className="brand-glyph"><i /><i /><i /></span>
-          <span><strong>知枢</strong><small>PERSONAL OS</small></span>
+          <span><strong>{PRODUCT.name}</strong><small>{PRODUCT.shortTagline}</small></span>
         </button>
         <div className="domain-pulse">
           <span className="pulse-dot" />
@@ -169,7 +170,7 @@ function App() {
 
       <main className="main-stage">
         <DesktopTitlebar>
-          <div className="breadcrumb"><span>知枢</span><b>/</b><strong>{nav.find((item) => item.id === page)?.label}</strong></div>
+          <div className="breadcrumb"><span>{PRODUCT.name}</span><b>/</b><strong>{nav.find((item) => item.id === page)?.label}</strong></div>
           <div className="top-actions">
             <button className="quiet-button" onClick={() => void refresh()} disabled={busy}>刷新</button>
             <span className="health-pill"><i /> 本机运行</span>
@@ -247,13 +248,13 @@ function Home({ dashboard, setPage, setEvidence, run }: { dashboard: Json | null
 function FirstUseGuide({ setPage }: { setPage: (page: Page, foundationTab?: "intake") => void }) {
   return <section className="first-use-guide" aria-labelledby="first-use-title">
     <header>
-      <div><small>YOUR FIRST KNOWLEDGE BASE</small><h2 id="first-use-title">三步开始，不用先研究一堆设置</h2><p>知枢负责把资料整理成可搜索的底座；是否扫描、哪些内容深入处理，由你确认。</p></div>
+      <div><small>YOUR FIRST KNOWLEDGE BASE</small><h2 id="first-use-title">三步开始，不用先研究一堆设置</h2><p>{PRODUCT.name}负责把资料整理成可搜索的底座；是否扫描、哪些内容深入处理，由你确认。</p></div>
       <span className="first-use-local">本地优先 · 可随时暂停</span>
     </header>
     <div className="first-use-steps">
       <article><b>01</b><div><strong>选整理方式</strong><p>选择预设方案，确认自动建议的资料范围。</p></div></article>
       <article><b>02</b><div><strong>开始整理资料</strong><p>先建立文件目录和分类；重要内容再进入全文或向量搜索。</p></div></article>
-      <article><b>03</b><div><strong>搜索并连接 Codex</strong><p>先在知枢验证召回；MCP 接入是可选项，不会擅自修改客户端设置。</p></div></article>
+      <article><b>03</b><div><strong>搜索并连接 Codex</strong><p>先在{PRODUCT.name}验证召回；MCP 接入是可选项，不会擅自修改客户端设置。</p></div></article>
     </div>
     <footer>
       <button className="accent" onClick={() => setPage("foundation", "intake")}>开始第一次资料接入 <span>→</span></button>
@@ -641,7 +642,7 @@ function manualSyncLabel(status?: string, code?: string) {
   if (status === "preparing") return "核对入库水位";
   if (status === "exporting") return "WeFlow 导出中";
   if (status === "importing") return "新增消息入库中";
-  if (status === "stopped" || code === "owner_exited") return "知枢退出，已停止同步";
+  if (status === "stopped" || code === "owner_exited") return `${PRODUCT.name}退出，已停止同步`;
   if (status === "failed") {
     const labels: Record<string, string> = {
       weflow_already_open: "请先退出 WeFlow",

@@ -289,6 +289,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def runtime_ping():
         return {"service": "pkas-runtime", "status": "ready"}
 
+    @app.get("/api/runtime/brief", response_model=Envelope)
+    def runtime_brief(request: Request) -> Envelope:
+        """Return the immediately useful service state without slow database aggregates.
+
+        The desktop shell calls this first so that a large historical queue or
+        usage table never leaves the user looking at a blank "checking" page.
+        Detailed queue and usage information remains on /api/runtime/overview.
+        """
+        data = request.app.state.runtime_manager.status()
+        data["thread_journal"] = request.app.state.thread_journal.status()
+        return success("已连接本机知识服务", data)
+
     @app.get("/api/runtime/storage", response_model=Envelope)
     def runtime_storage(request: Request) -> Envelope:
         return success(

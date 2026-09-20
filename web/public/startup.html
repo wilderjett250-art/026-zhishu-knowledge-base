@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>知枢 · 正在准备本机服务</title>
+  <title>知域 · 正在准备本机服务</title>
   <style>
     :root{font-family:"Microsoft YaHei UI","Segoe UI",sans-serif;color:#e5edf2;background:#091017;font-synthesis:none;text-rendering:optimizeLegibility}
     *{box-sizing:border-box}body{margin:0;min-width:500px;min-height:100vh;background:radial-gradient(ellipse at 50% 18%,#142832 0,transparent 45%),#091017}
@@ -25,7 +25,7 @@
 </head>
 <body>
   <header data-tauri-drag-region>
-    <div class="brand"><span class="brand-mark"><span>知</span></span><span>知枢 · 个人知识库</span></div>
+    <div class="brand"><span class="brand-mark"><span>知</span></span><span>知域 · 个人知识系统</span></div>
     <button class="close" aria-label="关闭到系统托盘" title="关闭窗口并留在托盘" onclick="window.__TAURI__.window.getCurrentWindow().close()">×</button>
   </header>
   <main>
@@ -35,7 +35,7 @@
     <section class="setup-card" aria-live="polite">
       <div class="state-row">
         <span class="spinner" id="state-icon"></span>
-        <div class="state-copy"><h2 id="state-title">正在检查应用组件</h2><p id="state-detail">只检查知枢本身；不会自动扫描磁盘、导入聊天记录或修改 Codex 设置。</p></div>
+        <div class="state-copy"><h2 id="state-title">正在检查应用组件</h2><p id="state-detail">只检查知域本身；不会自动扫描磁盘、导入聊天记录或修改 Codex 设置。</p></div>
       </div>
       <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
       <ol class="steps" aria-label="启动进度">
@@ -73,7 +73,7 @@
         detail.textContent = nextDetail;
         icon.className = "spinner error";
         bar.className = "progress-bar error";
-        errors.textContent = "请先完全退出知枢，再重新打开。若仍失败，按上方提示查看本机日志；应用不会自动扫描任何资料。";
+        errors.textContent = "请先完全退出知域，再重新打开。若仍失败，按上方提示查看本机日志；应用不会自动扫描任何资料。";
         errors.classList.add("visible");
       };
     })();

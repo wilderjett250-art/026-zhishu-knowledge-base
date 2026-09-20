@@ -114,6 +114,24 @@ def test_api_usage_and_confirmation_gate(test_settings):
         )
 
 
+def test_runtime_brief_avoids_slow_database_queue_queries(test_settings, monkeypatch):
+    with TestClient(create_app(test_settings)) as client:
+        def database_access_is_not_allowed():
+            raise AssertionError("brief endpoint must not read queue or usage tables")
+
+        monkeypatch.setattr(
+            client.app.state.system.database, "connect", database_access_is_not_allowed
+        )
+        response = client.get("/api/runtime/brief")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["services"][0]["id"] == "api"
+    assert "thread_journal" in payload
+    assert "queues" not in payload
+    assert "usage" not in payload
+
+
 def test_runtime_storage_endpoint_reports_actual_data_path_and_system_drive(
     test_settings, monkeypatch
 ):

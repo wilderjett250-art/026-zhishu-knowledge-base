@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "个人知识与智能协作系统"
-    app_version: str = "0.1.0"
+    app_version: str = "0.1.1"
     project_root: Path = PROJECT_ROOT
     data_root: Path = PROJECT_ROOT / "data"
     integration_home: Path | None = None

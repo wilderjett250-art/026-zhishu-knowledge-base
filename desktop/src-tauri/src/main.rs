@@ -108,7 +108,7 @@ fn project_root<R: Runtime>(app: &AppHandle<R>) -> std::io::Result<PathBuf> {
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
-        "未找到有效的知枢程序资源。请重新运行正式安装包修复安装。",
+        "未找到有效的知域程序资源。请重新运行正式安装包修复安装。",
     ))
 }
 
@@ -180,7 +180,7 @@ fn choose_storage_locations(
     if has_legacy_local_data && legacy_project_data.is_some() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "检测到两处已有知识库；为避免选错或覆盖数据，知枢未自动选择。",
+            "检测到两处已有知识库；为避免选错或覆盖数据，知域未自动选择。",
         ));
     }
 
@@ -296,7 +296,7 @@ fn packaged_storage_locations() -> std::io::Result<PackagedStorageLocations> {
         if !data_root.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
-                "知识库数据盘暂不可用；请连接原数据盘后重试，知枢不会切换到空目录。",
+                "知识库数据盘暂不可用；请连接原数据盘后重试，知域不会切换到空目录。",
             ));
         }
         fs::create_dir_all(&app_home).map_err(|error| {
@@ -777,15 +777,15 @@ fn startup_failure_message(error: &std::io::Error) -> (&'static str, &'static st
     match error.kind() {
         std::io::ErrorKind::NotFound => (
             "缺少必要的本地运行文件",
-            "请重新运行知枢安装包修复安装；没有扫描或修改你的个人文件。",
+            "请重新运行知域安装包修复安装；没有扫描或修改你的个人文件。",
         ),
         std::io::ErrorKind::InvalidInput => (
             "发现多份已有知识库",
-            "为避免选错资料，知枢没有自动选库或改写数据；请先确认要使用的数据位置。",
+            "为避免选错资料，知域没有自动选库或改写数据；请先确认要使用的数据位置。",
         ),
         std::io::ErrorKind::AlreadyExists => (
             "已有项目根配置冲突",
-            "知枢未覆盖现有路径配置。请从原程序入口启动，或先核对当前用户已有的项目根设置。",
+            "知域未覆盖现有路径配置。请从原程序入口启动，或先核对当前用户已有的项目根设置。",
         ),
         std::io::ErrorKind::NotConnected => (
             "知识库数据盘暂不可用",
@@ -797,14 +797,14 @@ fn startup_failure_message(error: &std::io::Error) -> (&'static str, &'static st
         ),
         std::io::ErrorKind::AddrInUse => (
             "本机服务端口发生冲突",
-            "知枢没有关闭或接管冲突程序。关闭占用 6333/6334/8765 的应用后重新打开。",
+            "知域没有关闭或接管冲突程序。关闭占用 6333/6334/8765 的应用后重新打开。",
         ),
         std::io::ErrorKind::TimedOut => (
             "本地初始化或健康检查超时",
             "首次准备依赖需要网络；请检查网络后从托盘完全退出再打开。",
         ),
         _ => (
-            "知枢未能完成本机启动",
+            "知域未能完成本机启动",
             "检查网络或修复安装后重试。",
         ),
     }
@@ -830,7 +830,7 @@ fn start_application<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>) 
         window,
         "checking",
         "正在检查应用组件",
-        "只检查知枢本身；不会自动扫描磁盘、导入聊天记录或修改 Codex 配置。",
+        "只检查知域本身；不会自动扫描磁盘、导入聊天记录或修改 Codex 配置。",
     );
     let paths = match runtime_paths(app) {
         Ok(paths) => paths,
@@ -957,7 +957,7 @@ fn main() {
                 MAIN_WINDOW_LABEL,
                 WebviewUrl::App("startup.html".into()),
             )
-            .title("知枢 · 个人知识库")
+            .title("知域 · 个人知识系统")
             .decorations(false)
             .resizable(true)
             .inner_size(1440.0, 960.0)
@@ -965,8 +965,8 @@ fn main() {
             .center()
             .build()?;
 
-            let status = MenuItem::with_id(app, "status", "知枢 · 本机知识库", false, None::<&str>)?;
-            let open = MenuItem::with_id(app, "open", "打开知枢", true, None::<&str>)?;
+            let status = MenuItem::with_id(app, "status", "知域 · 本机知识系统", false, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "打开知域", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "隐藏窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出并停止本机服务", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
@@ -974,7 +974,7 @@ fn main() {
 
             TrayIconBuilder::new()
                 .icon(tray_icon())
-                .tooltip("知枢 · 个人知识库")
+                .tooltip("知域 · 个人知识系统")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -997,11 +997,11 @@ fn main() {
 
             // Do not claim or spawn a second API server when the app already exists.
             if backend_ready() {
-                let _ = main_window.eval("window.setStartupError({title:'检测到已有后台服务',detail:'当前窗口不会接管或关闭旧后台。请先从原启动入口正常退出，再打开知枢。'});");
+                let _ = main_window.eval("window.setStartupError({title:'检测到已有后台服务',detail:'当前窗口不会接管或关闭旧后台。请先从原启动入口正常退出，再打开知域。'});");
                 return Ok(());
             }
             if backend_port_occupied() {
-                let _ = main_window.eval("window.setStartupError({title:'本机服务端口被占用',detail:'知枢没有启动后台，也没有关闭其他程序。释放 8765 端口后重新打开。'});");
+                let _ = main_window.eval("window.setStartupError({title:'本机服务端口被占用',detail:'知域没有启动后台，也没有关闭其他程序。释放 8765 端口后重新打开。'});");
                 return Ok(());
             }
             bind_backend_lifetime()?;

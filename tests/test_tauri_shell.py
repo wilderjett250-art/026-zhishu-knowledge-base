@@ -10,6 +10,8 @@ TAURI_ROOT = ROOT / "desktop" / "src-tauri"
 def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     config = json.loads((TAURI_ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
 
+    assert config["productName"] == "知域"
+    assert config["version"] == "0.1.1"
     assert config["identifier"] == "com.zhishu.pkas"
     assert config["build"]["frontendDist"] == "../../web/dist"
     assert config["bundle"]["active"] is True
@@ -91,7 +93,7 @@ def test_tauri_shell_has_portable_root_resolution_without_secrets() -> None:
     assert 'join("Zhishu").join("pkas-root.txt")' in source
     assert "valid_project_root" in source
     assert "remember_project_root" in source
-    assert "未找到有效的知枢程序资源" in source
+    assert "未找到有效的知域程序资源" in source
     assert "api_key" not in source.lower()
 
 
@@ -115,6 +117,15 @@ def test_packaged_first_run_is_isolated_and_does_not_autoscan_or_configure_clien
     assert "setStartupState" in startup
     assert "setStartupError" in startup
     assert "开始第一次资料接入" in (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+
+def test_runtime_page_uses_a_fast_service_state_before_loading_history() -> None:
+    source = (ROOT / "web" / "src" / "RuntimeCenter.tsx").read_text(encoding="utf-8")
+
+    assert '"/api/runtime/brief"' in source
+    assert '"/api/runtime/overview"' in source
+    assert "RUNTIME_CACHE_KEY" in source
+    assert "25000" in source
 
 
 def test_packaged_storage_keeps_large_data_off_system_drive_and_preserves_existing_data() -> None:
