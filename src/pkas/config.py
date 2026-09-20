@@ -6,13 +6,14 @@ from typing import Literal
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(os.environ.get("PKAS_PROJECT_ROOT", Path(__file__).resolve().parents[2]))
+ENV_FILE = Path(os.environ.get("PKAS_ENV_FILE", PROJECT_ROOT / ".env"))
 APPDATA_ROOT = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         env_prefix="PKAS_",
         extra="ignore",
@@ -158,6 +159,7 @@ class Settings(BaseSettings):
             self.data_root / "distill",
             self.data_root / "index",
             self.data_root / "runs",
+            self.data_root / "reports",
             self.vault_root,
         ):
             path.mkdir(parents=True, exist_ok=True)

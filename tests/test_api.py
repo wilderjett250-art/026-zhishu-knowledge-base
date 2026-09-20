@@ -103,8 +103,8 @@ def create_weflow_xlsx_export(source_root: Path) -> Path:
 def test_api_end_to_end(test_settings: Settings, source_root: Path) -> None:
     note = source_root / "customer.txt"
     note.write_text("客户要求所有结论都附带原始证据路径。", encoding="utf-8")
-    report_dir = test_settings.project_root / "reports"
-    report_dir.mkdir()
+    report_dir = test_settings.data_root / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "rag-silver-gate-20990101-000000.json"
     report_path.write_text(
         json.dumps(

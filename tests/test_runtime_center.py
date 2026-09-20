@@ -1,12 +1,24 @@
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from pkas.api import create_app
-from pkas.runtime_manager import RuntimeManager
+from pkas.runtime_manager import RuntimeManager, _display_path
 from pkas.usage_metrics import UsageMetrics
+
+
+class FakeChildProcess:
+    def poll(self):
+        return None
+
+    def terminate(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
 
 
 def test_usage_counts_and_no_samples(tmp_path):
@@ -42,6 +54,31 @@ def test_ensure_qdrant_accepts_an_already_ready_external_service(test_settings, 
     assert manager.children == {}
 
 
+def test_runtime_manager_starts_packaged_qdrant_from_resource_root(test_settings, monkeypatch):
+    executable = test_settings.project_root / "runtime" / "qdrant" / "qdrant.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"test-only executable placeholder")
+    manager = RuntimeManager(test_settings)
+    monkeypatch.setattr(manager, "_qdrant_ready", lambda: False)
+    launched = {}
+
+    def fake_popen(arguments, **kwargs):
+        launched["arguments"] = arguments
+        launched["environment"] = kwargs["env"]
+        return FakeChildProcess()
+
+    monkeypatch.setattr("pkas.runtime_manager.subprocess.Popen", fake_popen)
+
+    result = manager.control("qdrant", "start")
+
+    assert launched["arguments"] == [str(executable)]
+    assert launched["environment"]["PKAS_PROJECT_ROOT"] == str(test_settings.project_root)
+    assert launched["environment"]["PKAS_DATA_ROOT"] == str(test_settings.data_root)
+    assert launched["environment"]["PKAS_QDRANT_URL"] == test_settings.qdrant_url
+    qdrant = next(item for item in result["services"] if item["id"] == "qdrant")
+    assert qdrant["owned"] is True
+
+
 def test_api_usage_and_confirmation_gate(test_settings):
     with TestClient(create_app(test_settings)) as client:
         assert client.get("/api/runtime/ping").json()["service"] == "pkas-runtime"
@@ -75,6 +112,51 @@ def test_api_usage_and_confirmation_gate(test_settings):
             ).status_code
             == 409
         )
+
+
+def test_runtime_storage_endpoint_reports_actual_data_path_and_system_drive(
+    test_settings, monkeypatch
+):
+    data_root = Path(test_settings.data_root).resolve(strict=False)
+    system_drive = data_root.drive.rstrip("\\/")
+    monkeypatch.setenv("SYSTEMDRIVE", system_drive or "Z:")
+    monkeypatch.delenv("PKAS_RUNTIME_ROOT", raising=False)
+
+    with TestClient(create_app(test_settings)) as client:
+        response = client.get("/api/runtime/storage")
+        overview = client.get("/api/runtime/overview").json()["data"]
+
+    assert response.status_code == 200
+    storage = response.json()["data"]
+    assert storage["data_root"] == str(data_root)
+    assert storage["data_drive"] == (data_root.drive.rstrip("\\/") or "unknown")
+    assert storage["data_on_system_drive"] is bool(system_drive)
+    assert storage["runtime_root"] is None
+    assert storage["runtime_on_system_drive"] is False
+    assert storage["on_system_drive"] is bool(system_drive)
+    assert overview["storage"] == storage
+
+
+def test_runtime_storage_endpoint_marks_runtime_path_on_system_drive(test_settings, monkeypatch):
+    data_root = Path(test_settings.data_root).resolve(strict=False)
+    system_drive = data_root.drive.rstrip("\\/")
+    runtime_root = data_root / "runtime"
+    monkeypatch.setenv("SYSTEMDRIVE", system_drive or "Z:")
+    monkeypatch.setenv("PKAS_RUNTIME_ROOT", str(runtime_root))
+
+    with TestClient(create_app(test_settings)) as client:
+        storage = client.get("/api/runtime/storage").json()["data"]
+
+    assert storage["runtime_root"] == str(runtime_root.resolve(strict=False))
+    assert storage["runtime_on_system_drive"] is bool(system_drive)
+    assert storage["on_system_drive"] is bool(system_drive)
+
+
+def test_display_path_removes_local_windows_device_prefix_but_keeps_unc_prefix():
+    assert _display_path(Path(r"\\?\C:\Zhishu\data")) == r"C:\Zhishu\data"
+    assert _display_path(Path(r"\\?\UNC\server\share\Zhishu")) == (
+        r"\\?\UNC\server\share\Zhishu"
+    )
 
 
 def test_runtime_overview_separates_actionable_vector_work(test_settings, tmp_path):

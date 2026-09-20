@@ -56,7 +56,7 @@ uv run pkas serve --open-browser
 
 `scripts/export_windows_package.ps1` 可生成不含 `data/`、聊天、数据库、运行日志、`.env`、DPAPI 密钥、虚拟环境和 Qdrant 数据的软件包，并为每个源码文件生成 SHA-256 清单。目标电脑使用 `scripts/preflight_windows.ps1` 和 `scripts/bootstrap_windows.ps1` 完成依赖、Web、Qdrant、空库及 FTS 隔离验收；只有显式传入 `-RegisterTasks` 才注册开机任务。
 
-完整命令、验收报告和卸载边界见 [Windows 复制安装与恢复](docs/windows-replication.md)。只有在目标电脑用户明确启用本地自启动策略并请求注册任务后，才会创建包括每日 03:00 `PKAS-Daily-Backup` 在内的任务；安装器不会启用 Codex MCP，也不会复制任何 API 密钥。
+完整命令、验收报告和卸载边界见 [Windows 复制安装与恢复](docs/windows-replication.md)。只有在目标电脑用户明确启用本地自启动策略并请求注册任务后，才会创建包括每日 03:00 `PKAS-Daily-Backup` 在内的任务；WeFlow 同步任务默认每天 23:00 执行，可用 `-DailyAt HH:mm` 修改。安装器不会启用 Codex MCP，也不会复制任何 API 密钥。
 
 ## 备份与灾难恢复
 
@@ -279,7 +279,7 @@ uv run pkas mcp
 - 私人聊天和第三方内容建议标记为 `restricted`。
 - 原始资料、数据库、运行记录和导出数据均被 Git 忽略。
 
-当前本机实例已经接入用户明确授权的 Codex 历史、长期记忆和项目目录；这些真实索引与运行数据均保存在 Git 忽略的数据目录中。接入微信等聊天时，应使用用户合法取得的可读导出文件，并先检查样本字段与第三方隐私范围。
+当前本机实例已经接入用户明确授权的 Codex 历史、长期记忆和项目目录；这些真实索引与运行数据均保存在 Git 忽略的数据目录中。WeFlow 夜间同步只有在用户显式授权 daily-import 后才会启动 WeFlow；未授权时任务会跳过 WeFlow，只保留本地同步链路。接入微信等聊天时，应使用用户合法取得的可读导出文件，并先检查样本字段与第三方隐私范围。
 
 ## 开发验证
 

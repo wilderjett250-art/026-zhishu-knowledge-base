@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "python": "3.11",
+  "node_min_major": 20,
+  "qdrant": {
+    "version": "1.19.0",
+    "asset": "qdrant-x86_64-pc-windows-msvc.zip",
+    "url": "https://github.com/qdrant/qdrant/releases/download/v1.19.0/qdrant-x86_64-pc-windows-msvc.zip",
+    "sha256": "980cb2e1ae771155cf211da8c0a8a9206b6482bd4effdc4db994d3adb707b087"
+  },
+  "default_ports": {
+    "qdrant_http": 6333,
+    "qdrant_grpc": 6334,
+    "dashboard": 8765
+  },
+  "task_names": [
+    "PKAS-Qdrant",
+    "PKAS-Core-Worker",
+    "PKAS-Dashboard",
+    "PKAS-Knowledge-Sync"
+  ]
+}

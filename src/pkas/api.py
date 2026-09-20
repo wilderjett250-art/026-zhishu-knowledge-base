@@ -289,6 +289,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def runtime_ping():
         return {"service": "pkas-runtime", "status": "ready"}
 
+    @app.get("/api/runtime/storage", response_model=Envelope)
+    def runtime_storage(request: Request) -> Envelope:
+        return success(
+            "知识库数据位置",
+            request.app.state.runtime_manager.storage_status(),
+        )
+
     @app.get("/api/runtime/overview", response_model=Envelope)
     def runtime_overview(request: Request):
         data = request.app.state.runtime_manager.status()

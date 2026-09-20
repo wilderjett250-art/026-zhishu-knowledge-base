@@ -1,0 +1,16 @@
+log_level: INFO
+
+storage:
+  on_disk_payload: true
+
+# start_qdrant.ps1 writes an instance-specific qdrant.generated.yaml under
+# the selected data root. Do not put an absolute machine path in this template.
+
+service:
+  host: 127.0.0.1
+  http_port: 6333
+  grpc_port: 6334
+  enable_cors: false
+  enable_tls: false
+
+telemetry_disabled: true

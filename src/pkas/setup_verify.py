@@ -35,7 +35,7 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=True))
         return 2
 
-    temporary_root = base_settings.project_root / "tmp"
+    temporary_root = base_settings.data_root / "runs" / "tmp"
     temporary_root.mkdir(parents=True, exist_ok=True)
 
     try:

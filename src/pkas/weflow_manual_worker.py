@@ -114,12 +114,25 @@ def _run_quiet(
     )
 
 
-def _node_paths() -> tuple[Path, Path]:
-    node = Path(r"C:\Program Files\nodejs\node.exe")
-    npm_cli = Path(r"C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js")
-    if not node.is_file() or not npm_cli.is_file():
-        raise OSError("Node.js 运行环境不可用。")
-    return node, npm_cli
+def _node_paths(project_root: Path) -> tuple[Path, Path]:
+    packaged_roots = (
+        project_root / "runtime" / "node",
+        project_root / "runtime" / "tauri-payload" / "node",
+    )
+    candidates = [
+        (root / "node.exe", root / "node_modules" / "npm" / "bin" / "npm-cli.js")
+        for root in packaged_roots
+    ]
+    candidates.append(
+        (
+            Path(r"C:\Program Files\nodejs\node.exe"),
+            Path(r"C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js"),
+        )
+    )
+    for node, npm_cli in candidates:
+        if node.is_file() and npm_cli.is_file():
+            return node, npm_cli
+    raise OSError("Node.js 运行环境不可用；请修复安装包后重试。")
 
 
 def _weflow_is_running(root: Path) -> bool:
@@ -370,7 +383,7 @@ def run(
         if _weflow_is_running(weflow_root):
             raise RuntimeError("WeFlow 当前由用户打开；请退出 WeFlow 后再次点击同步。")
 
-        node, npm_cli = _node_paths()
+        node, npm_cli = _node_paths(system.settings.project_root)
         helper = system.settings.project_root / "scripts" / "configure_weflow_manual.mjs"
         committed_watermark = _known_export_watermark(data_root)
         baseline = committed_watermark or _baseline_export_time(

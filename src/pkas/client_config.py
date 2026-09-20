@@ -276,6 +276,7 @@ class ClientConfigTransactionService:
             command=command,
             args=args,
             cwd=str(self.settings.project_root),
+            env=self._mcp_environment(),
         )
         try:
             async with asyncio.timeout(20):
@@ -309,13 +310,29 @@ class ClientConfigTransactionService:
         return candidates[0]
 
     def _mcp_command(self) -> tuple[str, list[str]]:
-        scripts_dir = "Scripts" if os.name == "nt" else "bin"
-        executable = self.settings.project_root / ".venv" / scripts_dir / (
-            "python.exe" if os.name == "nt" else "python"
-        )
-        if not executable.is_file():
+        if os.name == "nt":
+            packaged = Path(sys.executable).with_name("python.exe")
+            candidates = (
+                self.settings.project_root / ".venv" / "Scripts" / "python.exe",
+                packaged,
+            )
+        else:
+            candidates = (
+                self.settings.project_root / ".venv" / "bin" / "python",
+                Path(sys.executable),
+            )
+        executable = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if executable is None:
             raise ClientConfigError("PKAS MCP Python运行时不存在，不能生成客户端配置。")
         return str(executable), ["-m", "pkas.mcp_server"]
+
+    def _mcp_environment(self) -> dict[str, str]:
+        return {
+            "PKAS_PROJECT_ROOT": str(self.settings.project_root),
+            "PKAS_DATA_ROOT": str(self.settings.data_root),
+            "PKAS_ENV_FILE": str(self.settings.data_root / "config" / ".env"),
+            "PKAS_QDRANT_URL": self.settings.qdrant_url,
+        }
 
     def _parse(self, spec: ClientConfigSpec, raw: bytes) -> Any:
         try:
@@ -346,6 +363,9 @@ class ClientConfigTransactionService:
             entry = servers.get("personal_knowledge") or tomlkit.table()
             entry["command"] = command
             entry["args"] = args
+            existing_env = entry.get("env", {})
+            safe_existing_env = dict(existing_env) if hasattr(existing_env, "items") else {}
+            entry["env"] = {**safe_existing_env, **self._mcp_environment()}
             entry["enabled"] = enabled
             servers["personal_knowledge"] = entry
             rendered = tomlkit.dumps(document)
@@ -356,7 +376,19 @@ class ClientConfigTransactionService:
         if not isinstance(servers, dict):
             raise ClientConfigError(f"{spec.name} mcpServers 配置结构无效。")
         if enabled:
-            servers["personal_knowledge"] = {"command": command, "args": args}
+            entry = servers.get("personal_knowledge")
+            if not isinstance(entry, dict):
+                entry = {}
+            existing_env = entry.get("env")
+            safe_existing_env = existing_env if isinstance(existing_env, dict) else {}
+            entry.update(
+                {
+                    "command": command,
+                    "args": args,
+                    "env": {**safe_existing_env, **self._mcp_environment()},
+                }
+            )
+            servers["personal_knowledge"] = entry
         else:
             servers.pop("personal_knowledge", None)
         return (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -78,7 +80,13 @@ async def test_codex_apply_is_atomic_and_rollback_backup_restores(
 ) -> None:
     config = transaction_settings.integration_home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
-    original = b'theme = "dark"\n'
+    original = (
+        b'theme = "dark"\n'
+        b'[mcp_servers.personal_knowledge]\n'
+        b'command = "python"\n'
+        b'args = []\n'
+        b'env = { CUSTOM_SETTING = "keep-me" }\n'
+    )
     config.write_bytes(original)
     manager = service(FakeTransactionService, transaction_settings)
     preview = manager.preview("codex", enabled=True)
@@ -90,7 +98,14 @@ async def test_codex_apply_is_atomic_and_rollback_backup_restores(
     )
 
     assert result["connection"]["status"] == "passed"
-    assert b"personal_knowledge" in config.read_bytes()
+    rendered = tomllib.loads(config.read_text(encoding="utf-8"))
+    entry = rendered["mcp_servers"]["personal_knowledge"]
+    assert entry["command"].endswith("python.exe")
+    assert entry["env"]["PKAS_PROJECT_ROOT"] == str(transaction_settings.project_root)
+    assert entry["env"]["PKAS_DATA_ROOT"] == str(transaction_settings.data_root)
+    assert entry["env"]["PKAS_ENV_FILE"] == str(transaction_settings.data_root / "config" / ".env")
+    assert entry["env"]["PKAS_QDRANT_URL"] == transaction_settings.qdrant_url
+    assert entry["env"]["CUSTOM_SETTING"] == "keep-me"
     assert result["secret_values_returned"] is False
     restored = manager.rollback("codex", result["backup_id"])
     assert restored["status"] == "restored"
@@ -138,6 +153,33 @@ async def test_connection_failure_restores_original_config(transaction_settings:
     assert manager.list_backups("cursor")
 
 
+def test_packaged_mcp_uses_the_installed_python_environment(tmp_path: Path, monkeypatch) -> None:
+    project_root = tmp_path / "resources" / "pkas-app"
+    data_root = tmp_path / "local-data"
+    scripts = data_root / "runtime" / "python-env" / "Scripts"
+    scripts.mkdir(parents=True)
+    pythonw = scripts / "pythonw.exe"
+    python = scripts / "python.exe"
+    pythonw.write_bytes(b"windowless runtime")
+    python.write_bytes(b"stdio runtime")
+    settings = Settings(
+        project_root=project_root,
+        data_root=data_root,
+        integration_home=tmp_path / "home",
+        deepseek_api_key=None,
+        embedding_api_key=None,
+    )
+    monkeypatch.setattr(sys, "executable", str(pythonw))
+
+    manager = service(FakeTransactionService, settings)
+
+    command, args = manager._mcp_command()
+    assert Path(command) == python
+    assert args == ["-m", "pkas.mcp_server"]
+    assert manager._mcp_environment()["PKAS_PROJECT_ROOT"] == str(project_root)
+    assert manager._mcp_environment()["PKAS_DATA_ROOT"] == str(data_root)
+
+
 @pytest.mark.asyncio
 async def test_json_clients_preserve_unrelated_servers(transaction_settings: Settings) -> None:
     config = (
@@ -149,7 +191,18 @@ async def test_json_clients_preserve_unrelated_servers(transaction_settings: Set
     )
     config.parent.mkdir(parents=True)
     config.write_text(
-        json.dumps({"mcpServers": {"existing": {"url": "https://example.invalid"}}}),
+        json.dumps(
+            {
+                "mcpServers": {
+                    "existing": {"url": "https://example.invalid"},
+                    "personal_knowledge": {
+                        "command": "old-python",
+                        "args": ["-m", "old"],
+                        "env": {"CUSTOM_SETTING": "keep-me"},
+                    },
+                }
+            }
+        ),
         encoding="utf-8",
     )
     manager = service(FakeTransactionService, transaction_settings)
@@ -159,6 +212,7 @@ async def test_json_clients_preserve_unrelated_servers(transaction_settings: Set
     )
     configured = json.loads(config.read_text(encoding="utf-8"))
     assert set(configured["mcpServers"]) == {"existing", "personal_knowledge"}
+    assert configured["mcpServers"]["personal_knowledge"]["env"]["CUSTOM_SETTING"] == "keep-me"
 
     disable = manager.preview("claude-desktop", enabled=False)
     await manager.apply(

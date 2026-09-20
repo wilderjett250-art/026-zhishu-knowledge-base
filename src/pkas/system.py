@@ -126,7 +126,7 @@ class KnowledgeSystem:
             rag,
             profiles,
             resolved_settings.client_home,
-            resolved_settings.project_root / "reports",
+            resolved_settings.data_root / "reports",
             resolved_settings.data_root,
         )
         personal_timeline = PersonalTimelineService(database, resolved_settings)

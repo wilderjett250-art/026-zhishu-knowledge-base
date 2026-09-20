@@ -3,12 +3,21 @@
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 from pkas.config import Settings
 from pkas.local_lock import WindowsFileLock
+
+
+def _display_path(path: Path) -> str:
+    value = str(path)
+    if value.startswith("\\\\?\\") and not value.casefold().startswith("\\\\?\\unc\\"):
+        return value[4:]
+    return value
 
 
 class RuntimeManager:
@@ -18,6 +27,35 @@ class RuntimeManager:
         self.lock = threading.Lock()
         self.errors: dict[str, str] = {}
         self.stopping: set[str] = set()
+
+    def storage_status(self):
+        """Expose the resolved data directory without probing or mutating it."""
+        data_root = Path(self.settings.data_root).expanduser().resolve(strict=False)
+        data_display = _display_path(data_root)
+        data_drive = Path(data_display).drive.rstrip("\\/")
+        system_drive = os.environ.get("SYSTEMDRIVE", "").rstrip("\\/")
+        if not system_drive and os.name == "nt":
+            system_drive = "C:"
+        runtime_value = os.environ.get("PKAS_RUNTIME_ROOT")
+        runtime_root = (
+            Path(runtime_value).expanduser().resolve(strict=False) if runtime_value else None
+        )
+        runtime_display = _display_path(runtime_root) if runtime_root else None
+        runtime_drive = Path(runtime_display).drive.rstrip("\\/") if runtime_display else ""
+        data_on_system_drive = bool(
+            data_drive and system_drive and data_drive.casefold() == system_drive.casefold()
+        )
+        runtime_on_system_drive = bool(
+            runtime_drive and system_drive and runtime_drive.casefold() == system_drive.casefold()
+        )
+        return {
+            "data_root": data_display,
+            "data_drive": data_drive or "unknown",
+            "data_on_system_drive": data_on_system_drive,
+            "runtime_root": runtime_display,
+            "runtime_on_system_drive": runtime_on_system_drive,
+            "on_system_drive": data_on_system_drive or runtime_on_system_drive,
+        }
 
     def _qdrant_ready(self):
         try:
@@ -69,6 +107,7 @@ class RuntimeManager:
             )
         return {
             "services": services,
+            "storage": self.storage_status(),
             "autostart_changed": False,
             "sync": "手动触发；不随桌面启动",
             "agent": "不随桌面启动",
@@ -126,8 +165,17 @@ class RuntimeManager:
             env = os.environ.copy()
             env["PKAS_DATA_ROOT"] = str(self.settings.data_root)
             env["PKAS_PROJECT_ROOT"] = str(root)
+            env["PKAS_ENV_FILE"] = str(self.settings.data_root / "config" / ".env")
+            env["PKAS_QDRANT_URL"] = self.settings.qdrant_url
             if name == "qdrant":
-                executable = root / "runtime" / "qdrant" / "qdrant.exe"
+                candidates = (
+                    root / "runtime" / "qdrant" / "qdrant.exe",
+                    root / "runtime" / "tauri-payload" / "qdrant" / "qdrant.exe",
+                )
+                executable = next(
+                    (candidate for candidate in candidates if candidate.is_file()),
+                    candidates[0],
+                )
                 arguments = [str(executable)]
                 env.update(
                     {
@@ -146,7 +194,7 @@ class RuntimeManager:
             else:
                 with WindowsFileLock(self.settings.data_root / "runtime" / "pkas-core.lock"):
                     pass
-                executable = root / ".venv" / "Scripts" / "pythonw.exe"
+                executable = Path(sys.executable)
                 stop_file = run / "indexer.stop"
                 stop_file.unlink(missing_ok=True)
                 arguments = [

@@ -390,7 +390,7 @@ class RagObservabilityService:
         return report
 
     def latest_silver_gate_path(self) -> Path | None:
-        report_dir = Path(self.vector_index.settings.project_root) / "reports"
+        report_dir = Path(self.vector_index.settings.data_root) / "reports"
         reports = sorted(report_dir.glob("rag-silver-gate-*.json"), reverse=True)
         return reports[0] if reports else None
 

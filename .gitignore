@@ -9,6 +9,7 @@
 secrets/
 
 # Personal and generated knowledge data
+data/
 data/raw/
 data/normalized/
 data/knowledge/
@@ -26,6 +27,17 @@ data/secrets/
 *.log
 .cache/
 tmp/
+
+# Local-only runtime state, recovery notes, and generated work packages
+reports/
+work-packages/
+.qdrant-initialized
+HANDOFF.md
+WORK_QUEUE.md
+PROJECT_MAP.md
+PKAS-Launcher.vbs
+PKAS-Stop.vbs
+tools/everything/
 
 # Python and Node build state
 __pycache__/
