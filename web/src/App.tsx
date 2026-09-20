@@ -128,12 +128,19 @@ function App() {
   };
 
   const meta = pageMeta[page];
-  const navigate = (nextPage: Page) => {
+  const navigate = (nextPage: Page, foundationTab?: "intake") => {
     setPage(nextPage);
     const url = new URL(window.location.href);
-    if (nextPage === "home") url.searchParams.delete("page");
-    else url.searchParams.set("page", nextPage);
+    if (nextPage === "home") {
+      url.searchParams.delete("page");
+      url.searchParams.delete("foundationTab");
+    } else {
+      url.searchParams.set("page", nextPage);
+      if (nextPage === "foundation" && foundationTab) url.searchParams.set("foundationTab", foundationTab);
+      else url.searchParams.delete("foundationTab");
+    }
     window.history.replaceState({}, "", url);
+    if (nextPage === page && nextPage === "foundation") setPageRefresh(value => value + 1);
   };
   return (
     <div className="app-shell">
@@ -200,7 +207,7 @@ function DeferredPage({ children }: { children: ReactNode }) {
   return <Suspense fallback={<section className="panel"><div className="panel-body"><div className="empty-state"><span>…</span><p>正在加载当前功能，不会扫描资料或调用模型。</p></div></div></section>}>{children}</Suspense>;
 }
 
-function Home({ dashboard, setPage, setEvidence, run }: { dashboard: Json | null; setPage: (page: Page) => void; setEvidence: (data: Json) => void; run: Runner }) {
+function Home({ dashboard, setPage, setEvidence, run }: { dashboard: Json | null; setPage: (page: Page, foundationTab?: "intake") => void; setEvidence: (data: Json) => void; run: Runner }) {
   const counts = dashboard?.counts ?? {};
   const openSource = (item: Json) => item.document_id
     ? void run(() => api<Json>(`/api/documents/${item.document_id}`), setEvidence)
@@ -210,6 +217,7 @@ function Home({ dashboard, setPage, setEvidence, run }: { dashboard: Json | null
       <div className="command-copy"><span>现在想查什么？</span><strong>搜索你的资料，并回到原始证据</strong></div>
       <div className="command-actions"><button className="accent" onClick={() => setPage("knowledge")}>搜索资料 <b>⌘ K</b></button></div>
     </section>
+    {Number(counts.knowledge_sources ?? 0) === 0 && <FirstUseGuide setPage={setPage} />}
     <section className="metric-grid">
       <Metric label="微信会话" value={counts.customers ?? 0} unit="SESSION" tone="cyan" />
       <Metric label="客户聊天消息" value={counts.customer_messages ?? 0} unit="MESSAGE" tone="violet" />
@@ -234,6 +242,24 @@ function Home({ dashboard, setPage, setEvidence, run }: { dashboard: Json | null
       <ItemList items={dashboard?.recent_runs ?? []} empty="尚无工作流运行。" render={(item) => <div className="run-row"><span className={`status-dot ${item.status}`} /><span><strong>{workflowName(item.workflow_name)}</strong><small>{item.id}</small></span><b className={`status-tag ${item.status}`}>{statusLabel(item.status)}</b><time>{formatTime(item.created_at)}</time></div>} />
     </Panel>
   </>;
+}
+
+function FirstUseGuide({ setPage }: { setPage: (page: Page, foundationTab?: "intake") => void }) {
+  return <section className="first-use-guide" aria-labelledby="first-use-title">
+    <header>
+      <div><small>YOUR FIRST KNOWLEDGE BASE</small><h2 id="first-use-title">三步开始，不用先研究一堆设置</h2><p>知枢负责把资料整理成可搜索的底座；是否扫描、哪些内容深入处理，由你确认。</p></div>
+      <span className="first-use-local">本地优先 · 可随时暂停</span>
+    </header>
+    <div className="first-use-steps">
+      <article><b>01</b><div><strong>选整理方式</strong><p>选择预设方案，确认自动建议的资料范围。</p></div></article>
+      <article><b>02</b><div><strong>开始整理资料</strong><p>先建立文件目录和分类；重要内容再进入全文或向量搜索。</p></div></article>
+      <article><b>03</b><div><strong>搜索并连接 Codex</strong><p>先在知枢验证召回；MCP 接入是可选项，不会擅自修改客户端设置。</p></div></article>
+    </div>
+    <footer>
+      <button className="accent" onClick={() => setPage("foundation", "intake")}>开始第一次资料接入 <span>→</span></button>
+      <span>安装不会自动扫盘、导入微信或调用模型。AI 分类、摘要和向量化按你选的方案及已配置服务运行。</span>
+    </footer>
+  </section>;
 }
 
 function Knowledge({ sources, syncRoots, run, setEvidence, busy }: { sources: Json[]; syncRoots: Json[]; run: Runner; setEvidence: (data: Json) => void; busy: boolean }) {

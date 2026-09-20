@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { post } from "./api";
+import { api, post } from "./api";
 import "./foundation.css";
 import AutomatedIntake from "./AutomatedIntake";
 import DirectorySummaryPlanner from "./DirectorySummaryPlanner";
 
 type Data = Record<string, any>;
+type FoundationTab = "overview" | "intake" | "classification" | "ledger";
 const labels: Record<string, string> = {
   cataloged: "仅登记路径", indexed: "曾登记入库", skipped: "按规则跳过 / 无文字",
   missing: "上次未找到", error: "处理失败",
@@ -67,7 +68,7 @@ export default function FoundationCenter() {
   const initialTab = ["overview", "intake", "classification", "ledger"].includes(requestedTab || "")
     ? requestedTab as "overview" | "intake" | "classification" | "ledger"
     : "overview";
-  const [tab, setTab] = useState<"overview" | "intake" | "classification" | "ledger">(initialTab);
+  const [tab, setTab] = useState<FoundationTab>(initialTab);
   const ledgerActive = tab === "ledger";
   const overview = useRead(ledgerActive ? "/api/foundation/overview" : null);
   const scopes = useRead(ledgerActive ? "/api/foundation/scopes" : null);
@@ -79,6 +80,7 @@ export default function FoundationCenter() {
   const files = useRead(ledgerActive && root ? `/api/foundation/files?root_id=${encodeURIComponent(root)}&state=${state}&offset=${offset}&limit=25` : null);
   const roots: Data[] = overview.data?.roots ?? [];
   return <div className="foundation-center">
+    <FoundationWorkflow activeTab={tab} onNavigate={setTab} />
     <nav className="foundation-tabs" aria-label="资料底座功能">
       <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><strong>底座总览</strong><small>全机索引与占用</small></button>
       <button className={tab === "intake" ? "active" : ""} onClick={() => setTab("intake")}><strong>资料接入</strong><small>选择范围与入库等级</small></button>
@@ -86,7 +88,7 @@ export default function FoundationCenter() {
       <button className={tab === "ledger" ? "active" : ""} onClick={() => setTab("ledger")}><strong>索引台账</strong><small>来源、状态与排错</small></button>
     </nav>
     {tab === "overview" && <><MachineCatalogPanel onNavigate={setTab} /><IncludedFilesPanel /></>}
-    {tab === "intake" && <AutomatedIntake />}
+    {tab === "intake" && <AutomatedIntake onNext={() => setTab("classification")} />}
     {tab === "classification" && <DirectorySummaryPlanner />}
     {tab === "ledger" && <>
     <div className="foundation-note">以下台账为只读检查，不会主动扫描或同步。新分类接入记录见上方任务历史，旧同步范围见下表。登记路径 ≠ 内容可搜；向量登记 ≠ 服务在线。</div>
@@ -115,6 +117,103 @@ export default function FoundationCenter() {
     </section>
     </>}
   </div>;
+}
+
+function FoundationWorkflow({
+  activeTab,
+  onNavigate,
+}: {
+  activeTab: FoundationTab;
+  onNavigate: (tab: FoundationTab) => void;
+}) {
+  const [snapshot, setSnapshot] = useState<Data>({});
+  const [storage, setStorage] = useState<Data | null>(null);
+  useEffect(() => {
+    let active = true;
+    api<Data>("/api/runtime/storage")
+      .then(value => { if (active) setStorage(value.data); })
+      .catch(() => { if (active) setStorage(null); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      const [catalog, classification, knowledge] = await Promise.all([
+        api<Data>("/api/foundation/machine-catalog").then(value => value.data).catch(() => null),
+        api<Data>("/api/foundation/summary-jobs/catalog-progress").then(value => value.data).catch(() => null),
+        api<Data>("/api/foundation/included-files?limit=1").then(value => value.data).catch(() => null),
+      ]);
+      if (active) setSnapshot({ catalog, classification, knowledge });
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), snapshot.catalog?.state === "running" ? 4000 : 20000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [snapshot.catalog?.state]);
+
+  const catalog = snapshot.catalog ?? {};
+  const classification = snapshot.classification ?? {};
+  const knowledge = snapshot.knowledge ?? {};
+  const catalogState = String(catalog.state ?? "not_started");
+  const catalogFinished = catalogState === "completed" || catalogState === "warning";
+  const files = Number(catalog.catalog_files ?? catalog.files_seen ?? 0);
+  const aiDone = Number(classification.ai_done ?? 0);
+  const aiPending = Number(classification.ai_pending ?? 0);
+  const aiFailed = Number(classification.ai_failed ?? 0);
+  const aiEligible = Number(classification.ai_eligible ?? 0);
+  const included = Number(knowledge.total ?? 0);
+  const levels = knowledge.level_counts ?? {};
+  const aiState = aiFailed > 0 && aiPending === 0
+    ? "attention"
+    : aiEligible > 0 && aiPending === 0
+      ? "done"
+      : aiDone > 0
+        ? "running"
+        : catalogFinished
+          ? "ready"
+          : "waiting";
+  const catalogLabel = catalogState === "completed" ? "已完成" : catalogState === "warning" ? "部分完成" : catalogState === "running" ? "正在扫描" : catalogState === "paused" ? "已暂停" : "待开始";
+  const steps = [
+    {
+      id: "catalog",
+      title: "本机文件索引",
+      tab: "intake" as const,
+      status: catalogState === "completed" ? "done" : catalogState === "warning" ? "attention" : catalogState === "running" ? "running" : "waiting",
+      metric: files.toLocaleString(),
+      detail: `${catalogLabel} · 只登记来源与文件信息，不复制原文件`,
+      action: catalogState === "not_started" ? "开始本机索引" : catalogState === "running" ? "查看扫描进度" : catalogState === "paused" || catalogState === "warning" ? "继续扫描" : "查看索引",
+    },
+    {
+      id: "understanding",
+      title: "AI分类与摘要",
+      tab: "classification" as const,
+      status: aiState,
+      metric: aiEligible ? `${aiDone.toLocaleString()} / ${aiEligible.toLocaleString()}` : "待开始",
+      detail: aiEligible ? `待处理 ${aiPending.toLocaleString()} · 失败 ${aiFailed.toLocaleString()}；按批次续跑` : catalogFinished ? "尚无速判记录；可开始首批AI整理" : "本机索引完成后进入此步",
+      action: aiDone || aiPending || aiFailed ? "继续AI整理" : "去AI整理",
+    },
+    {
+      id: "knowledge",
+      title: "加入可检索知识库",
+      tab: "classification" as const,
+      status: included > 0 ? "done" : "waiting",
+      metric: `${included.toLocaleString()} 份`,
+      detail: `全文 ${Number(levels.fulltext ?? 0).toLocaleString()} · 向量 ${Number(levels.semantic ?? 0).toLocaleString()}；AI建议先预览，确认后才入库`,
+      action: "查看入库与检索",
+    },
+  ];
+
+  return <section className="foundation-workflow" aria-label="资料整理快速流程">
+    <header><div><small>QUICK START · SAFE BY DEFAULT</small><h2>从电脑文件到可检索知识</h2><p>从上到下按推荐流程走；已有进度会自动读取，退出后可继续。</p></div><span>一条主流程</span></header>
+    <div className="foundation-workflow-steps">{steps.map((step, index) => <article key={step.id} className={`foundation-workflow-step ${step.status} ${activeTab === step.tab ? "current" : ""}`}>
+      <div className="workflow-step-index">0{index + 1}</div>
+      <div className="workflow-step-content"><div className="workflow-step-title"><strong>{step.title}</strong><b>{step.metric}</b></div><p>{step.detail}</p><button type="button" onClick={() => onNavigate(step.tab)}>{step.action} <span aria-hidden="true">→</span></button></div>
+    </article>)}</div>
+    <p className="foundation-workflow-safety">
+      <span>知识库：{storage ? <><code>{storage.data_root}</code>{storage.data_on_system_drive && <strong>系统盘</strong>}</> : "暂不可读取"}</span>
+      {storage?.runtime_root && <span>运行环境：<code>{storage.runtime_root}</code>{storage.runtime_on_system_drive && <strong>系统盘</strong>}</span>}
+      <span>安全边界：第一步仅本地扫描；发送文字样本给 Luna/DeepSeek 要单独勾选同意；加入知识库前会显示预览并要求确认。源文件不会搬动，向量只在选定 L3 时生成。</span>
+    </p>
+  </section>;
 }
 
 type ChartItem = { label: string; value: number; color: string };

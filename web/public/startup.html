@@ -1,1 +1,82 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>知枢</title><style>body{margin:0;background:#0b1118;color:#dce8f0;font:16px 'Microsoft YaHei UI',sans-serif}header{height:40px;display:flex;justify-content:space-between;align-items:center;padding-left:20px;user-select:none}button{height:40px;width:46px;border:0;background:transparent;color:inherit}button:hover{background:#c42b38}main{max-width:600px;margin:18vh auto;padding:32px}.eyebrow{color:#58d6c8;font:11px Consolas,monospace;letter-spacing:.14em}p{color:#98acbc;line-height:1.8}</style><header data-tauri-drag-region>知枢<button aria-label="关闭到托盘" onclick="window.__TAURI__.window.getCurrentWindow().close()">×</button></header><main><span class="eyebrow">LOCAL STARTUP</span><h1>正在连接本地知识服务</h1><p id="status">准备启动本地服务；不会同步资料，也不会打开终端窗口。</p></main></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>知枢 · 正在准备本机服务</title>
+  <style>
+    :root{font-family:"Microsoft YaHei UI","Segoe UI",sans-serif;color:#e5edf2;background:#091017;font-synthesis:none;text-rendering:optimizeLegibility}
+    *{box-sizing:border-box}body{margin:0;min-width:500px;min-height:100vh;background:radial-gradient(ellipse at 50% 18%,#142832 0,transparent 45%),#091017}
+    header{height:54px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;border-bottom:1px solid #1c2d38;background:rgba(9,16,23,.75);user-select:none}
+    .brand{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:650}.brand-mark{width:24px;height:24px;display:grid;place-items:center;border:1px solid #39cbbf;color:#5be0d2;font-size:12px;transform:rotate(45deg)}.brand-mark span{transform:rotate(-45deg)}
+    .close{width:34px;height:34px;border:0;background:transparent;color:#80939e;font-size:20px;cursor:pointer}.close:hover{background:#a83742;color:white}
+    main{width:min(720px,calc(100% - 48px));margin:9vh auto 0;padding:32px 0 48px}
+    .eyebrow{color:#55d5c8;font:10px Consolas,monospace;letter-spacing:.18em}.headline{margin:12px 0 8px;font-size:27px;font-weight:600;letter-spacing:.02em}.intro{margin:0;color:#8ea2af;font-size:13px;line-height:1.85}
+    .setup-card{margin-top:28px;padding:23px 24px 18px;border:1px solid #293e4a;background:rgba(15,25,34,.92);box-shadow:0 18px 50px #0003}
+    .state-row{display:flex;align-items:flex-start;gap:14px}.spinner{width:20px;height:20px;flex:0 0 20px;margin-top:2px;border:2px solid #28525a;border-top-color:#56d6c9;border-radius:50%;animation:spin .9s linear infinite}.spinner.done{border-color:#48cdbf;animation:none;position:relative}.spinner.done:after{content:"✓";position:absolute;inset:-2px 0 0;text-align:center;color:#48cdbf;font-size:13px}.spinner.error{border-color:#e47780;animation:none}.spinner.error:after{content:"!";position:absolute;inset:-2px 0 0;text-align:center;color:#e47780;font-weight:700}
+    @keyframes spin{to{transform:rotate(360deg)}}.state-copy h2{margin:0;color:#e0eaf0;font-size:15px;font-weight:600}.state-copy p{margin:6px 0 0;color:#899ca8;font-size:12px;line-height:1.75}
+    .progress-track{height:3px;margin:21px 0 18px;background:#1d303b;overflow:hidden}.progress-bar{height:100%;width:35%;background:linear-gradient(90deg,#258f91,#64e1d2);animation:travel 1.6s ease-in-out infinite alternate}.progress-bar.done{width:100%;animation:none}.progress-bar.error{width:100%;background:#d76873;animation:none}@keyframes travel{from{transform:translateX(-5%)}to{transform:translateX(205%)}}
+    .steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0;padding:0;list-style:none}.steps li{display:flex;align-items:center;gap:7px;color:#526772;font-size:10px;white-space:nowrap}.steps li:before{content:"";width:6px;height:6px;border-radius:50%;background:#2c404b}.steps li.active{color:#b7c9d1}.steps li.active:before{background:#59d7ca;box-shadow:0 0 9px #59d7ca88}.steps li.done{color:#69bfb8}.steps li.done:before{background:#3db7a9}
+    .privacy-note{margin:18px 0 0;padding-top:14px;border-top:1px solid #1c2c36;color:#718590;font-size:10px;line-height:1.8}.privacy-note strong{color:#9bacb5;font-weight:500}
+    .error-actions{display:none;margin-top:14px;color:#82959f;font-size:11px;line-height:1.7}.error-actions.visible{display:block}.error-actions code{color:#68d4c8;font:10px Consolas,monospace;overflow-wrap:anywhere}
+    @media(max-width:620px){main{margin-top:5vh}.headline{font-size:23px}.steps{grid-template-columns:repeat(2,1fr);row-gap:13px}.setup-card{padding:18px}}
+  </style>
+</head>
+<body>
+  <header data-tauri-drag-region>
+    <div class="brand"><span class="brand-mark"><span>知</span></span><span>知枢 · 个人知识库</span></div>
+    <button class="close" aria-label="关闭到系统托盘" title="关闭窗口并留在托盘" onclick="window.__TAURI__.window.getCurrentWindow().close()">×</button>
+  </header>
+  <main>
+    <span class="eyebrow">FIRST RUN · LOCAL SETUP</span>
+    <h1 class="headline">正在准备你的本机知识库</h1>
+    <p class="intro">首次启动会自动准备应用运行环境。完成后进入控制中心；你可以再决定哪些资料要扫描、理解和入库。</p>
+    <section class="setup-card" aria-live="polite">
+      <div class="state-row">
+        <span class="spinner" id="state-icon"></span>
+        <div class="state-copy"><h2 id="state-title">正在检查应用组件</h2><p id="state-detail">只检查知枢本身；不会自动扫描磁盘、导入聊天记录或修改 Codex 设置。</p></div>
+      </div>
+      <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+      <ol class="steps" aria-label="启动进度">
+        <li data-stage="checking" class="active">检查组件</li>
+        <li data-stage="python">准备运行环境</li>
+        <li data-stage="vector">启动向量服务</li>
+        <li data-stage="service">连接知识库</li>
+      </ol>
+      <p class="privacy-note"><strong>资料处理由你控制。</strong>窗口关闭后会留在右下角托盘；从托盘选择“退出并停止本机服务”才会停止本次启动的后台进程。</p>
+      <div id="error-actions" class="error-actions"></div>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const stages = ["checking", "python", "vector", "service", "ready"];
+      const title = document.getElementById("state-title");
+      const detail = document.getElementById("state-detail");
+      const icon = document.getElementById("state-icon");
+      const bar = document.getElementById("progress-bar");
+      const errors = document.getElementById("error-actions");
+      window.setStartupState = ({stage, title: nextTitle, detail: nextDetail}) => {
+        const activeIndex = stages.indexOf(stage);
+        title.textContent = nextTitle;
+        detail.textContent = nextDetail;
+        icon.className = stage === "ready" ? "spinner done" : "spinner";
+        bar.className = stage === "ready" ? "progress-bar done" : "progress-bar";
+        document.querySelectorAll("[data-stage]").forEach((item) => {
+          const index = stages.indexOf(item.dataset.stage);
+          item.classList.toggle("done", index < activeIndex || stage === "ready");
+          item.classList.toggle("active", index === activeIndex && stage !== "ready");
+        });
+      };
+      window.setStartupError = ({title: nextTitle, detail: nextDetail}) => {
+        title.textContent = nextTitle;
+        detail.textContent = nextDetail;
+        icon.className = "spinner error";
+        bar.className = "progress-bar error";
+        errors.textContent = "请先完全退出知枢，再重新打开。若仍失败，按上方提示查看本机日志；应用不会自动扫描任何资料。";
+        errors.classList.add("visible");
+      };
+    })();
+  </script>
+</body>
+</html>

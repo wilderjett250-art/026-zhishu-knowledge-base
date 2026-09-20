@@ -1,4 +1,27 @@
 .foundation-center { display:grid; gap:20px; color:#dbe6ee; }
+.foundation-workflow { display:grid; gap:14px; padding:20px; border:1px solid #2d505e; border-radius:12px; background:linear-gradient(130deg,rgba(36,118,112,.12),rgba(12,24,33,.96) 48%); }
+.foundation-workflow>header { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; }
+.foundation-workflow>header small { color:#53d8ce; font:9px Consolas,monospace; letter-spacing:.14em; }
+.foundation-workflow>header h2 { margin:5px 0 4px; font-size:20px; }
+.foundation-workflow>header p { margin:0; color:#91aab8; font-size:12px; }
+.foundation-workflow>header>span { padding:6px 10px; border:1px solid #326c67; border-radius:999px; color:#78d8cf; font-size:11px; white-space:nowrap; }
+.foundation-workflow-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.foundation-workflow-step { display:grid; grid-template-columns:34px minmax(0,1fr); gap:11px; min-width:0; padding:13px; border:1px solid #29414e; border-radius:9px; background:rgba(7,16,23,.6); }
+.foundation-workflow-step.current { border-color:#3f827b; box-shadow:inset 0 0 0 1px rgba(66,213,199,.12); }
+.foundation-workflow-step.done .workflow-step-index { border-color:#397c4e; color:#9be3ae; }
+.foundation-workflow-step.running .workflow-step-index { border-color:#2b857f; color:#62e0d3; }
+.foundation-workflow-step.attention .workflow-step-index { border-color:#8b613b; color:#ffc38f; }
+.foundation-workflow-step.ready .workflow-step-index { border-color:#55728a; color:#b4d4e9; }
+.workflow-step-index { display:grid; place-items:center; width:30px; height:30px; border:1px solid #385260; border-radius:8px; color:#849eaa; font:11px Consolas,monospace; }
+.workflow-step-content { min-width:0; }
+.workflow-step-title { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+.workflow-step-title strong { color:#e2edf3; font-size:13px; }
+.workflow-step-title b { color:#72ded4; font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.workflow-step-content p { min-height:35px; margin:5px 0 8px; color:#8ea6b2; font-size:11px; line-height:1.55; }
+.workflow-step-content button { padding:6px 9px; font-size:11px; }
+.foundation-workflow-safety { display:flex; flex-wrap:wrap; gap:5px 16px; margin:0; padding:9px 11px; border-left:2px solid #388780; background:rgba(56,135,128,.07); color:#8ea9b5!important; font-size:11px; overflow-wrap:anywhere; }
+.foundation-workflow-safety code { color:#b8d5df; font-size:10px; overflow-wrap:anywhere; }
+.foundation-workflow-safety strong { margin-left:6px; color:#f0bd78; font-size:10px; }
 .foundation-tabs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; position:sticky; top:0; z-index:4; padding:8px; border:1px solid #29404f; border-radius:12px; background:rgba(8,16,23,.96); backdrop-filter:blur(12px); }
 .foundation-tabs button { display:grid; gap:5px; min-width:0; padding:14px 16px; border:1px solid transparent; border-radius:8px; background:transparent; color:#91a6b2; text-align:left; cursor:pointer; }
 .foundation-tabs button:hover { background:#11232e; color:#dceaf0; }
@@ -385,8 +408,15 @@
 
 .automated-progress strong { color: #eafaff; }
 .automated-progress span { color: #9db6c1; font-size: .82rem; }
+.automated-next-step { display:flex; justify-content:space-between; align-items:center; gap:18px; margin-top:12px; padding:14px 16px; border:1px solid #367269; border-radius:9px; background:linear-gradient(110deg,rgba(54,216,207,.1),rgba(8,19,26,.72)); }
+.automated-next-step>div { display:grid; gap:4px; }
+.automated-next-step strong { color:#c8f2ed; font-size:13px; }
+.automated-next-step span { color:#91aab8; font-size:11px; line-height:1.55; }
+.automated-next-step button { white-space:nowrap; }
 
 @media (max-width: 700px) {
+  .foundation-workflow-steps { grid-template-columns:1fr; }
+  .automated-next-step { align-items:flex-start; flex-direction:column; }
   .automated-section-heading,
   .current-profile-bar,
   .automated-actions { align-items: stretch; flex-direction: column; }

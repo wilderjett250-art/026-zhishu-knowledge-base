@@ -5,7 +5,7 @@ type Data = Record<string, any>;
 
 const profileOrder = ["work_efficiency", "complete_personal", "lightweight", "custom"];
 
-export default function AutomatedIntake() {
+export default function AutomatedIntake({ onNext }: { onNext?: () => void }) {
   const [profileData, setProfileData] = useState<Data | null>(null);
   const [sourceData, setSourceData] = useState<Data | null>(null);
   const [catalog, setCatalog] = useState<Data | null>(null);
@@ -51,12 +51,13 @@ export default function AutomatedIntake() {
     if (!selected) return;
     setBusy(true); setError("");
     try {
-      const result = await put<Data>("/api/foundation/processing-profile", {
+      await put<Data>("/api/foundation/processing-profile", {
         profile_id: profileId,
         rules: profileId === "custom" ? selected.rules : null,
         exclusions: selected.exclusions ?? [],
       });
-      setProfileData(result.data);
+      const refreshed = await api<Data>("/api/foundation/processing-profiles");
+      setProfileData(refreshed.data);
       setEditing(false);
     } catch (exception) {
       setError(exception instanceof Error ? exception.message : "保存方案失败");
@@ -66,10 +67,40 @@ export default function AutomatedIntake() {
   const startAutomaticCatalog = async () => {
     setBusy(true); setError("");
     try {
-      const result = await post<Data>("/api/foundation/machine-catalog/start", { confirmed: true });
+      const result = catalog?.id && ["paused", "warning"].includes(state)
+        ? await post<Data>(`/api/foundation/machine-catalog/${catalog.id}/resume`, {})
+        : await post<Data>("/api/foundation/machine-catalog/start", { confirmed: true });
       setCatalog(result.data);
     } catch (exception) {
       setError(exception instanceof Error ? exception.message : "自动接入启动失败");
+    } finally { setBusy(false); }
+  };
+
+  const startRecommendedFirstRun = async () => {
+    setBusy(true); setError("");
+    try {
+      const selectedProfile = "work_efficiency";
+      const selected = (profileData?.profiles ?? []).find((item: Data) => item.profile_id === selectedProfile);
+      if (!selected) throw new Error("推荐整理方案尚未加载完成，请重试");
+      const saved = await put<Data>("/api/foundation/processing-profile", {
+        profile_id: selectedProfile,
+        rules: null,
+        exclusions: selected.exclusions ?? [],
+      });
+      setProfileData(previous => previous ? {
+        ...previous,
+        current: saved.data,
+        first_run_required: false,
+        profiles: (previous.profiles ?? []).map((item: Data) => ({
+          ...item,
+          selected: item.profile_id === selectedProfile,
+        })),
+      } : previous);
+      setEditing(false);
+      const result = await post<Data>("/api/foundation/machine-catalog/start", { confirmed: true });
+      setCatalog(result.data);
+    } catch (exception) {
+      setError(exception instanceof Error ? exception.message : "一键整理启动失败");
     } finally { setBusy(false); }
   };
 
@@ -92,12 +123,12 @@ export default function AutomatedIntake() {
     </header>
 
     {editing ? <section className="first-run-profile">
-      <div className="automated-section-heading"><div><strong>第一次使用，先选一次整理方式</strong><p>前三种方案直接按预设执行；自定义方案会先做 AI 速判，再让你确认入库范围。</p></div><span>方案保存后可随时修改</span></div>
+      <div className="automated-section-heading"><div><strong>{profileData?.first_run_required ? "第一次使用：直接一键开始，或先选方案" : "修改整理方式"}</strong><p>默认一键使用“工作提效型”；前三种方案按预设处理，自定义方案会先做 AI 速判，再让你确认入库范围。</p></div><span>方案保存后可随时修改</span></div>
       <div className="processing-profile-grid">
         {profileOrder.map(profileId => {
           const item = (profileData?.profiles ?? []).find((value: Data) => value.profile_id === profileId);
           if (!item) return null;
-          return <button key={profileId} type="button" className={current?.profile_id === profileId ? "active" : ""} disabled={busy} onClick={() => void chooseProfile(profileId)}>
+          return <button key={profileId} type="button" className={!profileData?.first_run_required && current?.profile_id === profileId ? "active" : ""} disabled={busy} onClick={() => void chooseProfile(profileId)}>
             <span><strong>{item.label}</strong><small>{item.short_label}</small></span>
             <p>{item.description}</p>
             <ul>{(item.highlights ?? []).map((highlight: string) => <li key={highlight}>{highlight}</li>)}</ul>
@@ -124,10 +155,11 @@ export default function AutomatedIntake() {
     {coverage && <p className="chart-footnote intake-coverage-note">“全盘处置覆盖”包含本地规则明确跳过的低价值文件；“内容理解覆盖”只统计真正需要 AI 判断的文件，两者不能混为一个百分比。</p>}
 
     <div className="automated-actions">
-      <button className="primary" disabled={busy || state === "running" || !current} onClick={() => void startAutomaticCatalog()}>{state === "not_started" ? "开始自动整理" : state === "paused" || state === "warning" ? "继续自动整理" : "刷新自动索引"}</button>
-      <span>原文件留在原处；先建立A库目录索引和目录MD，重要内容再按当前方案进入知识库。</span>
+      {profileData?.first_run_required ? <button className="primary" disabled={busy || state === "running" || !sourceData || scopes.length === 0} onClick={() => void startRecommendedFirstRun()}>{busy ? "正在准备…" : "一键启动本地索引 · 推荐方案"}</button> : <button className="primary" disabled={busy || state === "running" || !current} onClick={() => void startAutomaticCatalog()}>{state === "not_started" ? "开始本机索引" : state === "paused" || state === "warning" ? "继续未完成扫描" : state === "completed" ? "重新核对索引" : "开始本机索引"}</button>}
+      <span>{profileData?.first_run_required ? "一键保存“工作提效型”并开始上方列出的目录索引；原文件不移动，不会导入微信或修改 Codex 设置。" : "原文件留在原处；先建立 A 库目录索引和目录 MD，重要内容再按当前方案进入知识库。"}</span>
     </div>
     {catalog && <div className="automated-progress"><strong>{catalog.message ?? stateLabel[state]}</strong><span>已发现 {Number(catalog.catalog_files ?? catalog.files_seen ?? 0).toLocaleString()} 个文件 · 已处理目录 {Number(catalog.directories_seen ?? 0).toLocaleString()} 个 · 排除 {Number(catalog.excluded ?? 0).toLocaleString()} 个</span></div>}
+    {["completed", "warning"].includes(state) && <div className="automated-next-step"><div><strong>{state === "completed" ? "文件地图已建立，下一步做内容理解" : "索引有少量范围需要复核；已有文件仍可继续整理"}</strong><span>前往 AI 批次页面继续分类、生成摘要；处理完成后可按分类预览并加入全文或向量知识库。</span></div><button type="button" disabled={!onNext} onClick={onNext}>继续主流程 <span aria-hidden="true">→</span></button></div>}
     {error && <p role="alert">{error}</p>}
   </section>;
 }
