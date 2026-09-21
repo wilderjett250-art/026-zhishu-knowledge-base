@@ -162,7 +162,7 @@ export default function RuntimeCenter() {
   return <div className="runtime-center">
     <section className={`runtime-hero ${connection === "offline" ? "warning" : "ready"}`}>
       <div className="runtime-hero-copy">
-        <small>LOCAL SERVICE</small>
+        <small>本机服务</small>
         <h2>{systemState}</h2>
         <p>{systemDescription}</p>
         <span className={`runtime-state-chip ${connection}`}><i />{connection === "connected" ? "服务已响应" : connection === "offline" ? "需要检查" : "连接中"}</span>
@@ -187,7 +187,7 @@ export default function RuntimeCenter() {
 
       {data && <>
         <section className="runtime-usage">
-          <header><div><small>LAST {data.usage.days ?? 7} DAYS</small><h2>最近使用情况</h2></div><p>这里只表示系统调用是否成功，不代表回答一定准确。</p></header>
+          <header><div><small>最近 {data.usage.days ?? 7} 天</small><h2>使用情况</h2></div><p>这里只表示系统调用是否成功，不代表回答一定准确。</p></header>
           <div className="runtime-metrics"><article><strong>{data.usage.calls ?? "—"}</strong><span>已观测调用</span></article><article><strong>{data.usage.success_rate === null ? "—" : `${(data.usage.success_rate * 100).toFixed(1)}%`}</strong><span>技术调用成功</span></article><article><strong>{data.usage.operations.length}</strong><span>使用过的功能</span></article></div>
           <details><summary>查看调用明细</summary>{data.usage.operations.length ? <table><thead><tr><th>功能</th><th>次数</th><th>失败</th><th>平均耗时</th></tr></thead><tbody>{data.usage.operations.map((item) => <tr key={item.channel + item.operation}><td>{item.operation.replace("/api/", "")}</td><td>{item.calls}</td><td>{item.failures}</td><td>{item.average_ms} ms</td></tr>)}</tbody></table> : <p>还没有可显示的使用记录。</p>}<p className="runtime-footnote">{data.usage.coverage}</p></details>
         </section>
@@ -199,7 +199,7 @@ export default function RuntimeCenter() {
     </>}
 
     {confirm && <section className="runtime-confirm" role="dialog" aria-label="确认运行操作">
-      <small>CONFIRM ACTION</small><h3>{confirm.id === "qdrant" ? (confirm.action === "start" ? "开启语义搜索？" : "关闭语义搜索？") : (confirm.action === "start" ? "处理待索引资料？" : "停止处理资料？")}</h3>
+      <small>确认操作</small><h3>{confirm.id === "qdrant" ? (confirm.action === "start" ? "开启语义搜索？" : "关闭语义搜索？") : (confirm.action === "start" ? "处理待索引资料？" : "停止处理资料？")}</h3>
       <p>{confirm.id === "indexer" ? "只处理已经进入队列的资料，可能调用 Embedding API；不会同步微信，也不会运行 Agent。" : "关闭后仍能按关键词搜索，但暂时不能按相近含义搜索。"}</p>
       <footer><button disabled={busy} onClick={() => setConfirm(null)}>取消</button><button className="primary" disabled={busy} onClick={() => void act()}>确认</button></footer>
     </section>}

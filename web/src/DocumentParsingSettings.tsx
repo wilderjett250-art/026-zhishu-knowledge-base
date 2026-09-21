@@ -36,7 +36,7 @@ export default function DocumentParsingSettings() {
     finally { setBusy(false); }
   }
   return <section className="panel">
-    <header className="panel-head"><h2>文档解析</h2><span>LOCAL FIRST</span></header>
+    <header className="panel-head"><h2>文档解析</h2><span>本地处理</span></header>
     <div className="panel-body">
       <p><strong>{!policy ? "正在读取设置…" : policy.ai_enhancement_enabled ? "检测到显式增强配置" : "本地解析 · AI 增强已关闭"}</strong></p>
       <p className="panel-note">Word 提取段落与表格；Excel 提取工作表、公式、合并单元格和图表标签；PDF 提取文字、页码、目录、批注与链接。图片会登记格式、尺寸及已有的本地标题/说明/关键词，但不会假装已经看懂像素内容。</p>

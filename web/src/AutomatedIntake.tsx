@@ -118,7 +118,7 @@ export default function AutomatedIntake({ onNext }: { onNext?: () => void }) {
 
   return <section className="foundation-panel automated-intake-panel">
     <header>
-      <div><small>AUTOMATED LOCAL INTAKE</small><h2>自动资料接入</h2><p>系统自己判断范围、排除系统目录并建立全盘索引；普通使用不需要填写路径。</p></div>
+      <div><small>自动资料接入</small><h2>建立本机文件索引</h2><p>系统判断范围、排除系统目录并建立全盘索引；普通使用不需要填写路径。</p></div>
       <span className={`catalog-state ${state}`}>{stateLabel[state] ?? state}</span>
     </header>
 

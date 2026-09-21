@@ -11,7 +11,7 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     config = json.loads((TAURI_ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
 
     assert config["productName"] == "知域"
-    assert config["version"] == "0.1.1"
+    assert config["version"] == "0.1.2"
     assert config["identifier"] == "com.zhishu.pkas"
     assert config["build"]["frontendDist"] == "../../web/dist"
     assert config["bundle"]["active"] is True
@@ -27,6 +27,21 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     assert "../../tools/everything/" in resources
     assert "../../scripts/configure_weflow_manual.mjs" in resources
     assert config["app"]["windows"] == []
+
+
+def test_desktop_product_copy_uses_clear_chinese_titles_without_internal_badges() -> None:
+    app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+    styles = (ROOT / "web" / "src" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'title: "个人知识工作台"' in app
+    assert 'title: "资料底座"' in app
+    assert 'title: "运行状态"' in app
+    assert 'title: "知识检索"' in app
+    assert "本地运行 · 数据由你控制" in app
+    assert "ACTIVE AXIS" not in app
+    assert "LOCAL · PRIVATE" not in app
+    assert "<span>{code}</span>" not in app
+    assert ".panel-head span { display: none; }" in styles
 
 
 def test_tauri_shell_has_single_instance_tray_and_close_to_hide() -> None:

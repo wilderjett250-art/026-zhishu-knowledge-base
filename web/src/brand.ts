@@ -6,6 +6,6 @@
 export const PRODUCT = {
   name: "知域",
   desktopName: "知域 · 个人知识系统",
-  shortTagline: "PERSONAL KNOWLEDGE",
-  description: "本地优先的个人知识工作台",
+  shortTagline: "个人知识系统",
+  description: "本地优先的个人知识管理与检索系统",
 } as const;

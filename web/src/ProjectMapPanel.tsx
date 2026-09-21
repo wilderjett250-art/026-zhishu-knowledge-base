@@ -35,7 +35,7 @@ export default function ProjectMapPanel() {
   const vectorUsed = mode === "semantic" || (mode === "recommended" && Number(preview?.actions?.semantic || 0) > 0);
   return <section className="project-map-panel">
     <header>
-      <div><small>PROJECT MAP · VERIFIED DERIVATIVES ONLY</small><h3>项目总览 → 精确选择入库</h3><p>项目卡仅复用已通过证据校验的文件级理解，不重读代码、文档或聊天原件。它帮你按项目选择资料，再生成可撤回检查的入库预览。</p></div>
+      <div><small>项目资料</small><h3>按项目选择资料入库</h3><p>项目卡仅复用已通过证据校验的文件级理解，不重读代码、文档或聊天原件。它帮你按项目选择资料，再生成可撤回检查的入库预览。</p></div>
       {!plan ? <button disabled={busy} onClick={() => perform(async () => { const result = await post<Data>("/api/foundation/project-map", {}); setPlan(result.data); setSelected([]); setPreview(null); setNotice("已生成候选项目清单，尚未调用 Luna 或写入知识库。"); })}>生成候选项目</button> : <button disabled={busy} onClick={() => perform(async () => { const result = await post<Data>(`/api/foundation/project-map/${plan.id}/refresh`, {}); setPlan(result.data); setSelected([]); setPreview(null); const summary = result.data.refresh_summary || {}; setNotice(`已增量核对：新增 ${summary.added || 0} 项，证据变化待复核 ${summary.changed || 0} 项。`); })}>刷新新增资料</button>}
     </header>
     {error && <p role="alert" className="project-map-error">{error}</p>}

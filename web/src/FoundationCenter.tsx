@@ -202,8 +202,8 @@ function FoundationWorkflow({
     },
   ];
 
-  return <section className="foundation-workflow" aria-label="资料整理快速流程">
-    <header><div><small>QUICK START · SAFE BY DEFAULT</small><h2>从电脑文件到可检索知识</h2><p>从上到下按推荐流程走；已有进度会自动读取，退出后可继续。</p></div><span>一条主流程</span></header>
+  return <section className="foundation-workflow" aria-label="资料整理流程">
+    <header><div><small>资料整理流程</small><h2>从电脑文件到可检索知识</h2><p>从上到下按推荐流程走；已有进度会自动读取，退出后可继续。</p></div><span>推荐流程</span></header>
     <div className="foundation-workflow-steps">{steps.map((step, index) => <article key={step.id} className={`foundation-workflow-step ${step.status} ${activeTab === step.tab ? "current" : ""}`}>
       <div className="workflow-step-index">0{index + 1}</div>
       <div className="workflow-step-content"><div className="workflow-step-title"><strong>{step.title}</strong><b>{step.metric}</b></div><p>{step.detail}</p><button type="button" onClick={() => onNavigate(step.tab)}>{step.action} <span aria-hidden="true">→</span></button></div>
@@ -315,7 +315,7 @@ function IncludedFilesPanel() {
   }, [drive, offset]);
   const disks: Data[] = data?.disks ?? [];
   return <section className="foundation-panel included-browser">
-    <header><div><small>LAYER 2 · SEARCHABLE KNOWLEDGE</small><h2>第二层：知识库明细</h2><p>正文只保存一份；同内容的其他原始路径会单列为覆盖路径，不重复占用切片和向量。</p></div><span>{Number(data?.total ?? 0).toLocaleString()} 路径<small>{Number(data?.canonical_total ?? 0).toLocaleString()} 份正文</small></span></header>
+    <header><div><small>可检索资料</small><h2>知识库明细</h2><p>正文只保存一份；同内容的其他原始路径会单列为覆盖路径，不重复占用切片和向量。</p></div><span>{Number(data?.total ?? 0).toLocaleString()} 路径<small>{Number(data?.canonical_total ?? 0).toLocaleString()} 份正文</small></span></header>
     {error && <p role="alert">{error}</p>}
     {data && <div className="included-level-summary" aria-label="当前资料处理层级概览">
       <div><small>规范正文</small><strong>{Number(data.canonical_total ?? 0).toLocaleString()}</strong><span>不含重复路径</span></div>
@@ -394,10 +394,10 @@ function MachineCatalogPanel({ onNavigate }: { onNavigate: (tab: "overview" | "i
   const typeChart = groupedSourceTypes(analytics?.source_types ?? []);
   const coveragePercent = coverage ? formatPercent(Number(coverage.decision_coverage_percent ?? 0)) : "—";
   return <section className="foundation-machine-panel foundation-panel">
-    <header><div><small>KNOWLEDGE FOUNDATION · TWO LAYERS</small><h2>知识底座分层总览</h2><p>第一层负责找到电脑里有什么；第二层才是读取正文后可供 Codex 检索的知识。两层容量和数量不混算。</p></div><span className={`catalog-state ${data?.state ?? "not_started"}`}>{data?.state ?? "未开始"}</span></header>
+    <header><div><small>知识底座</small><h2>资料索引与知识库</h2><p>索引库负责找到电脑里有什么；知识库负责读取正文后供 Codex 检索。两层容量和数量不混算。</p></div><span className={`catalog-state ${data?.state ?? "not_started"}`}>{data?.state ?? "未开始"}</span></header>
     <div className="foundation-layer-grid">
       <article className="foundation-layer-card catalog-layer">
-        <header><div><small>LAYER 1 · FILE CATALOG</small><h3>索引库</h3></div><b>只存路径和属性</b></header>
+        <header><div><small>第一层</small><h3>索引库</h3></div><b>只存路径和属性</b></header>
         <p>用于秒级定位全盘文件，不读取正文，也不代表文件已经进入知识库。</p>
         <div className="layer-metrics">
           <div><span>已发现文件</span><strong>{Number(data?.catalog_files ?? 0).toLocaleString()}</strong></div>
@@ -406,7 +406,7 @@ function MachineCatalogPanel({ onNavigate }: { onNavigate: (tab: "overview" | "i
         </div>
       </article>
       <article className="foundation-layer-card knowledge-layer">
-        <header><div><small>LAYER 2 · SEARCHABLE KNOWLEDGE</small><h3>知识库</h3></div><b>正文＋全文＋向量</b></header>
+        <header><div><small>第二层</small><h3>知识库</h3></div><b>正文＋全文＋向量</b></header>
         <p>文件经过解析和切片后才能全文搜索；完成向量化后还能按语义搜索。</p>
         <div className="layer-metrics">
           <div><span>规范正文资料</span><strong>{Number(analytics?.original_documents ?? 0).toLocaleString()}</strong><small>去重后存一份</small></div>

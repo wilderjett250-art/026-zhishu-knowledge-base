@@ -142,9 +142,9 @@ export default function CapabilityCenter() {
       const refreshed = await api<Json[]>("/api/capabilities/profiles");
       setProfiles(refreshed.data);
       editProfile(result.data);
-      setNotice("Profile 已保存到 PKAS 策略库；没有修改客户端配置，也没有启动 MCP。");
+      setNotice("能力组合已保存到本地策略库；没有修改客户端配置，也没有启动 MCP。");
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "Profile 保存失败");
+      setNotice(reason instanceof Error ? reason.message : "能力组合保存失败");
     } finally {
       setBusy("");
     }
@@ -229,22 +229,22 @@ export default function CapabilityCenter() {
   return <>
     <section className="capability-hero">
       <div>
-        <small>UNIVERSAL AI CONTROL PLANE</small>
-        <h2>一个能力底座，连接所有 AI 客户端</h2>
+        <small>能力管理</small>
+        <h2>统一管理 AI 客户端能力</h2>
         <p>知识、向量、工作流、Skill 与 MCP 独立于客户端运行。Codex 是当前主要使用入口。</p>
       </div>
       <div className="capability-safety">
         <span><i /> 配置事务保护已启用</span>
-        <strong>SAFE WRITE</strong>
+        <strong>安全写入</strong>
         <small>先预览 · DPAPI备份 · 原子写入 · MCP握手 · 失败回滚</small>
       </div>
     </section>
 
     <section className="capability-metrics">
-      <article><small>DETECTED CLIENTS</small><strong>{summary.detected_clients ?? 0}</strong><span>已发现客户端</span></article>
-      <article><small>SKILL CATALOG</small><strong>{summary.skills ?? 0}</strong><span>可用 Skill</span></article>
-      <article><small>MCP SERVERS</small><strong>{summary.mcp_servers ?? 0}</strong><span>{summary.enabled_mcp_servers ?? 0} 个启用</span></article>
-      <article><small>PROFILES</small><strong>{summary.profiles ?? profiles.length}</strong><span>能力组合策略</span></article>
+      <article><small>客户端</small><strong>{summary.detected_clients ?? 0}</strong><span>已发现客户端</span></article>
+      <article><small>Skill</small><strong>{summary.skills ?? 0}</strong><span>可用能力</span></article>
+      <article><small>MCP 服务</small><strong>{summary.mcp_servers ?? 0}</strong><span>{summary.enabled_mcp_servers ?? 0} 个启用</span></article>
+      <article><small>能力组合</small><strong>{summary.profiles ?? profiles.length}</strong><span>可用策略</span></article>
     </section>
 
     <section className="capability-service-grid">
@@ -258,18 +258,18 @@ export default function CapabilityCenter() {
     <section className="capability-layout">
       <div className="capability-catalog">
         <header>
-          <div><small>CAPABILITY REGISTRY</small><h2>能力目录</h2></div>
+          <div><small>能力清单</small><h2>能力目录</h2></div>
           <div className="capability-tabs">
-            <button className={activeTab === "skills" ? "active" : ""} onClick={() => setActiveTab("skills")}>Skills</button>
-            <button className={activeTab === "mcp" ? "active" : ""} onClick={() => setActiveTab("mcp")}>MCP</button>
-            <button className={activeTab === "profiles" ? "active" : ""} onClick={() => setActiveTab("profiles")}>Profiles</button>
+            <button className={activeTab === "skills" ? "active" : ""} onClick={() => setActiveTab("skills")}>Skill</button>
+            <button className={activeTab === "mcp" ? "active" : ""} onClick={() => setActiveTab("mcp")}>MCP 服务</button>
+            <button className={activeTab === "profiles" ? "active" : ""} onClick={() => setActiveTab("profiles")}>能力组合</button>
             <button className={activeTab === "clients" ? "active" : ""} onClick={() => setActiveTab("clients")}>客户端</button>
           </div>
         </header>
         <div className="capability-filter"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或说明…" /></div>
         <div className="capability-list">
           {items.length ? items.map((item: Json) => <article key={item.id}>
-            <span className="capability-icon">{activeTab === "skills" ? "SK" : activeTab === "mcp" ? "MP" : activeTab === "profiles" ? "PF" : "AI"}</span>
+            <span className="capability-icon">{activeTab === "skills" ? "技" : activeTab === "mcp" ? "接" : activeTab === "profiles" ? "组" : "端"}</span>
             <div><strong>{item.name}</strong><p>{item.description || item.config_hint || `${item.transport ?? item.kind ?? "local"} · ${item.scope ?? "user"}`}</p></div>
             {activeTab === "clients" ? <button
               className={`client-config-action ${item.pkas_enabled ? "enabled" : ""}`}
@@ -280,26 +280,26 @@ export default function CapabilityCenter() {
               : <div className="asset-actions"><span className={`cap-chip ${item.status}`}>{statusLabel(item.status)}</span><button onClick={() => { setSelectedAsset(item); setMcpResult(null); }}>详情</button></div>}
           </article>) : <div className="capability-empty">没有匹配的能力记录</div>}
         </div>
-        {activeTab === "profiles" && <button className="profile-new" onClick={() => setProfileDraft(emptyProfile())}>＋ 新建 Profile</button>}
+        {activeTab === "profiles" && <button className="profile-new" onClick={() => setProfileDraft(emptyProfile())}>＋ 新建能力组合</button>}
         {notice && <div className="client-config-notice">{notice}</div>}
       </div>
 
       <aside className="interface-rail">
-        <header><small>INTEGRATION GATEWAY</small><h2>统一接入面</h2></header>
+        <header><small>客户端接入</small><h2>统一接入</h2></header>
         {(overview.interfaces ?? []).map((item: Json) => <article key={item.id}>
           <div><span className={`cap-status ${item.status}`} /><strong>{item.name}</strong></div>
           <code>{item.route}</code>
           <footer><small>{item.audience}</small><span className={`cap-chip ${item.status}`}>{statusLabel(item.status)}</span></footer>
         </article>)}
         <div className="architecture-note">
-          <small>NEXT CONTRACT</small>
-          <strong>Client Adapter v1</strong>
+          <small>接入原则</small>
+          <strong>客户端适配</strong>
           <p>所有客户端只通过适配器读取或写入配置；知识内核不感知 Codex、Cursor 或其他应用。</p>
         </div>
       </aside>
     </section>
     {profileDraft && <section className="profile-editor">
-      <header><div><small>CAPABILITY PROFILE</small><h2>{profileDraft.id ? "编辑能力组合" : "新建能力组合"}</h2></div><button onClick={() => setProfileDraft(null)}>关闭</button></header>
+      <header><div><small>能力组合</small><h2>{profileDraft.id ? "编辑能力组合" : "新建能力组合"}</h2></div><button onClick={() => setProfileDraft(null)}>关闭</button></header>
       <div className="profile-form-grid">
         <label><span>名称</span><input value={profileDraft.name} onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })} /></label>
         <label><span>客户端</span><select value={profileDraft.client_id} onChange={(event) => setProfileDraft({ ...profileDraft, client_id: event.target.value })}><option value="">通用</option>{(overview.clients ?? []).map((item: Json) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -312,13 +312,13 @@ export default function CapabilityCenter() {
         <ProfileChoice title="隐私范围" values={["public", "private", "restricted"]} selected={profileDraft.allowed_privacy} onToggle={(value) => toggleList("allowed_privacy", value)} />
       </div>
       <div className="profile-assets">
-        <AssetPicker title="Skills" kind="skill" items={overview.skills ?? []} bindings={profileDraft.bindings} onToggle={toggleBinding} />
-        <AssetPicker title="MCP Servers" kind="mcp_server" items={overview.mcp_servers ?? []} bindings={profileDraft.bindings} onToggle={toggleBinding} />
+        <AssetPicker title="Skill" kind="skill" items={overview.skills ?? []} bindings={profileDraft.bindings} onToggle={toggleBinding} />
+        <AssetPicker title="MCP 服务" kind="mcp_server" items={overview.mcp_servers ?? []} bindings={profileDraft.bindings} onToggle={toggleBinding} />
       </div>
-      <footer><p>保存只更新本地 Profile 策略，不会写入客户端配置、安装 Skill 或启动 MCP。</p><button disabled={!profileDraft.name.trim() || busy === "profile-save"} onClick={() => void saveProfile()}>{busy === "profile-save" ? "保存中…" : "保存 Profile"}</button></footer>
+      <footer><p>保存只更新本地能力组合，不会写入客户端配置、安装 Skill 或启动 MCP。</p><button disabled={!profileDraft.name.trim() || busy === "profile-save"} onClick={() => void saveProfile()}>{busy === "profile-save" ? "保存中…" : "保存能力组合"}</button></footer>
     </section>}
     {selectedAsset && <section className="asset-inspector">
-      <header><div><small>{activeTab === "mcp" ? "MCP INSPECTOR" : "SKILL INSPECTOR"}</small><h2>{selectedAsset.name}</h2></div><button onClick={() => { setSelectedAsset(null); setMcpResult(null); }}>关闭</button></header>
+      <header><div><small>{activeTab === "mcp" ? "MCP 服务详情" : "Skill 详情"}</small><h2>{selectedAsset.name}</h2></div><button onClick={() => { setSelectedAsset(null); setMcpResult(null); }}>关闭</button></header>
       {activeTab === "skills" ? <>
         <div className="asset-facts"><span>范围<strong>{selectedAsset.scope}</strong></span><span>校验<strong>{selectedAsset.validation}</strong></span><span>内容哈希<strong>{selectedAsset.content_hash_short}</strong></span><span>资源<strong>{selectedAsset.resource_count}</strong></span><span>大小<strong>{Number(selectedAsset.total_bytes ?? 0).toLocaleString()} B</strong></span></div>
         <div className="asset-resources"><small>资源清单</small>{(selectedAsset.resources ?? []).length ? <ul>{selectedAsset.resources.map((value: string) => <li key={value}>{value}</li>)}</ul> : <p>仅有 SKILL.md，没有附属资源。</p>}</div>
@@ -329,14 +329,14 @@ export default function CapabilityCenter() {
       </>}
     </section>}
     {mcpPreview && <section className="client-config-preview mcp-probe-preview">
-      <header><div><small>MCP ONE-SHOT PROBE</small><h2>{mcpPreview.name} 探测确认</h2></div><button onClick={() => setMcpPreview(null)}>关闭</button></header>
+      <header><div><small>单次 MCP 探测</small><h2>{mcpPreview.name} 探测确认</h2></div><button onClick={() => setMcpPreview(null)}>关闭</button></header>
       <div className="client-preview-meta"><span>传输：{mcpPreview.transport}</span><span>配置指纹：{mcpPreview.config_fingerprint}</span><span>超时：{mcpPreview.timeout_seconds}s</span><span>秘密值：不返回</span></div>
       <pre>{mcpPreview.action}</pre>
       <footer><label><input type="checkbox" checked={mcpConfirmed} onChange={(event) => setMcpConfirmed(event.target.checked)} /> 我同意启动该 MCP 一次并在读取能力后立即关闭</label><button disabled={!mcpConfirmed || Boolean(busy)} onClick={() => void probeMcp()}>{busy ? "探测并回收中…" : "确认探测"}</button></footer>
     </section>}
     {preview && <section className="client-config-preview">
       <header>
-        <div><small>TRANSACTION PREVIEW</small><h2>{preview.client_name} 配置差异</h2></div>
+        <div><small>配置变更预览</small><h2>{preview.client_name} 配置差异</h2></div>
         <button onClick={() => setPreview(null)}>关闭</button>
       </header>
       <div className="client-preview-meta">
