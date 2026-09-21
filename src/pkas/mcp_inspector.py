@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import io
 import json
 import secrets
 import tomllib
@@ -179,11 +178,14 @@ class McpInspectorService:
         )
         if not valid_env:
             raise McpInspectorError("MCP 环境变量格式无效。")
-        stderr = io.StringIO()
         with anyio.fail_after(timeout_seconds):
             parameters = StdioServerParameters(command=command, args=args, env=env)
             async with (
-                stdio_client(parameters, errlog=stderr) as streams,
+                # The MCP SDK needs a real OS-backed stderr stream when it
+                # spawns the child.  A StringIO has no file descriptor and
+                # makes an otherwise healthy stdio server fail before its
+                # initialize/list_tools handshake.
+                stdio_client(parameters) as streams,
                 ClientSession(*streams) as session,
             ):
                 initialized = await session.initialize()

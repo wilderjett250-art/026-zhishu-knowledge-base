@@ -34,9 +34,14 @@ export default function RagLab({ busy, setEvidence }: { busy: boolean; setEviden
   const [notice, setNotice] = useState("");
   const [working, setWorking] = useState(false);
 
+  const refreshStatus = useCallback(async () => {
+    const statusResult = await api<Json>("/api/rag/status");
+    setStatus(statusResult.data);
+  }, []);
+
   const refresh = useCallback(async () => {
-    const [statusResult, mapResult, casesResult, runsResult, silverResult, progressResult, fusionResult] = await Promise.all([
-      api<Json>("/api/rag/status"),
+    const [, mapResult, casesResult, runsResult, silverResult, progressResult, fusionResult] = await Promise.all([
+      refreshStatus(),
       api<Json>("/api/rag/vector-map?limit=300"),
       api<Json[]>("/api/rag/eval/cases"),
       api<Json[]>("/api/rag/eval/runs"),
@@ -44,16 +49,20 @@ export default function RagLab({ busy, setEvidence }: { busy: boolean; setEviden
       api<Json>("/api/rag/eval/review/progress"),
       api<Json>("/api/rag/eval/fusion-tuning-status"),
     ]);
-    setStatus(statusResult.data);
     setMap(mapResult.data);
     setCases(casesResult.data);
     setRuns(runsResult.data);
     setSilver(silverResult.data);
     setReviewProgress(progressResult.data);
     setFusionTuning(fusionResult.data);
-  }, []);
+  }, [refreshStatus]);
 
   useEffect(() => { void refresh().catch((error) => setNotice(String(error))); }, [refresh]);
+  useEffect(() => {
+    if (status?.snapshot_state !== "refreshing") return;
+    const timer = window.setTimeout(() => { void refreshStatus().catch((error) => setNotice(String(error))); }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [refreshStatus, status?.snapshot_state]);
 
   const search = async (event: FormEvent) => {
     event.preventDefault();
@@ -225,6 +234,7 @@ export default function RagLab({ busy, setEvidence }: { busy: boolean; setEviden
   const activeDraftIndex = draftCases.findIndex((item) => item.id === activeCaseId);
   const hasVectorScope = Number(status?.eligible_chunks ?? 0) > 0;
   const coverage = typeof status?.coverage === "number" ? Math.round(status.coverage * 10000) / 100 : null;
+  const metricsRefreshing = status?.snapshot_state === "refreshing";
   const qdrantState = String(status?.qdrant?.status ?? "reading");
   const semanticRuntime = ({ ready: "可用", disabled: "未配置", offline: "离线", not_indexed: "未建库", warning: "不可用", reading: "读取中" } as Record<string, string>)[qdrantState] ?? qdrantState;
   const grouped = useMemo(() => Object.entries(status?.domains ?? {}), [status]);
@@ -236,8 +246,8 @@ export default function RagLab({ busy, setEvidence }: { busy: boolean; setEviden
     <FoundationSearch />
     {notice && <div className="rag-notice">{notice}</div>}
     <section className="rag-metrics">
-      <Metric label="向量登记覆盖" value={hasVectorScope && coverage !== null ? `${coverage}%` : "暂无候选"} sub={hasVectorScope ? `${status?.indexed_chunks ?? 0} / ${status?.eligible_chunks ?? 0} 片段 · 范围 ${status?.scope === "selected_l3" ? "仅 L3" : "全部正式资料"}；不等同于实时语义可用` : `当前范围 ${status?.scope === "selected_l3" ? "仅 L3" : "全部正式资料"}，暂无符合条件的片段；全文检索不受影响`} />
-      <Metric label="待向量化" value={String(status?.pending_chunks ?? 0)} sub="增量队列，不影响全文检索" />
+      <Metric label="向量登记覆盖" value={metricsRefreshing ? "读取中" : hasVectorScope && coverage !== null ? `${coverage}%` : "暂无候选"} sub={metricsRefreshing ? "完整索引统计正在后台读取；不会阻塞页面或普通检索" : hasVectorScope ? `${status?.indexed_chunks ?? 0} / ${status?.eligible_chunks ?? 0} 片段 · 范围 ${status?.scope === "selected_l3" ? "仅 L3" : "全部正式资料"}；不等同于实时语义可用` : `当前范围 ${status?.scope === "selected_l3" ? "仅 L3" : "全部正式资料"}，暂无符合条件的片段；全文检索不受影响`} />
+      <Metric label="待向量化" value={metricsRefreshing ? "—" : String(status?.pending_chunks ?? 0)} sub={metricsRefreshing ? "后台读取完成后显示真实增量队列" : "增量队列，不影响全文检索"} />
       <Metric label="语义检索运行态" value={semanticRuntime} sub={semanticRuntime === "可用" ? `${status?.model ?? "Embedding"} · ${status?.qdrant?.dimension ?? "—"} 维` : "需同时配置 Embedding 并连接 Qdrant"} />
       <Metric label="银标 Hit@5" value={silver ? percent(silver.hit_rate) : "—"} sub={silver ? `${silver.hit_count}/${silver.case_count} 来源命中 · MRR ${Number(silver.mrr).toFixed(3)}` : "运行银标门禁后可测"} />
     </section>

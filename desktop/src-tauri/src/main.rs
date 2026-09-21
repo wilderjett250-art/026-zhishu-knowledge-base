@@ -75,7 +75,9 @@ fn configured_project_root() -> Option<PathBuf> {
                 .and_then(|path| fs::read_to_string(path).ok())
                 .map(|value| PathBuf::from(value.trim()))
         })?;
-    raw.canonicalize().ok().filter(|path| valid_project_root(path))
+    raw.canonicalize()
+        .ok()
+        .filter(|path| valid_project_root(path))
 }
 
 fn executable_project_root() -> std::io::Result<Option<PathBuf>> {
@@ -84,6 +86,14 @@ fn executable_project_root() -> std::io::Result<Option<PathBuf>> {
         .ancestors()
         .find(|path| valid_project_root(path))
         .map(Path::to_path_buf))
+}
+
+fn executable_packaged_root() -> std::io::Result<Option<PathBuf>> {
+    let executable = std::env::current_exe()?;
+    Ok(executable
+        .parent()
+        .map(|directory| directory.join(PACKAGED_PROJECT_FOLDER))
+        .filter(|path| valid_packaged_root(path)))
 }
 
 fn packaged_project_root<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -98,6 +108,11 @@ fn project_root<R: Runtime>(app: &AppHandle<R>) -> std::io::Result<PathBuf> {
     // Packaged resources take priority over a stale portable-root setting. A
     // newly installed app must not silently attach itself to another project.
     if let Some(root) = executable_project_root()? {
+        return Ok(root);
+    }
+    // An installed EXE must prefer the resources shipped next to itself. Tauri's
+    // generic resource lookup can otherwise resolve a host application's cache.
+    if let Some(root) = executable_packaged_root()? {
         return Ok(root);
     }
     if let Some(root) = packaged_project_root(app) {
@@ -119,9 +134,7 @@ fn remember_project_root(root: &Path) -> std::io::Result<()> {
     fs::create_dir_all(path.parent().expect("config path has parent"))?;
     if path.exists() {
         let desired = root.to_string_lossy();
-        if fs::read_to_string(&path)
-            .is_ok_and(|current| current.trim() == desired.as_ref())
-        {
+        if fs::read_to_string(&path).is_ok_and(|current| current.trim() == desired.as_ref()) {
             return Ok(());
         }
         return Err(std::io::Error::new(
@@ -143,7 +156,7 @@ fn local_app_home() -> std::io::Result<PathBuf> {
                 std::io::ErrorKind::NotFound,
                 "无法定位当前 Windows 用户的本地应用数据目录。",
             )
-    })
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -338,7 +351,11 @@ fn packaged_storage_locations() -> std::io::Result<PackagedStorageLocations> {
 
 fn runtime_paths<R: Runtime>(app: &AppHandle<R>) -> std::io::Result<RuntimePaths> {
     let root = project_root(app)?;
-    let packaged = packaged_project_root(app).as_deref() == Some(root.as_path());
+    // `project_root` can intentionally prefer the packaged resources adjacent
+    // to the installed EXE. Do not re-query Tauri's generic resource lookup
+    // here: in a host/cache environment it can resolve a different valid
+    // package and make this installed root look like a development checkout.
+    let packaged = valid_packaged_root(&root);
     if packaged {
         let locations = packaged_storage_locations()?;
         let runtime = locations.app_home.join("runtime");
@@ -413,15 +430,14 @@ fn tray_icon() -> tauri::image::Image<'static> {
 
 fn http_request(port: u16, method: &str, path: &str, body: &str) -> Option<String> {
     let address = format!("{PKAS_HOST}:{port}").parse().ok()?;
-    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).ok()?;
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: {PKAS_HOST}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    let _ = stream.write_all(
-        request.as_bytes(),
-    );
+    let _ = stream.write_all(request.as_bytes());
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
     Some(response)
@@ -438,7 +454,9 @@ fn backend_ready() -> bool {
 
 fn backend_port_occupied() -> bool {
     std::net::TcpStream::connect_timeout(
-        &format!("{PKAS_HOST}:{PKAS_PORT}").parse().expect("valid local socket"),
+        &format!("{PKAS_HOST}:{PKAS_PORT}")
+            .parse()
+            .expect("valid local socket"),
         Duration::from_millis(150),
     )
     .is_ok()
@@ -451,7 +469,9 @@ fn qdrant_ready() -> bool {
 
 fn port_occupied(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(
-        &format!("{PKAS_HOST}:{port}").parse().expect("valid local socket"),
+        &format!("{PKAS_HOST}:{port}")
+            .parse()
+            .expect("valid local socket"),
         Duration::from_millis(150),
     )
     .is_ok()
@@ -474,9 +494,9 @@ fn bind_backend_lifetime() -> std::io::Result<()> {
         Foundation::CloseHandle,
         System::{
             JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW,
-                JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, SetInformationJobObject,
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
             Threading::GetCurrentProcess,
         },
@@ -543,7 +563,9 @@ fn run_hidden_and_log(
         .create(true)
         .append(true)
         .open(log_path)?;
-    command.stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
+    command
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log));
     hide_console(&mut command);
     let mut child = command.spawn()?;
     wait_child(&mut child, timeout)
@@ -551,14 +573,25 @@ fn run_hidden_and_log(
 
 fn python_environment_fingerprint(manifest: &str) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_str(manifest).ok()?;
+    let dependency_lock_sha256 = parsed
+        .get("dependency_lock_sha256")
+        // Older installations used the entire uv.lock hash. Fall back once so
+        // they safely rebuild, then persist the dependency-only fingerprint.
+        .or_else(|| parsed.get("uv_lock_sha256"))?;
+    // The packaged source is imported directly from the installed application
+    // directory. Rebuild the Python environment only when its runtime or
+    // dependency lock changes, not for an ordinary source-code update.
     let fingerprint = serde_json::json!({
         "python_version": parsed.get("python_version")?,
         "uv_version": parsed.get("uv_version")?,
         "uv_sha256": parsed.get("uv_sha256")?,
-        "uv_lock_sha256": parsed.get("uv_lock_sha256")?,
-        "source_sha256": parsed.get("source_sha256")?
+        "dependency_lock_sha256": dependency_lock_sha256
     });
     Some(fingerprint.to_string())
+}
+
+fn source_import_root(project_root: &Path) -> PathBuf {
+    project_root.join("src")
 }
 
 fn ensure_python_environment<R: Runtime>(
@@ -608,7 +641,10 @@ fn ensure_python_environment<R: Runtime>(
         "正在准备本地运行环境",
         "首次启动会下载 Python 及锁定依赖；不需要另外安装 Python、uv、Node 或打开终端。",
     );
-    append_log(&setup_log, "Starting pinned uv sync for the packaged application.");
+    append_log(
+        &setup_log,
+        "Starting pinned uv sync for the packaged application.",
+    );
 
     let mut sync = Command::new(&paths.uv);
     sync.args([
@@ -624,7 +660,10 @@ fn ensure_python_environment<R: Runtime>(
     .arg("--project")
     .arg(&paths.project_root)
     .current_dir(&paths.project_root)
-    .env("UV_PROJECT_ENVIRONMENT", paths.pythonw.parent().unwrap().parent().unwrap())
+    .env(
+        "UV_PROJECT_ENVIRONMENT",
+        paths.pythonw.parent().unwrap().parent().unwrap(),
+    )
     .env("UV_PYTHON_INSTALL_DIR", paths.app_home.join("python"))
     .env("UV_MANAGED_PYTHON", "1")
     .env("UV_CACHE_DIR", &uv_cache)
@@ -640,7 +679,8 @@ fn ensure_python_environment<R: Runtime>(
     let mut smoke_test = Command::new(&paths.pythonw);
     smoke_test
         .args(["-c", "import pkas, fastapi, uvicorn"])
-        .current_dir(&paths.project_root);
+        .current_dir(&paths.project_root)
+        .env("PYTHONPATH", source_import_root(&paths.project_root));
     run_hidden_and_log(smoke_test, &setup_log, Duration::from_secs(60))?;
 
     // A dedicated uv cache is disposable once the locked environment is healthy.
@@ -759,6 +799,11 @@ fn start_backend(paths: &RuntimePaths) -> std::io::Result<Child> {
             port.as_str(),
         ])
         .current_dir(&paths.project_root)
+        // The managed virtual environment carries third-party dependencies,
+        // while the application package itself must always come from the
+        // installed release. This avoids serving a previous wheel after an
+        // ordinary source-only desktop update.
+        .env("PYTHONPATH", source_import_root(&paths.project_root))
         .env("PKAS_PROJECT_ROOT", &paths.project_root)
         .env("PKAS_DATA_ROOT", &paths.data_root)
         .env("PKAS_RUNTIME_ROOT", paths.app_home.join("runtime"))
@@ -895,10 +940,8 @@ fn start_application<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>) 
             return;
         }
         if let Ok(Some(_)) = backend.try_wait() {
-            let error = std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "本地知识服务启动后提前退出。",
-            );
+            let error =
+                std::io::Error::new(std::io::ErrorKind::Other, "本地知识服务启动后提前退出。");
             append_log(
                 &paths.app_home.join("runtime/setup.log"),
                 "Knowledge API exited before passing the readiness check.",
@@ -1105,5 +1148,31 @@ mod tests {
 
         assert_eq!(title, "知识库数据盘暂不可用");
         assert!(detail.contains("storage-root.txt"));
+    }
+
+    #[test]
+    fn python_environment_fingerprint_tracks_dependencies_not_source_code() {
+        let original = r#"{"python_version":"3.11","uv_version":"0.12","uv_sha256":"uv-a","uv_lock_sha256":"package-v1","dependency_lock_sha256":"deps-a","source_sha256":"source-a"}"#;
+        let application_update = r#"{"python_version":"3.11","uv_version":"0.12","uv_sha256":"uv-a","uv_lock_sha256":"package-v2","dependency_lock_sha256":"deps-a","source_sha256":"source-b"}"#;
+        let dependency_update = r#"{"python_version":"3.11","uv_version":"0.12","uv_sha256":"uv-a","uv_lock_sha256":"package-v3","dependency_lock_sha256":"deps-b","source_sha256":"source-b"}"#;
+        let legacy_manifest = r#"{"python_version":"3.11","uv_version":"0.12","uv_sha256":"uv-a","uv_lock_sha256":"legacy-lock","source_sha256":"source-a"}"#;
+
+        assert_eq!(
+            python_environment_fingerprint(original),
+            python_environment_fingerprint(application_update)
+        );
+        assert_ne!(
+            python_environment_fingerprint(original),
+            python_environment_fingerprint(dependency_update)
+        );
+        assert!(python_environment_fingerprint(legacy_manifest).is_some());
+    }
+
+    #[test]
+    fn backend_imports_pkas_from_the_packaged_release_source() {
+        assert_eq!(
+            source_import_root(Path::new(r"C:\Program Files\Zhishu\pkas-app")),
+            PathBuf::from(r"C:\Program Files\Zhishu\pkas-app\src")
+        );
     }
 }

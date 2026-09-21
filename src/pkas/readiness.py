@@ -6,7 +6,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any
 from urllib.parse import quote
 
@@ -41,6 +41,9 @@ class CoreReadinessService:
         self.data_root = data_root
         self._section_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._section_locks = {key: Lock() for key in self.section_names}
+        self._section_refreshing: set[str] = set()
+        self._section_events: dict[str, Event] = {}
+        self._section_refresh_errors: dict[str, str] = {}
 
     section_names = ("database", "retrieval", "capability", "evaluation", "runtime", "quality")
 
@@ -51,10 +54,118 @@ class CoreReadinessService:
             cached = self._section_cache.get(name)
             if cached and time.monotonic() - cached[0] < 30:
                 return {**cached[1], "cached": True}
-            gate = getattr(self, f"_{name}_gate")()
-            result = {**gate, "checked_at": datetime.now(UTC).isoformat(), "cached": False}
-            self._section_cache[name] = (time.monotonic(), result)
+            event = self._section_events.get(name)
+            if event is None:
+                event = Event()
+                self._section_events[name] = event
+                self._section_refreshing.add(name)
+                leader = True
+            else:
+                leader = False
+
+        if not leader:
+            event.wait()
+            with self._section_locks[name]:
+                cached = self._section_cache.get(name)
+                if cached:
+                    return {**cached[1], "cached": True}
+            raise RuntimeError("Readiness check did not produce a cached result")
+
+        try:
+            result = self._collect_section(name)
+        except Exception:
+            self._finish_section_refresh(name, failed=True)
+            raise
+        else:
+            self._finish_section_refresh(name)
             return result
+
+    def _collect_section(self, name: str) -> dict[str, Any]:
+        # Gate implementations can scan a large SQLite index or query the local
+        # vector service. Keep the cache lock out of that read-only work so a
+        # dashboard snapshot can return the previous result immediately.
+        gate = getattr(self, f"_{name}_gate")()
+        result = {**gate, "checked_at": datetime.now(UTC).isoformat(), "cached": False}
+        with self._section_locks[name]:
+            self._section_cache[name] = (time.monotonic(), result)
+        return result
+
+    def _finish_section_refresh(self, name: str, *, failed: bool = False) -> None:
+        with self._section_locks[name]:
+            if failed:
+                self._section_refresh_errors[name] = "本项只读核对失败，可重新检查。"
+            else:
+                self._section_refresh_errors.pop(name, None)
+            self._section_refreshing.discard(name)
+            event = self._section_events.pop(name, None)
+        if event is not None:
+            event.set()
+
+    def _pending_section(self, name: str, error: str | None = None) -> dict[str, Any]:
+        labels = {
+            "database": ("database", "事实库与全文索引", 22),
+            "retrieval": ("retrieval", "混合RAG与向量覆盖", 22),
+            "capability": ("capabilities", "Skill、MCP与Profile管理", 18),
+            "evaluation": ("evaluation", "检索测评与人工金标", 18),
+            "runtime": ("runtime", "本机运行策略", 8),
+            "quality": ("quality", "自动化回归", 12),
+        }
+        gate_id, label, weight = labels[name]
+        return {
+            "id": gate_id,
+            "name": label,
+            "weight": weight,
+            "status": "unknown",
+            "metrics": {},
+            "evidence": "正在后台执行只读核对；不会启动服务、同步资料或调用模型。",
+            "next_action": "核对完成后会自动刷新；可先继续使用其他页面。",
+            "checked_at": datetime.now(UTC).isoformat(),
+            "cached": False,
+            "snapshot_state": "warning" if error else "refreshing",
+            "snapshot_error": error,
+            "refreshing": True,
+        }
+
+    def _refresh_section_snapshot(self, name: str) -> None:
+        try:
+            self._collect_section(name)
+        except Exception:
+            self._finish_section_refresh(name, failed=True)
+        else:
+            self._finish_section_refresh(name)
+
+    def section_snapshot(self, name: str) -> dict[str, Any]:
+        """Return a cached section immediately and refresh expensive checks in the background."""
+        if name not in self.section_names:
+            raise ValueError("Unknown readiness section")
+        start_refresh = False
+        with self._section_locks[name]:
+            cached = self._section_cache.get(name)
+            fresh = cached is not None and time.monotonic() - cached[0] < 30
+            if not fresh and name not in self._section_refreshing:
+                self._section_refreshing.add(name)
+                self._section_events[name] = Event()
+                start_refresh = True
+            refreshing = name in self._section_refreshing
+            error = self._section_refresh_errors.get(name)
+            if cached is not None:
+                result = {
+                    **cached[1],
+                    "cached": True,
+                    "snapshot_state": "ready",
+                    "snapshot_error": error,
+                    "refreshing": refreshing,
+                }
+            else:
+                result = self._pending_section(name, error)
+        if start_refresh:
+            Thread(
+                target=self._refresh_section_snapshot,
+                args=(name,),
+                name=f"pkas-readiness-{name}",
+                daemon=True,
+            ).start()
+        return result
 
     def report(self) -> dict[str, Any]:
         gates = [
@@ -65,6 +176,15 @@ class CoreReadinessService:
             self._runtime_gate(),
             self._quality_gate(),
         ]
+        return self._report_from_gates(gates)
+
+    def report_snapshot(self) -> dict[str, Any]:
+        """Assemble a non-blocking aggregate from independently refreshed gates."""
+        return self._report_from_gates(
+            [self.section_snapshot(name) for name in self.section_names]
+        )
+
+    def _report_from_gates(self, gates: list[dict[str, Any]]) -> dict[str, Any]:
         factors = {
             "passed": 1.0,
             "partial": 0.55,
@@ -74,11 +194,19 @@ class CoreReadinessService:
         }
         score = round(sum(factors[item["status"]] * item["weight"] for item in gates))
         blocking = [item["id"] for item in gates if item["status"] == "blocked"]
-        local_trial = not blocking and score >= 70
+        refreshing = any(item.get("snapshot_state") == "refreshing" for item in gates)
+        local_trial = not refreshing and not blocking and score >= 70
         return {
             "schema_version": self.schema_version,
-            "score": score,
-            "status": "ready_for_local_trial" if local_trial else "not_ready",
+            "score": score if not refreshing else None,
+            "status": (
+                "checking"
+                if refreshing
+                else "ready_for_local_trial"
+                if local_trial
+                else "not_ready"
+            ),
+            "snapshot_state": "refreshing" if refreshing else "ready",
             "gates": gates,
             "blocking_gates": blocking,
             "claims": {

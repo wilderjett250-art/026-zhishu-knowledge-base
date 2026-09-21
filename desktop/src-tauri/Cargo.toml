@@ -1,6 +1,6 @@
 [package]
 name = "zhishu-desktop"
-version = "0.1.2"
+version = "0.1.13"
 description = "PKAS personal AI control plane desktop shell"
 authors = ["PKAS"]
 edition = "2021"

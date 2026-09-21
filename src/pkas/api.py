@@ -238,6 +238,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolved_settings,
         )
         app.state.thread_journal.start()
+        # The complete RAG matrix can take several seconds on a large local
+        # archive. Start its safe, read-only refresh now rather than blocking
+        # the first desktop page or API request.
+        system.rag.prewarm_status()
         try:
             yield
         finally:
@@ -431,7 +435,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/core/readiness", response_model=Envelope)
     def core_readiness(request: Request) -> Envelope:
-        report = system_from(request).readiness.report()
+        report = system_from(request).readiness.report_snapshot()
+        if report["snapshot_state"] == "refreshing":
+            return warning(
+                "正在后台核对核心能力；各项会独立更新",
+                report,
+                next_actions=report["next_required"],
+            )
         if report["status"] != "ready_for_local_trial":
             return warning("核心能力仍有阻塞门禁", report, next_actions=report["next_required"])
         return success("核心能力已达到本机试用门禁", report, next_actions=report["next_required"])
@@ -441,7 +451,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         service = system_from(request).readiness
         if section not in service.section_names:
             raise HTTPException(status_code=404, detail="未知的系统检查项")
-        return success("已读取系统检查项", service.section(section))
+        data = service.section_snapshot(section)
+        message = (
+            "正在后台核对系统检查项"
+            if data["snapshot_state"] == "refreshing"
+            else "已读取系统检查项"
+        )
+        return success(message, data)
 
     @app.get("/api/capabilities/overview", response_model=Envelope)
     def capability_overview(request: Request) -> Envelope:
@@ -658,8 +674,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/rag/status", response_model=Envelope)
     def rag_status(request: Request) -> Envelope:
-        data = system_from(request).rag.status()
-        return success("已读取真实向量索引状态", data)
+        data = system_from(request).rag.status_snapshot()
+        message = (
+            "正在后台读取真实向量索引状态"
+            if data["snapshot_state"] == "refreshing"
+            else "已读取真实向量索引状态"
+        )
+        return success(message, data)
 
     @app.get("/api/rag/vector-map", response_model=Envelope)
     def rag_vector_map(

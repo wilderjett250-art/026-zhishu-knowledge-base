@@ -57,6 +57,10 @@ switch ($Mode) {
         if ($null -eq $npm) {
             throw 'The builder needs Node.js/npm; customers installing the generated setup.exe do not.'
         }
+        $uvExe = Join-Path $projectRoot 'runtime\tauri-payload\uv.exe'
+        if (-not (Test-Path -LiteralPath $uvExe -PathType Leaf)) {
+            throw 'The builder needs the pinned uv.exe to verify uv.lock before packaging.'
+        }
         if (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'web\node_modules\.bin\vite.cmd'))) {
             throw 'Web build dependencies are missing. Run npm ci in web once on the developer machine, then retry.'
         }
@@ -65,6 +69,16 @@ switch ($Mode) {
         }
         New-Item -ItemType Directory -Path $StagingRoot -Force | Out-Null
         $env:npm_config_cache = Join-Path $resolvedBuildRoot 'npm-cache'
+
+        Push-Location $projectRoot
+        try {
+            & $uvExe lock --locked
+            if ($LASTEXITCODE -ne 0) {
+                throw 'uv.lock does not match pyproject.toml; update and review the lock before packaging.'
+            }
+        } finally {
+            Pop-Location
+        }
 
         Push-Location (Join-Path $projectRoot 'web')
         try {
@@ -87,9 +101,11 @@ switch ($Mode) {
         }
 
         $installerDirectory = Join-Path $targetDir 'release\bundle\nsis'
-        $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue)
+        $tauriConfig = Get-Content -LiteralPath (Join-Path $projectRoot 'desktop\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
+        $installerPattern = "*_$($tauriConfig.version)_*-setup.exe"
+        $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter $installerPattern -File -ErrorAction SilentlyContinue)
         if ($installers.Count -ne 1) {
-            throw "Expected one NSIS setup.exe in $installerDirectory; found $($installers.Count)."
+            throw "Expected one current-version NSIS setup.exe ($installerPattern) in $installerDirectory; found $($installers.Count)."
         }
         $installer = $installers[0]
         [pscustomobject]@{

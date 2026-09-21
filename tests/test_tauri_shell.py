@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +12,7 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     config = json.loads((TAURI_ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
 
     assert config["productName"] == "知域"
-    assert config["version"] == "0.1.2"
+    assert config["version"] == "0.1.13"
     assert config["identifier"] == "com.zhishu.pkas"
     assert config["build"]["frontendDist"] == "../../web/dist"
     assert config["bundle"]["active"] is True
@@ -27,6 +28,33 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     assert "../../tools/everything/" in resources
     assert "../../scripts/configure_weflow_manual.mjs" in resources
     assert config["app"]["windows"] == []
+
+
+def test_packaged_python_lock_and_runtime_manifest_follow_project_version() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    prepare_script = (ROOT / "scripts" / "prepare_tauri_resources.ps1").read_text(
+        encoding="utf-8"
+    )
+    build_script = (ROOT / "scripts" / "build_tauri_desktop.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    version = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', pyproject)
+    locked = re.search(r'(?ms)\[\[package\]\]\nname = "pkas"\nversion = "([^"]+)"', lock)
+    assert version is not None
+    assert locked is not None
+    assert locked.group(1) == version.group(1)
+    assert "$appVersion = $versionMatch.Groups['version'].Value" in prepare_script
+    assert "app_version = $appVersion" in prepare_script
+    assert "function Get-DependencyLockSha256" in prepare_script
+    assert "dependency_lock_sha256 = Get-DependencyLockSha256" in prepare_script
+    assert '.get("dependency_lock_sha256")' in (TAURI_ROOT / "src" / "main.rs").read_text(
+        encoding="utf-8"
+    )
+    assert "& $uvExe lock --locked" in build_script
+    assert "tauri.conf.json" in build_script
+    assert '$installerPattern = "*_$($tauriConfig.version)_*-setup.exe"' in build_script
 
 
 def test_desktop_product_copy_uses_clear_chinese_titles_without_internal_badges() -> None:
@@ -108,6 +136,9 @@ def test_tauri_shell_has_portable_root_resolution_without_secrets() -> None:
     assert 'join("Zhishu").join("pkas-root.txt")' in source
     assert "valid_project_root" in source
     assert "remember_project_root" in source
+    assert "fn executable_packaged_root" in source
+    assert source.index("executable_packaged_root()?") < source.index("packaged_project_root(app)")
+    assert "let packaged = valid_packaged_root(&root);" in source
     assert "未找到有效的知域程序资源" in source
     assert "api_key" not in source.lower()
 
@@ -126,6 +157,8 @@ def test_packaged_first_run_is_isolated_and_does_not_autoscan_or_configure_clien
     assert '"PKAS_QDRANT_URL"' in source
     assert "UV_PYTHON_INSTALL_DIR" in source
     assert "UV_CACHE_DIR" in source
+    assert '"PYTHONPATH"' in source
+    assert "source_import_root(&paths.project_root)" in source
     assert "creation_flags(0x08000000)" in source
     assert "不会自动扫描磁盘" in source
     assert "退出并停止本机服务" in source

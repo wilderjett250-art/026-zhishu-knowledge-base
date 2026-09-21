@@ -61,3 +61,27 @@ def test_core_readiness_reports_evidence_boundaries(knowledge_system, monkeypatc
     evaluation = next(item for item in report["gates"] if item["id"] == "evaluation")
     assert evaluation["status"] == "partial"
     assert "0/150" in evaluation["next_action"]
+
+
+def test_report_snapshot_does_not_block_on_slow_sections(knowledge_system, monkeypatch) -> None:
+    service = knowledge_system.readiness
+
+    for name in service.section_names:
+        monkeypatch.setattr(
+            service,
+            f"_{name}_gate",
+            lambda name=name: {
+                "id": "capabilities" if name == "capability" else name,
+                "name": name,
+                "weight": 1,
+                "status": "passed",
+                "metrics": {},
+                "evidence": "test",
+                "next_action": "none",
+            },
+        )
+
+    report = service.report_snapshot()
+    assert report["snapshot_state"] == "refreshing"
+    assert report["status"] == "checking"
+    assert report["claims"]["local_trial"] is False

@@ -9,6 +9,13 @@ $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $runtimeConfigPath = Join-Path $resolvedRoot 'config\desktop_runtime.json'
 $runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
 $replicationConfig = Get-Content -LiteralPath (Join-Path $resolvedRoot 'config\windows_replication.json') -Raw | ConvertFrom-Json
+$pyprojectPath = Join-Path $resolvedRoot 'pyproject.toml'
+$pyprojectText = Get-Content -LiteralPath $pyprojectPath -Raw
+$versionMatch = [regex]::Match($pyprojectText, '(?m)^version\s*=\s*"(?<version>[^"]+)"\s*$')
+if (-not $versionMatch.Success) {
+    throw 'Unable to determine the packaged application version from pyproject.toml.'
+}
+$appVersion = $versionMatch.Groups['version'].Value
 
 if ([string]::IsNullOrWhiteSpace($StagingRoot)) {
     if (Test-Path -LiteralPath 'I:\') {
@@ -28,6 +35,28 @@ New-Item -ItemType Directory -Path $resolvedStaging -Force | Out-Null
 function Get-Sha256 {
     param([Parameter(Mandatory)][string]$Path)
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-DependencyLockSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $lockText = Get-Content -LiteralPath $Path -Raw
+    $localPackagePattern = '(?ms)(^\[\[package\]\]\r?\nname = "pkas"\r?\nversion = ")[^"]+(")'
+    $matches = [regex]::Matches($lockText, $localPackagePattern)
+    if ($matches.Count -ne 1) {
+        throw 'Unable to isolate the local PKAS package version in uv.lock.'
+    }
+    # The local application version changes on every desktop release but does
+    # not alter resolved third-party dependencies. Normalize only that field
+    # so an ordinary code/version upgrade can reuse a healthy Python runtime.
+    $normalized = [regex]::Replace($lockText, $localPackagePattern, '$1<app-version>$2')
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($normalized)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        [BitConverter]::ToString($hasher.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+    }
 }
 
 function Get-Archive {
@@ -167,11 +196,12 @@ try {
 
     $manifest = [ordered]@{
         schema_version = 1
-        app_version = '0.1.0'
+        app_version = $appVersion
         python_version = [string]$runtimeConfig.python_version
         uv_version = [string]$runtimeConfig.uv.version
         uv_sha256 = Get-Sha256 -Path $uvDestination
         uv_lock_sha256 = Get-Sha256 -Path (Join-Path $resolvedRoot 'uv.lock')
+        dependency_lock_sha256 = Get-DependencyLockSha256 -Path (Join-Path $resolvedRoot 'uv.lock')
         source_sha256 = $sourceHash
         qdrant_version = [string]$runtimeConfig.qdrant.version
         qdrant_archive_sha256 = [string]$runtimeConfig.qdrant.sha256

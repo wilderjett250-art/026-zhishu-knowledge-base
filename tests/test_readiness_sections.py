@@ -1,4 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
@@ -50,3 +52,73 @@ def test_section_endpoint_isolated_from_full_report(test_settings, monkeypatch):
         assert response.status_code == 200
         assert response.json()["data"]["checked_at"]
         assert client.get("/api/core/readiness/invalid").status_code == 404
+
+
+def test_section_snapshot_returns_without_waiting_for_slow_database_check(
+    knowledge_system, monkeypatch
+):
+    service = knowledge_system.readiness
+    started = Event()
+    release = Event()
+
+    def delayed_database():
+        started.set()
+        assert release.wait(timeout=2)
+        return {"id": "database", "status": "passed", "metrics": {}}
+
+    monkeypatch.setattr(service, "_database_gate", delayed_database)
+    began = monotonic()
+    pending = service.section_snapshot("database")
+    assert monotonic() - began < 0.2
+    assert pending["snapshot_state"] == "refreshing"
+    assert started.wait(timeout=1)
+    try:
+        second_began = monotonic()
+        still_pending = service.section_snapshot("database")
+        assert monotonic() - second_began < 0.2
+        assert still_pending["snapshot_state"] == "refreshing"
+    finally:
+        release.set()
+
+    deadline = monotonic() + 2
+    current = pending
+    while monotonic() < deadline:
+        current = service.section_snapshot("database")
+        if current["snapshot_state"] == "ready":
+            break
+        sleep(0.01)
+    assert current["snapshot_state"] == "ready"
+    assert current["status"] == "passed"
+
+
+def test_stale_cached_snapshot_keeps_result_visible_while_refreshing(
+    knowledge_system, monkeypatch
+):
+    service = knowledge_system.readiness
+    started = Event()
+    release = Event()
+    service._section_cache["database"] = (
+        monotonic() - 31,
+        {
+            "id": "database",
+            "status": "passed",
+            "metrics": {"chunks": 1},
+            "checked_at": "cached",
+            "cached": False,
+        },
+    )
+
+    def delayed_database():
+        started.set()
+        assert release.wait(timeout=2)
+        return {"id": "database", "status": "passed", "metrics": {"chunks": 2}}
+
+    monkeypatch.setattr(service, "_database_gate", delayed_database)
+    try:
+        snapshot = service.section_snapshot("database")
+        assert snapshot["snapshot_state"] == "ready"
+        assert snapshot["refreshing"] is True
+        assert snapshot["cached"] is True
+        assert started.wait(timeout=1)
+    finally:
+        release.set()

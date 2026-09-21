@@ -1,4 +1,6 @@
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +36,53 @@ class RankedRetrieval:
             ],
             mode="test",
         )
+
+
+def test_status_snapshot_returns_immediately_while_metrics_refresh(
+    knowledge_system: KnowledgeSystem,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+
+    def delayed_collect() -> dict:
+        started.set()
+        assert release.wait(timeout=2)
+        return {
+            "provider": "test",
+            "model": "test-model",
+            "scope": "selected_l3",
+            "collection": "test-collection",
+            "eligible_chunks": 1,
+            "indexed_chunks": 1,
+            "pending_chunks": 0,
+            "coverage": 1.0,
+            "domains": {},
+            "coverage_matrix": [],
+            "coverage_scope": {},
+            "retrieval_surfaces": {},
+            "structure": {},
+            "qdrant": {"status": "ready"},
+            "mcp_enabled": False,
+        }
+
+    monkeypatch.setattr(knowledge_system.rag, "_collect_status", delayed_collect)
+    began = monotonic()
+    pending = knowledge_system.rag.status_snapshot()
+    assert monotonic() - began < 0.2
+    assert pending["snapshot_state"] == "refreshing"
+    assert started.wait(timeout=1)
+    release.set()
+
+    deadline = monotonic() + 2
+    current = pending
+    while monotonic() < deadline:
+        current = knowledge_system.rag.status_snapshot()
+        if current["snapshot_state"] == "ready":
+            break
+        sleep(0.01)
+    assert current["snapshot_state"] == "ready"
+    assert current["qdrant"]["status"] == "ready"
 
 
 def test_graded_judgments_drive_precision_ndcg_and_coverage(

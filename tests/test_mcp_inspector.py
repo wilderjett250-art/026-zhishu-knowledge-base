@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,17 @@ env = {{ TOKEN = "{token}" }}
         encoding="utf-8",
     )
     return _stable_id("codex", "local")
+
+
+@pytest.mark.asyncio
+async def test_stdio_probe_completes_real_initialize_and_list_tools() -> None:
+    result = await McpInspectorService._probe_stdio(
+        {"command": sys.executable, "args": ["-m", "pkas.mcp_server"]},
+        timeout_seconds=15,
+    )
+
+    assert result["server_name"] == "personal-knowledge-agent"
+    assert any(item["name"] == "search_knowledge" for item in result["tools"])
 
 
 @pytest.mark.asyncio

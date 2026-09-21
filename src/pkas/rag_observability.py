@@ -2,8 +2,11 @@ import json
 import math
 import uuid
 from collections import Counter
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock, Thread
+from time import monotonic
 from typing import Any
 
 from pkas.db import Database
@@ -24,6 +27,16 @@ class RagObservabilityService:
         self.database = database
         self.vector_index = vector_index
         self.retrieval = retrieval
+        self._status_lock = Lock()
+        self._status_snapshot: dict[str, Any] | None = None
+        self._status_snapshot_at = 0.0
+        self._status_snapshot_updated_at: str | None = None
+        self._status_refreshing = False
+        self._status_refresh_error: str | None = None
+        # The full matrix deliberately reads many real SQLite and Qdrant
+        # counters. Keep it off the interactive request path while retaining
+        # a short-lived, source-grounded snapshot for the control panel.
+        self._status_snapshot_ttl_seconds = 30.0
 
     def fusion_tuning_status(self, *, minimum_gold_cases: int = 30) -> dict[str, Any]:
         progress = self.review_progress()
@@ -158,7 +171,7 @@ class RagObservabilityService:
             "reason": "已生成离线推荐；修改正式权重前仍需查看留出集指标并明确应用。",
         }
 
-    def status(self) -> dict[str, Any]:
+    def _collect_status(self) -> dict[str, Any]:
         coverage = self.vector_index.coverage()
         allow_restricted = bool(
             self.vector_index.settings.embedding_allow_restricted_remote_processing
@@ -379,6 +392,105 @@ class RagObservabilityService:
             "qdrant": qdrant,
             "mcp_enabled": False,
         }
+
+    def status(self) -> dict[str, Any]:
+        """Return the complete, immediately calculated RAG report.
+
+        This is intentionally retained for CLI, tests, and explicit
+        diagnostics. Interactive surfaces should call ``status_snapshot`` so
+        a multi-GB historical database never leaves the UI waiting.
+        """
+        return self._collect_status()
+
+    def prewarm_status(self) -> None:
+        """Begin a non-blocking refresh as soon as the local service starts."""
+        self.status_snapshot()
+
+    def _pending_status(self) -> dict[str, Any]:
+        settings = self.vector_index.settings
+        return {
+            "provider": self.vector_index.embedding.provider_name,
+            "model": self.vector_index.embedding.model_name,
+            "scope": settings.embedding_scope,
+            "collection": settings.qdrant_collection,
+            "eligible_chunks": 0,
+            "indexed_chunks": 0,
+            "pending_chunks": 0,
+            "coverage": None,
+            "domains": {},
+            "coverage_matrix": [],
+            "coverage_scope": {
+                "indexed_sources": 0,
+                "all_indexed_chunks": 0,
+                "vector_eligible_chunks": 0,
+                "vector_indexed_chunks": 0,
+                "excluded_codex_user_tasks": 0,
+                "excluded_thread_derivatives": 0,
+                "excluded_restricted_policy": 0,
+                "sources_without_chunks": 0,
+                "restricted_embedding_enabled": bool(
+                    settings.embedding_allow_restricted_remote_processing
+                ),
+            },
+            "retrieval_surfaces": {},
+            "structure": {
+                "blocks": 0,
+                "chunk_block_relations": 0,
+                "orphan_chunks": 0,
+                "chunk_kinds": {},
+                "chunker_versions": {},
+            },
+            "qdrant": {"status": "reading"},
+            "mcp_enabled": False,
+            "snapshot_state": "refreshing",
+            "snapshot_updated_at": None,
+            "snapshot_error": None,
+        }
+
+    def _refresh_status_snapshot(self) -> None:
+        try:
+            snapshot = self._collect_status()
+        except Exception:
+            snapshot = None
+        with self._status_lock:
+            self._status_refreshing = False
+            if snapshot is None:
+                self._status_refresh_error = "索引指标刷新失败，将在下次查看时自动重试。"
+                return
+            self._status_snapshot = snapshot
+            self._status_snapshot_at = monotonic()
+            self._status_snapshot_updated_at = utc_now()
+            self._status_refresh_error = None
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return cached RAG metrics immediately and refresh them in the background."""
+        should_start = False
+        with self._status_lock:
+            snapshot = deepcopy(self._status_snapshot) if self._status_snapshot else None
+            updated_at = self._status_snapshot_updated_at
+            age = monotonic() - self._status_snapshot_at if snapshot else None
+            fresh = age is not None and age < self._status_snapshot_ttl_seconds
+            if not fresh and not self._status_refreshing:
+                self._status_refreshing = True
+                should_start = True
+            refreshing = self._status_refreshing
+            refresh_error = self._status_refresh_error
+        if should_start:
+            Thread(
+                target=self._refresh_status_snapshot,
+                name="pkas-rag-status-refresh",
+                daemon=True,
+            ).start()
+        if snapshot is None:
+            pending = self._pending_status()
+            pending["snapshot_error"] = refresh_error
+            return pending
+        snapshot["snapshot_state"] = "ready" if fresh else "refreshing"
+        snapshot["snapshot_updated_at"] = updated_at
+        snapshot["snapshot_error"] = refresh_error
+        if refreshing and not fresh:
+            snapshot["snapshot_state"] = "refreshing"
+        return snapshot
 
     def latest_silver_gate(self) -> dict[str, Any] | None:
         report_path = self.latest_silver_gate_path()

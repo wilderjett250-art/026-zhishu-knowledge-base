@@ -315,7 +315,10 @@ def test_rag_observability_and_persistent_eval_api(
     with TestClient(create_app(test_settings)) as client:
         status = client.get("/api/rag/status")
         assert status.status_code == 200
-        assert status.json()["data"]["qdrant"]["status"] == "disabled"
+        payload = status.json()["data"]
+        assert payload["snapshot_state"] in {"refreshing", "ready"}
+        assert payload["qdrant"]["status"] in {"reading", "disabled"}
+        assert system.rag.status()["qdrant"]["status"] == "disabled"
 
         rejected = client.post(
             "/api/rag/eval/cases",
