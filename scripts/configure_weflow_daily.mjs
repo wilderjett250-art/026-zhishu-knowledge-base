@@ -3,7 +3,10 @@ import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 
-const weflowRoot = process.env.WEFLOW_ROOT || 'D:\\wx\\xwechat_files\\tools\\WeFlow'
+const weflowRoot = String(process.env.WEFLOW_ROOT || '').trim()
+if (!weflowRoot) {
+  throw new Error('WEFLOW_ROOT must be explicitly configured for a legacy WeFlow daily export')
+}
 const defaultAppData = process.env.APPDATA || path.join(homedir(), 'AppData', 'Roaming')
 const configDir = process.env.WEFLOW_CONFIG_DIR || path.join(defaultAppData, 'weflow')
 const taskId = 'pkas-weflow-daily-v1'

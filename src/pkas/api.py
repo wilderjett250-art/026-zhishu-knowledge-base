@@ -50,6 +50,7 @@ from pkas.document_policy import (
 )
 from pkas.everything_scanner import status as everything_status
 from pkas.foundation import FoundationService, suggested_scopes
+from pkas.import_providers import ImportProviderError, ImportProviderNotFound
 from pkas.ingest import ImportBoundaryError
 from pkas.intake import (
     DEFAULT_RULES,
@@ -101,8 +102,10 @@ from pkas.schemas import (
     DistillationExportRequest,
     Envelope,
     ImportInspectRequest,
+    ImportProviderProbeRequest,
     ImportRunRequest,
     McpProbeRequest,
+    ObsidianVaultRegisterRequest,
     PersonaCandidateRequest,
     PersonalTimelineBuildRequest,
     RagEvalCaseRequest,
@@ -1457,6 +1460,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="资料不存在")
         return success("已读取原文与来源定位", item, artifacts=[item["vault_path"]])
 
+    @app.get("/api/import-providers", response_model=Envelope)
+    def import_providers(request: Request) -> Envelope:
+        items = system_from(request).import_providers.list_providers()
+        return success(
+            f"已读取 {len(items)} 个内置资料接入方式；不会扫描文件或启动外部程序。",
+            items,
+        )
+
+    @app.post("/api/import-providers/{provider_id}/probe", response_model=Envelope)
+    def probe_import_provider(
+        provider_id: str,
+        payload: ImportProviderProbeRequest,
+        request: Request,
+    ) -> Envelope:
+        try:
+            result = system_from(request).import_providers.probe(
+                provider_id,
+                location=payload.location,
+                records_path=payload.records_path,
+                weflow_root=payload.weflow_root,
+            )
+        except ImportProviderNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ImportProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return success(
+            "资料接入方式检查完成；本次没有读取正文、导入聊天或启动外部程序。",
+            result,
+            next_actions=[str(result.get("next_step") or "")],
+        )
+
+    @app.post(
+        "/api/import-providers/obsidian-vault/register",
+        response_model=Envelope,
+    )
+    def register_obsidian_vault(
+        payload: ObsidianVaultRegisterRequest,
+        request: Request,
+    ) -> Envelope:
+        try:
+            result = system_from(request).import_providers.register_obsidian_vault(
+                vault_path=payload.vault_path,
+                name=payload.name,
+                domain=payload.domain,
+                privacy=payload.privacy,
+                sync_mode=payload.sync_mode,
+                recursive=payload.recursive,
+            )
+        except ImportProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return success(
+            "Obsidian Vault 已登记；尚未扫描或读取笔记正文。",
+            result,
+            next_actions=[str(result.get("next_step") or "")],
+        )
+
     @app.post("/api/import/inspect", response_model=Envelope)
     def inspect_import(payload: ImportInspectRequest, request: Request) -> Envelope:
         try:
@@ -1855,7 +1914,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             next_actions=["页面会自动更新导出和入库进度。"],
         )
 
-    @app.post("/api/weflow/chatlab/inspect", response_model=Envelope)
+    @app.post("/api/chat-imports/chatlab/inspect", response_model=Envelope)
+    @app.post(
+        "/api/weflow/chatlab/inspect",
+        response_model=Envelope,
+        include_in_schema=False,
+    )
     def inspect_chatlab(payload: ChatLabInspectRequest, request: Request) -> Envelope:
         try:
             result = system_from(request).weflow.inspect_chatlab_file(
@@ -1865,12 +1929,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return success(
-            "WeFlow ChatLab 文件检查完成，尚未复制或索引聊天内容",
+            "ChatLab 兼容聊天文件检查完成，尚未复制或索引聊天内容",
             result,
             next_actions=["确认会话 ID、消息数量和 restricted 隐私范围后再导入"],
         )
 
-    @app.post("/api/weflow/chatlab/import", response_model=Envelope)
+    @app.post("/api/chat-imports/chatlab/import", response_model=Envelope)
+    @app.post(
+        "/api/weflow/chatlab/import",
+        response_model=Envelope,
+        include_in_schema=False,
+    )
     def import_chatlab(payload: ChatLabImportRequest, request: Request) -> Envelope:
         result = system_from(request).customer_workflows.import_chatlab(
             path=payload.path,
@@ -1880,13 +1949,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if result["status"] == "failed":
             return warning(
-                "WeFlow ChatLab 导入未完成",
+                "ChatLab 聊天文件导入未完成",
                 result,
                 next_actions=[result["error"]["safe_retry"]],
             )
         imported = result["result"]["imported"]
         return success(
-            f"已导入 {imported} 条 WeFlow 待归类微信会话消息",
+            f"已导入 {imported} 条待归类微信会话消息",
             result,
             artifacts=result["artifacts"],
         )

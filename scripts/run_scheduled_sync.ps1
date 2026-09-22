@@ -2,7 +2,7 @@ param(
     [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$DataRoot = '',
     [string]$QdrantUrl = 'http://127.0.0.1:6333',
-    [string]$WeFlowRoot = 'D:\wx\xwechat_files\tools\WeFlow',
+    [string]$WeFlowRoot = '',
     [switch]$LaunchOnly
 )
 
@@ -10,6 +10,9 @@ $ErrorActionPreference = 'Stop'
 $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 if ([string]::IsNullOrWhiteSpace($DataRoot)) {
     $DataRoot = Join-Path $resolvedRoot 'data'
+}
+if ([string]::IsNullOrWhiteSpace($WeFlowRoot)) {
+    throw 'WeFlowRoot must be explicitly supplied for legacy WeFlow scheduled sync.'
 }
 $pythonPath = Join-Path $resolvedRoot '.venv\Scripts\python.exe'
 $nodePath = 'C:\Program Files\nodejs\node.exe'
@@ -47,6 +50,7 @@ $startedByTask = $dailyImportEnabled -and $weflowProcesses.Count -eq 0
 if ($startedByTask) {
     # Configure only before launch so the app cannot overwrite a newer in-memory
     # task definition. The Node helper never reads or prints secret fields.
+    $env:WEFLOW_ROOT = $WeFlowRoot
     & $nodePath $configureScript | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'WeFlow automation configuration failed'

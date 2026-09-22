@@ -11,13 +11,15 @@ $repoRoot = (Resolve-Path .).Path
 
 输出位于构建数据盘的 `tauri-target\release\bundle\nsis` 目录（具体文件名和版本以构建结果为准）。安装器按当前 Windows 用户安装，不需要管理员权限；WebView2 不存在时安装器会静默安装引导程序。
 
-客户只需安装并打开。首次启动时应用自动准备锁定的 Python 3.11 环境、依赖、本机 Qdrant 和知识服务；进度在知枢窗口中显示，后台不弹终端。首次启动需要网络下载 Python 与依赖，可能需要数分钟；之后启动会复用已准备的运行环境，不要求客户安装 Python、uv、Node.js、npm、Rust 或 Qdrant。
+客户只需安装并打开。首次启动时应用自动准备锁定的 Python 3.11 环境、依赖、本机 Qdrant 和知识服务；进度在知域窗口中显示，后台不弹终端。首次启动需要网络下载 Python 与依赖，可能需要数分钟；之后启动会复用已准备的运行环境，不要求客户安装 Python、uv、Node.js、npm、Rust 或 Qdrant。
 
-安装目录与用户数据隔离：程序安装在当前用户的程序目录。首次启动会选择空间最大的非系统固定磁盘（至少剩余 10 GiB），新用户的索引数据库、向量数据、用户配置、运行日志与 Python 环境分别放在 `<磁盘>\Zhishu\data` 和 `<磁盘>\Zhishu\runtime`；`%LOCALAPPDATA%\Zhishu\storage-root.txt` 只保存两行位置指针（运行目录、数据目录）。没有合格数据盘时回退到 `%LOCALAPPDATA%\Zhishu`，资料流程会分别显示知识库与运行环境的实际位置，并标出系统盘占用。若 `%APPDATA%\Zhishu\pkas-root.txt` 指向旧版项目且该项目的 `data\index\pkas.sqlite` 是非空文件，新版会继续使用原 `data` 目录，不复制或迁移已有资料；如果旧版用户目录和旧项目目录都存在非运行时资料，程序会停止并明确提示，不擅自猜选。所选数据盘缺失时也会停止启动，不切换到空库。更新/卸载不主动删除数据目录。第一次启动不会扫盘、导入微信、配置 API 密钥或修改 Codex/MCP；首页进入资料接入后，首次点击“一键开始整理”才保存推荐方案并启动当前展示范围的目录索引。之后按分类选择全文、摘要或向量处理。Luna/DeepSeek、Embedding 等外部能力只在用户配置并触发后使用。WeFlow 同步是手动可选项，仍要求目标用户自行安装并登录 WeFlow。
+安装目录与用户数据隔离：程序安装在当前用户的程序目录。首次启动会选择空间最大的非系统固定磁盘（至少剩余 10 GiB），新用户的索引数据库、向量数据、用户配置、运行日志与 Python 环境分别放在 `<磁盘>\Zhishu\data` 和 `<磁盘>\Zhishu\runtime`；`%LOCALAPPDATA%\Zhishu\storage-root.txt` 只保存两行位置指针（运行目录、数据目录）。没有合格数据盘时回退到 `%LOCALAPPDATA%\Zhishu`，资料流程会分别显示知识库与运行环境的实际位置，并标出系统盘占用。若 `%APPDATA%\Zhishu\pkas-root.txt` 指向旧版项目且该项目的 `data\index\pkas.sqlite` 是非空文件，新版会继续使用原 `data` 目录，不复制或迁移已有资料；如果旧版用户目录和旧项目目录都存在非运行时资料，程序会停止并明确提示，不擅自猜选。所选数据盘缺失时也会停止启动，不切换到空库。更新/卸载不主动删除数据目录。第一次启动不会扫盘、导入微信、配置 API 密钥或修改 Codex/MCP；首页进入资料接入后，首次点击“一键开始整理”才保存推荐方案并启动当前展示范围的目录索引。之后按分类选择全文、摘要或向量处理。Luna/DeepSeek、Embedding 等外部能力只在用户配置并触发后使用。聊天是可选的文件接入：普通用户只需导入自己合法导出的 XLSX 或 ChatLab 兼容 JSON；旧 WeFlow 同步仅保留为已存在本机环境的手动兼容模式。
 
-`config/desktop_runtime.json` 固定 Python、uv、Qdrant 和 Node.js 版本及官方发布包 SHA-256，并固定 Everything 可执行文件校验值。安装包把运行所需的 Node/npm、Everything、WeFlow 辅助脚本、Qdrant、uv、PKAS Python 模块和已构建网页打入安装包，不包含本机数据库、聊天记录、API 密钥、虚拟环境、Git 历史或个人资料。首轮运行用校验过的 uv 和 uv 管理的 Python，在每位 Windows 用户自己的目录构建隔离环境。外机安装器生成不代表完成外机实装验收。
+`config/desktop_runtime.json` 固定 Python、uv、Qdrant 和 Node.js 版本及官方发布包 SHA-256，并固定 Everything 可执行文件校验值。安装包把运行所需的 Node/npm、Everything、Qdrant、uv、知域 Python 模块和已构建网页打入安装包；其中可保留一个只用于本机旧环境兼容的导出配置辅助脚本，但**不包含** WeFlow、微信数据库、聊天记录、API 密钥、虚拟环境、Git 历史、个人资料或第三方聊天导出器。首轮运行用校验过的 uv 和 uv 管理的 Python，在每位 Windows 用户自己的目录构建隔离环境。外机安装器生成不代表完成外机实装验收。
 
-**验收边界：**成功生成 NSIS 文件只证明构建通过，不等于另一台实体 Windows 电脑已完成安装验收。第一次真实外机验收还要检查安装器启动、WebView2、依赖下载、服务健康、数据位置、搜索以及托盘退出后知枢拥有的后台进程均已停止。此版本未签名时，Windows SmartScreen 仍可能提示“未知发布者”。
+聊天资料是可选的文件接入：对方应自行安装并合法使用自己的导出工具，再把已导出的 WeFlow XLSX 或符合[ChatLab 微信文件约定 v1](chatlab-wechat-format-v1.md) 的 JSON 交给知域的“只读检查 → 确认导入”流程。旧 WeFlow 本机兼容同步不属于普通安装包交付承诺，也不会在陌生电脑上自动配置或启动。详情见[资料接入适配器契约](import-provider-contract.md)。
+
+**验收边界：**成功生成 NSIS 文件只证明构建通过，不等于另一台实体 Windows 电脑已完成安装验收。第一次真实外机验收还要检查安装器启动、WebView2、依赖下载、服务健康、数据位置、搜索以及托盘退出后知域拥有的后台进程均已停止。此版本未签名时，Windows SmartScreen 仍可能提示“未知发布者”。
 
 ## 开发者/旧版：源码复制安装（不推荐给普通用户）
 

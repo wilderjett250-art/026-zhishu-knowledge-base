@@ -147,7 +147,7 @@ class CustomerWorkflowService:
                 step_id,
                 status="completed",
                 summary=(
-                    f"导入 {result['imported']} 条 WeFlow 消息，"
+                    f"导入 {result['imported']} 条聊天消息，"
                     f"识别 {result['duplicates']} 条重复消息"
                 ),
                 artifacts=[result["snapshot_path"]],
@@ -164,7 +164,7 @@ class CustomerWorkflowService:
                 "type": type(exc).__name__,
                 "message": str(exc),
                 "safe_retry": "重新检查同一个 ChatLab 文件和会话 ID 后再确认导入。",
-                "stop_condition": "文件不是 WeFlow ChatLab JSON 或来源范围不明确时停止。",
+                "stop_condition": "文件不是 ChatLab 兼容微信 JSON 或来源范围不明确时停止。",
             }
             self.repository.finish_workflow_run(run_id, status="failed", error=error)
             return {"run_id": run_id, "status": "failed", "error": error, "artifacts": []}

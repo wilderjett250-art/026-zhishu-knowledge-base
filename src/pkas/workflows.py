@@ -145,7 +145,7 @@ class WorkflowService:
             },
             {
                 "name": "weflow_chatlab_import",
-                "title": "WeFlow ChatLab 离线导入",
+                "title": "ChatLab 兼容聊天文件导入",
                 "steps": ["检查文件结构", "确认会话身份", "保存原始快照", "建立客户时间线"],
                 "approval": "检查令牌与文件范围一致后才允许导入",
             },

@@ -138,6 +138,24 @@ class ImportRunRequest(ImportInspectRequest):
     inspection_token: str = Field(min_length=64, max_length=64)
 
 
+class ImportProviderProbeRequest(BaseModel):
+    """Bounded, metadata-only input for a built-in source-adapter probe."""
+
+    location: str | None = Field(default=None, max_length=2000)
+    records_path: str | None = Field(default=None, max_length=2000)
+    weflow_root: str | None = Field(default=None, max_length=2000)
+
+
+class ObsidianVaultRegisterRequest(BaseModel):
+    vault_path: str = Field(min_length=3, max_length=2000)
+    name: str = Field(default="", max_length=160)
+    domain: Domain = "work"
+    privacy: Privacy = "private"
+    sync_mode: Literal["catalog", "index"] = "index"
+    recursive: bool = True
+    confirmed: Literal[True]
+
+
 class CatalogSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
     root_id: str | None = None

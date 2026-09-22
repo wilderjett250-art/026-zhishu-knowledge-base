@@ -46,7 +46,7 @@ const pageMeta: Record<Page, { section: string; title: string; intro: string }> 
   rag: { section: "检索质量", title: "检索评测", intro: "查看全文、向量和混合检索的覆盖与评测结果。" },
   customers: { section: "客户资料", title: "客户会话", intro: "管理已确认的客户会话、业务事项和回复依据。" },
   timeline: { section: "工作记录", title: "工作记录", intro: "按日期查看已确认事项、推断和待办。" },
-  import: { section: "资料导入", title: "资料导入", intro: "从已导出的 WeFlow 文件或指定路径导入资料。" },
+  import: { section: "资料导入", title: "资料导入", intro: "从文件、笔记库或已授权聊天导出中选择资料接入。" },
   workflows: { section: "自动化任务", title: "自动化任务", intro: "查看可执行任务、执行记录和处理结果。" },
   persona: { section: "个人画像", title: "个人画像", intro: "管理有证据支持的个人偏好与工作习惯。" },
   distill: { section: "训练数据", title: "训练数据", intro: "整理可审核、可导出的个人训练样本。" },
@@ -368,7 +368,7 @@ function CustomersPanel({ customers, signals, run, setEvidence, busy }: { custom
     void run(() => post<Json>(`/api/customers/${selected.id}`, { company, stage, tags: tags.split(/[,，]/).map((item) => item.trim()).filter(Boolean), summary: customerSummary, review_status: "approved" }));
   };
 
-  if (!customers.length) return <div className="customer-empty"><span>客户会话</span><h2>还没有微信会话</h2><p>进入“资料导入”，读取 WeFlow 已导出的 XLSX。导入后会先进入待归类区，不会自动认定为客户。</p></div>;
+  if (!customers.length) return <div className="customer-empty"><span>客户会话</span><h2>还没有微信会话</h2><p>进入“资料导入”，选择已导出的聊天 XLSX 或 ChatLab 文件。导入后会先进入待归类区，不会自动认定为客户。</p></div>;
   return <section className="customer-workbench">
     <aside className="customer-rail">
       <header><strong>微信会话 / 客户</strong><span>{customers.length}</span></header>
@@ -395,6 +395,8 @@ function CustomersPanel({ customers, signals, run, setEvidence, busy }: { custom
 }
 
 function ImportPanel({ run, busy }: { run: Runner; busy: boolean }) {
+  const [providers, setProviders] = useState<Json[]>([]);
+  const [providerProbe, setProviderProbe] = useState<Json | null>(null);
   const [manualSync, setManualSync] = useState<Json | null>(null);
   const [recordsPath, setRecordsPath] = useState("");
   const [exportCatalog, setExportCatalog] = useState<Json | null>(null);
@@ -418,16 +420,37 @@ function ImportPanel({ run, busy }: { run: Runner; busy: boolean }) {
       setManualSync(null);
     }
   }, []);
+  const loadProviders = useCallback(async () => {
+    try {
+      const result = await api<Json[]>("/api/import-providers");
+      setProviders(result.data);
+    } catch {
+      setProviders([]);
+    }
+  }, []);
   const manualRunning = ["queued", "preparing", "exporting", "importing"].includes(manualSync?.status ?? "");
   useEffect(() => {
     void loadManualSync();
+    void loadProviders();
     if (!manualRunning) return;
     const timer = window.setInterval(() => { void loadManualSync(); }, 2000);
     return () => window.clearInterval(timer);
-  }, [loadManualSync, manualRunning]);
+  }, [loadManualSync, loadProviders, manualRunning]);
   const signature = `${path}|${recursive}`;
   const inspect = () => void run(() => post<Json>("/api/import/inspect", { path, recursive }), (data) => { setInspection(data); setInspectedSignature(signature); });
   const execute = () => void run(() => post<Json>("/api/import/run", { path, recursive, domain, privacy, inspection_token: inspection?.inspection_token }), () => { setInspection(null); setInspectedSignature(""); });
+  const registerObsidianVault = () => void run(
+    () => post<Json>("/api/import-providers/obsidian-vault/register", {
+      vault_path: path,
+      name: "Obsidian 笔记库",
+      domain,
+      privacy,
+      sync_mode: "index",
+      recursive: true,
+      confirmed: true,
+    }),
+    () => setProviderProbe(null),
+  );
   const exportItems = useMemo(() => (exportCatalog?.items ?? []).filter((item: Json) => `${item.display_name} ${item.session_id}`.toLowerCase().includes(exportKeyword.trim().toLowerCase())), [exportCatalog, exportKeyword]);
   const discoverExports = () => void run(() => post<Json>("/api/weflow/exports/discover", { records_path: recordsPath.trim() || null, keyword: "", limit: 1000 }), (data) => { setExportCatalog(data); setRecordsPath(data.records_path); setSelectedExports([]); setExportInspection(null); });
   const toggleExport = (id: string) => { setSelectedExports((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]); setExportInspection(null); };
@@ -439,14 +462,52 @@ function ImportPanel({ run, busy }: { run: Runner; busy: boolean }) {
     () => post<Json>("/api/weflow/manual-sync/start", {}),
     (data) => { setManualSync(data); window.setTimeout(() => { void loadManualSync(); }, 800); },
   );
-  const inspectChatLab = () => void run(() => post<Json>("/api/weflow/chatlab/inspect", { path: chatlabPath, session_id: chatlabSessionId || null }), setChatlabInspection);
-  const importChatLab = () => void run(() => post<Json>("/api/weflow/chatlab/import", { path: chatlabPath, session_id: chatlabSessionId || null, inspection_token: chatlabInspection?.inspection_token, privacy: "restricted" }), () => setChatlabInspection(null));
+  const inspectChatLab = () => void run(() => post<Json>("/api/chat-imports/chatlab/inspect", { path: chatlabPath, session_id: chatlabSessionId || null }), setChatlabInspection);
+  const importChatLab = () => void run(() => post<Json>("/api/chat-imports/chatlab/import", { path: chatlabPath, session_id: chatlabSessionId || null, inspection_token: chatlabInspection?.inspection_token, privacy: "restricted" }), () => setChatlabInspection(null));
+  const probeProvider = (providerId: string) => {
+    const payload = providerId === "weflow-legacy-export"
+      ? { records_path: recordsPath.trim() || null }
+      : providerId === "chatlab-file"
+        ? { location: chatlabPath.trim() || null }
+        : providerId === "obsidian-vault"
+          ? { location: path.trim() || null }
+          : { location: path.trim() || null };
+    void run(() => post<Json>(`/api/import-providers/${providerId}/probe`, payload), setProviderProbe);
+  };
   return <>
-    <section className="manual-weflow-sync">
+    <section className="import-provider-guide">
+      <div className="import-provider-guide-copy"><small>可扩展接入</small><h2>先选择资料来源，再决定处理深度</h2><p>知域的核心是统一检索和来源追溯，不绑定某个聊天工具。文件、Obsidian 和已导出的聊天文件都走同一套检查、确认、去重和隐私边界。</p></div>
+      <div className="import-provider-grid">
+        {providers.length ? providers.map((provider) => <article className={`import-provider-card ${provider.delivery === "bring_your_own_exporter" ? "external" : ""}`} key={provider.id}><div><small>{provider.category === "chat_export" ? "聊天导出" : provider.category === "notes" ? "笔记库" : "文件资料"}</small><h3>{provider.title}</h3><p>{provider.summary}</p></div><footer><span>{provider.delivery === "bring_your_own_exporter" ? "需自行安装导出工具" : "内置支持"}</span><button disabled={busy} onClick={() => probeProvider(provider.id)}>{provider.id === "obsidian-vault" ? "检查下方路径" : provider.id === "chatlab-file" ? "检查 ChatLab 文件" : provider.id === "weflow-legacy-export" ? "检查已有导出" : "查看接入方式"}</button></footer></article>) : <Empty text="正在读取可用接入方式…" />}
+      </div>
+      {providerProbe && <div className="provider-probe"><strong>{providerProbe.provider?.title || "接入方式检查"}</strong><span>{providerProbe.next_step || "已完成本机检查。"}</span><small>本次只检查路径或目录元数据；没有读取正文、导入聊天或启动外部程序。</small></div>}
+    </section>
+    <section className="weflow-connect">
+      <Panel title="WeFlow 已导出 XLSX" code="OFFLINE / SELECTED EXPORTS">
+        <div className="form-stack">
+          <Field label="导出记录绝对路径" hint="留空会检查当前 Windows 用户的 WeFlow 导出记录"><input value={recordsPath} onChange={(event) => { setRecordsPath(event.target.value); setExportCatalog(null); setSelectedExports([]); setExportInspection(null); }} placeholder="自动定位 weflow-export-records.json" /></Field>
+          <div className="inline-actions"><button className="primary-button" disabled={busy} onClick={discoverExports}>发现已有 XLSX 导出</button>{exportCatalog && <span className="connector-ok"><i /> EXPORT INDEX READY · API FREE</span>}</div>
+          {exportCatalog && <div className="inspection-grid"><MetricMini label="会话" value={exportCatalog.total_sessions} /><MetricMini label="现存" value={exportCatalog.existing_sessions} /><MetricMini label="导出记录" value={exportCatalog.record_count} /><MetricMini label="现存文件" value={exportCatalog.existing_record_count} /></div>}
+          <div className="privacy-strip"><strong>隐私边界</strong><span>知域只读取你勾选的导出记录和 XLSX；不读取微信密钥、不直接访问 WCDB，也不随安装包提供第三方导出器。</span></div>
+        </div>
+      </Panel>
+      <Panel title={`选择已导出会话 · ${selectedExports.length}`} code={`${exportItems.length} AVAILABLE`}>
+        <div className="session-toolbar"><input value={exportKeyword} onChange={(event) => setExportKeyword(event.target.value)} placeholder="按导出文件名或 wxid 过滤" /><button disabled={!exportItems.length || busy} onClick={selectVisibleExports}>选择当前结果</button><button disabled={!selectedExports.length || busy} onClick={clearExportSelection}>清空选择</button><button disabled={busy} onClick={discoverExports}>重新发现</button></div>
+        <div className="session-picker">{exportItems.length ? exportItems.map((item: Json) => <label key={item.session_id} className={selectedExports.includes(item.session_id) ? "selected" : ""}><input type="checkbox" checked={selectedExports.includes(item.session_id)} onChange={() => toggleExport(item.session_id)} /><span><strong>{item.display_name || item.session_id}</strong><small>{item.conversation_type} · {item.message_count ?? 0} 条 · {item.existing_export_count} 份现存导出</small></span><time>{formatUnixTime(item.export_time)}</time></label>) : <Empty text="点击“发现已有 XLSX 导出”。这里只读取导出记录元数据，不会自动导入聊天正文。" />}</div>
+        {!exportInspection ? <button className="danger-safe-button sync-button" disabled={!selectedExports.length || busy} onClick={inspectExports}>只读检查所选 {selectedExports.length} 个 XLSX</button> : <div className="export-confirm"><div className="boundary-note"><strong>检查通过</strong><p>{exportInspection.selected_sessions} 个唯一会话，共声明 {exportInspection.total_messages} 条消息、{formatBytes(exportInspection.total_bytes)}；已跳过 {exportInspection.skipped_alias_sessions ?? 0} 条重复别名。确认后复制原始 XLSX 哈希快照并建立 restricted 待归类微信会话索引。</p></div><button className="danger-safe-button sync-button" disabled={busy} onClick={importExports}>确认导入待归类微信会话</button></div>}
+      </Panel>
+    </section>
+    <section className="import-layout offline-import">
+      <Panel title="ChatLab 兼容聊天文件" code="OFFLINE / JSON"><div className="form-stack"><Field label="ChatLab JSON 绝对路径" hint="兼容 WeFlow 与其他符合知域 ChatLab 微信文件约定的导出器"><input value={chatlabPath} onChange={(event) => { setChatlabPath(event.target.value); setChatlabInspection(null); }} placeholder="例如 E:\\聊天导出\\客户张经理.json" /></Field><Field label="私聊 wxid" hint="通常可自动识别；无法识别时填写"><input value={chatlabSessionId} onChange={(event) => { setChatlabSessionId(event.target.value); setChatlabInspection(null); }} placeholder="可选：wxid_xxx" /></Field><button className="primary-button" disabled={!chatlabPath || busy} onClick={inspectChatLab}>只读检查 ChatLab 文件</button></div></Panel>
+      <Panel title="会话结构确认" code="CHATLAB / RESTRICTED">{!chatlabInspection ? <Empty text="先核对会话 ID 和消息数量，再导入 restricted 客户区。知域只处理文件，不调用聊天平台接口。" /> : <div className="inspection-report"><div className="scope-path"><small>已检查会话</small><strong>{chatlabInspection.name} · {chatlabInspection.session_id}</strong></div><div className="inspection-grid"><MetricMini label="消息" value={chatlabInspection.message_count} /><MetricMini label="文件" value={chatlabInspection.total_files} /><MetricMini label="敏感" value={chatlabInspection.sensitive_files} /><MetricMini label="版本" value={Number(String(chatlabInspection.chatlab_version || "0").replace(/\D/g, ""))} /></div><div className="boundary-note"><strong>本次写入范围</strong><p>保存原始 JSON 哈希快照，建立客户时间线和聊天全文索引，默认 restricted；检查后文件变化会拒绝导入。</p></div><button className="danger-safe-button" disabled={busy} onClick={importChatLab}>确认导入客户聊天</button></div>}</Panel>
+    </section>
+    <details className="legacy-provider">
+      <summary>本机兼容模式：同步已验证的旧 WeFlow 环境</summary>
+      <section className="manual-weflow-sync">
       <div>
-        <small>手动增量同步</small>
-        <h2>一键同步微信新消息</h2>
-        <p>点击后读取最后入库水位，后台调用 WeFlow 导出已入库会话，再只写入新增消息。不会创建计划任务，也不会弹出终端。{manualExportDescription(manualSync?.export_freshness, manualSync?.usable_export_count)}</p>
+        <small>仅限本机兼容</small>
+        <h2>同步已验证的旧导出环境</h2>
+        <p>这不是新用户安装包的必需能力。仅在你自行安装并已验证兼容的旧 WeFlow 环境中可用；不会创建计划任务，也不会弹出终端。{manualExportDescription(manualSync?.export_freshness, manualSync?.usable_export_count)}</p>
       </div>
       <div className="manual-sync-metrics">
         <span><small>最新消息</small><strong>{formatTime(manualSync?.latest_message_at)}</strong></span>
@@ -457,34 +518,17 @@ function ImportPanel({ run, busy }: { run: Runner; busy: boolean }) {
       <button className="primary-button" disabled={busy || manualRunning || !manualSync?.weflow_configured || !manualSync?.records_available} onClick={startManualSync}>
         {manualRunning ? "正在同步…" : "同步微信新消息"}
       </button>
-    </section>
-    <section className="weflow-connect">
-      <Panel title="WeFlow 导出记录" code="NO API / NO KEY">
-        <div className="form-stack">
-          <Field label="导出记录绝对路径" hint="留空会自动读取当前 Windows 用户的 WeFlow 配置目录"><input value={recordsPath} onChange={(event) => { setRecordsPath(event.target.value); setExportCatalog(null); setSelectedExports([]); setExportInspection(null); }} placeholder="自动定位 weflow-export-records.json" /></Field>
-          <div className="inline-actions"><button className="primary-button" disabled={busy} onClick={discoverExports}>发现现存 XLSX 导出</button>{exportCatalog && <span className="connector-ok"><i /> EXPORT INDEX READY · API FREE</span>}</div>
-          {exportCatalog && <div className="inspection-grid"><MetricMini label="会话" value={exportCatalog.total_sessions} /><MetricMini label="现存" value={exportCatalog.existing_sessions} /><MetricMini label="导出记录" value={exportCatalog.record_count} /><MetricMini label="现存文件" value={exportCatalog.existing_record_count} /></div>}
-          <div className="privacy-strip"><strong>隐私边界</strong><span>只读 WeFlow 导出索引，不访问 decryptKey 或 WCDB；只导入你勾选的 XLSX，聊天统一标记 restricted。</span></div>
-        </div>
-      </Panel>
-      <Panel title={`选择已导出会话 · ${selectedExports.length}`} code={`${exportItems.length} AVAILABLE`}>
-        <div className="session-toolbar"><input value={exportKeyword} onChange={(event) => setExportKeyword(event.target.value)} placeholder="按导出文件名或 wxid 过滤" /><button disabled={!exportItems.length || busy} onClick={selectVisibleExports}>选择当前结果</button><button disabled={!selectedExports.length || busy} onClick={clearExportSelection}>清空选择</button><button disabled={busy} onClick={discoverExports}>重新发现</button></div>
-        <div className="session-picker">{exportItems.length ? exportItems.map((item: Json) => <label key={item.session_id} className={selectedExports.includes(item.session_id) ? "selected" : ""}><input type="checkbox" checked={selectedExports.includes(item.session_id)} onChange={() => toggleExport(item.session_id)} /><span><strong>{item.display_name || item.session_id}</strong><small>{item.conversation_type} · {item.message_count ?? 0} 条 · {item.existing_export_count} 份现存导出</small></span><time>{formatUnixTime(item.export_time)}</time></label>) : <Empty text="点击“发现现存 XLSX 导出”。这里只读取导出记录元数据，不会自动导入聊天正文。" />}</div>
-        {!exportInspection ? <button className="danger-safe-button sync-button" disabled={!selectedExports.length || busy} onClick={inspectExports}>只读检查所选 {selectedExports.length} 个 XLSX</button> : <div className="export-confirm"><div className="boundary-note"><strong>检查通过</strong><p>{exportInspection.selected_sessions} 个唯一会话，共声明 {exportInspection.total_messages} 条消息、{formatBytes(exportInspection.total_bytes)}；已跳过 {exportInspection.skipped_alias_sessions ?? 0} 条重复别名。确认后复制原始 XLSX 哈希快照并建立 restricted 待归类微信会话索引。</p></div><button className="danger-safe-button sync-button" disabled={busy} onClick={importExports}>确认导入待归类微信会话</button></div>}
-      </Panel>
-    </section>
-    <section className="import-layout offline-import">
-      <Panel title="WeFlow ChatLab 离线文件" code="OFFLINE / JSON"><div className="form-stack"><Field label="ChatLab JSON 绝对路径"><input value={chatlabPath} onChange={(event) => { setChatlabPath(event.target.value); setChatlabInspection(null); }} placeholder="例如 E:\\WeFlow导出\\客户张经理.json" /></Field><Field label="私聊 wxid" hint="通常可自动识别；无法识别时填写"><input value={chatlabSessionId} onChange={(event) => { setChatlabSessionId(event.target.value); setChatlabInspection(null); }} placeholder="可选：wxid_xxx" /></Field><button className="primary-button" disabled={!chatlabPath || busy} onClick={inspectChatLab}>只读检查 ChatLab 文件</button></div></Panel>
-      <Panel title="会话结构确认" code="CHATLAB / 0.0.2">{!chatlabInspection ? <Empty text="支持 WeFlow 生成的 ChatLab JSON；先核对会话 ID 和消息数量，再导入 restricted 客户区。" /> : <div className="inspection-report"><div className="scope-path"><small>已检查会话</small><strong>{chatlabInspection.name} · {chatlabInspection.session_id}</strong></div><div className="inspection-grid"><MetricMini label="消息" value={chatlabInspection.message_count} /><MetricMini label="文件" value={chatlabInspection.total_files} /><MetricMini label="敏感" value={chatlabInspection.sensitive_files} /><MetricMini label="版本" value={Number(String(chatlabInspection.chatlab_version || "0").replace(/\D/g, ""))} /></div><div className="boundary-note"><strong>本次写入范围</strong><p>保存 WeFlow 原始 JSON 快照，建立客户时间线和聊天全文索引，默认 restricted；检查后文件变化会拒绝导入。</p></div><button className="danger-safe-button" disabled={busy} onClick={importChatLab}>确认导入客户聊天</button></div>}</Panel>
-    </section>
+      </section>
+    </details>
     <div className="section-divider"><span>其他资料</span><b>业务与个人资料</b></div>
     <section className="import-layout">
     <Panel title="明确资料边界" code="01 / INSPECT">
       <div className="form-stack">
-        <Field label="绝对路径" hint="可以是单个文件或一个明确目录"><input value={path} onChange={(event) => { setPath(event.target.value); setInspection(null); }} placeholder="例如 E:\\我的资料\\业务" /></Field>
+        <Field label="绝对路径" hint="可以是单个文件、普通目录或 Obsidian Vault"><input value={path} onChange={(event) => { setPath(event.target.value); setInspection(null); }} placeholder="例如 E:\\我的资料\\业务 或 D:\\Notes" /></Field>
         <div className="form-pair"><Field label="归属领域"><select value={domain} onChange={(event) => setDomain(event.target.value)}><option value="work">业务 / 工作</option><option value="self">自我 / 对话</option><option value="shared">共享知识</option><option value="distill">蒸馏资料</option></select></Field><Field label="隐私级别"><select value={privacy} onChange={(event) => setPrivacy(event.target.value)}><option value="private">private · 仅本机</option><option value="restricted">restricted · 显式授权才检索</option><option value="public">public · 可普通检索</option></select></Field></div>
         <label className="check-line"><input type="checkbox" checked={recursive} onChange={(event) => { setRecursive(event.target.checked); setInspection(null); }} /> 包含子目录</label>
         <button className="primary-button" disabled={!path || busy} onClick={inspect}>只读检查范围</button>
+        {providerProbe?.provider?.id === "obsidian-vault" && providerProbe.status === "ready" && <div className="obsidian-register"><strong>已识别 Obsidian Vault</strong><p>登记后不会立即扫描；它会在“资料管理”里作为独立笔记库出现，之后可单独刷新。</p><button disabled={!path || busy} onClick={registerObsidianVault}>登记这个 Obsidian 笔记库</button></div>}
       </div>
     </Panel>
     <Panel title="检查结果与确认" code="02 / COMMIT">
@@ -672,7 +716,7 @@ function formatBytes(value?: number) { if (!value) return "0 B"; const units = [
 function formatNumber(value?: number) { return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value ?? 0); }
 function compactPath(value?: string) { if (!value) return "—"; return value.length > 48 ? `…${value.slice(-47)}` : value; }
 function statusLabel(value: string) { return ({ completed: "完成", warning: "警告", failed: "失败", running: "运行中" } as Record<string, string>)[value] ?? value; }
-function workflowName(value: string) { return ({ import_path: "资料导入与索引", rebuild_search_index: "全文索引重建", persona_review: "个人观察审核", weflow_xlsx_import: "WeFlow XLSX 客户导入", weflow_chatlab_import: "WeFlow ChatLab 导入" } as Record<string, string>)[value] ?? value; }
+function workflowName(value: string) { return ({ import_path: "资料导入与索引", rebuild_search_index: "全文索引重建", persona_review: "个人观察审核", weflow_xlsx_import: "WeFlow XLSX 客户导入", weflow_chatlab_import: "ChatLab 聊天文件导入" } as Record<string, string>)[value] ?? value; }
 function approvalLabel(value: string) { return ({ candidate: "待审核", approved: "已批准", rejected: "已驳回" } as Record<string, string>)[value] ?? value; }
 function customerTypeLabel(value: string) { return ({ private: "私聊会话", group: "群聊会话" } as Record<string, string>)[value] ?? value; }
 function customerReviewLabel(value: string) { return ({ candidate: "待确认关系", approved: "已确认客户" } as Record<string, string>)[value] ?? value; }

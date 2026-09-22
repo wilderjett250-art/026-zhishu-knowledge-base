@@ -12,13 +12,13 @@
 - 解析 Word、Excel、PDF、PPT、Markdown、文本、代码、JSON/JSONL、邮件等内容；
 - 使用 SQLite FTS5 做本地全文检索，按需启用 Qdrant + Embedding 做语义与混合检索；
 - 让 Codex 通过 MCP 先检索、再回答，并回到来源文件、文档或段落；
-- 管理已授权的 WeFlow 导出文件，增量去重后检索历史沟通；
+- 管理已授权的聊天导出文件（WeFlow XLSX 与 ChatLab 兼容微信 JSON），增量去重后检索历史沟通；
 - 在桌面端查看资料范围、处理层级、失败原因、来源状态与 RAG 评测记录。
 
 ## 它如何组织资料
 
 ```text
-本地文件 / 已授权聊天导出 / Obsidian 等目录
+本地文件 / Obsidian Vault / 已授权聊天导出
                     │
                     ▼
            A 库：目录索引（路径、类型、时间、分类）
@@ -66,7 +66,9 @@ uv run pkas serve --open-browser
 
 维护者可从源码构建当前用户安装版 NSIS 安装包；安装后用户不需要预装 Python、Node.js、uv、Rust 或 Qdrant。完整构建、复制安装、卸载和恢复说明见 [Windows 安装与恢复](docs/windows-replication.md)。
 
-当前 `main` 分支发布源码与构建脚本，不提交个人数据或安装产物。正式安装包发布到 GitHub Release 后，可直接下载安装；在此之前请使用上面的源码启动方式。
+给同学或新电脑使用时，请从 [GitHub Releases](https://github.com/wilderjett250-art/026-zhishu-knowledge-base/releases/latest) 下载 `知域_*_x64-setup.exe` 并正常安装；不要复制单个 EXE，也不要复制其他人的 `data`、运行目录或聊天导出。安装包与个人数据分离，首次启动只准备本机运行环境，不会自动扫盘、导入聊天、配置模型密钥或启用 Codex/MCP。
+
+当前 `main` 分支发布源码与构建脚本，不提交个人数据或安装产物。源码方式适合开发者；普通使用者优先使用上面的正式安装包。
 
 ## Codex / RPA 接入
 
@@ -78,7 +80,7 @@ uv run pkas serve --open-browser
 - `data/`、向量、数据库、聊天导出、日志、恢复包、`.env` 和 DPAPI 密钥均被 Git 忽略；
 - 服务默认只绑定 `127.0.0.1`，不向局域网或公网暴露资料；
 - 云端 Embedding、重排、文档视觉解析均为显式可选能力；`restricted` 资料默认不会被发送；
-- WeFlow 仅处理用户合法取得并明确选择的导出文件；不读取微信解密密钥、不直接访问 WCDB、不自动发送消息；
+- 聊天导入采用可扩展的文件适配器：WeFlow 仅是已导出 XLSX 的兼容来源之一；不读取微信解密密钥、不直接访问 WCDB、不自动发送消息，也不随安装包分发第三方导出器；
 - 每个检索结果保留来源、时间、隐私级别和处理状态；模型推断不能替代原始证据。
 
 ## 开发与验证
@@ -99,6 +101,8 @@ Pop-Location
 - [数据模型](docs/data-model.md)
 - [检索评测协议](docs/RAG_EVALUATION.md)
 - [Windows 安装与恢复](docs/windows-replication.md)
+- [资料接入适配器契约](docs/import-provider-contract.md)
+- [ChatLab 微信文件约定 v1](docs/chatlab-wechat-format-v1.md)
 
 ## 授权
 

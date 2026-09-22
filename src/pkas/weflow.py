@@ -61,8 +61,9 @@ def validate_chatlab(payload: dict[str, Any]) -> None:
         or not isinstance(messages, list)
     ):
         raise WeFlowFormatError("文件不是有效的 ChatLab 会话结构。")
-    if str(chatlab.get("generator", "")).lower() != "weflow":
-        raise WeFlowFormatError("ChatLab 文件不是由 WeFlow 生成的。")
+    generator = str(chatlab.get("generator", "")).strip()
+    if not generator:
+        raise WeFlowFormatError("ChatLab 文件缺少导出工具标识。")
     if str(meta.get("platform", "wechat")).lower() != "wechat":
         raise WeFlowFormatError("ChatLab 文件不是微信会话。")
 
@@ -650,7 +651,7 @@ class WeFlowService:
         inspection = self.ingestion.inspect_path(path, recursive=False)
         target = Path(inspection["path"])
         if not target.is_file() or target.suffix.lower() != ".json":
-            raise WeFlowFormatError("请选择一个 WeFlow ChatLab JSON 文件。")
+            raise WeFlowFormatError("请选择一个 ChatLab 兼容的微信 JSON 文件。")
         if inspection["total_bytes"] > self.settings.max_source_bytes:
             raise WeFlowFormatError(
                 f"ChatLab 文件超过单文件上限 {self.settings.max_source_bytes} 字节。"
@@ -681,12 +682,19 @@ class WeFlowService:
         target = Path(inspection["path"])
         payload = self._load_chatlab(target)
         detected_session_id = detect_session_id(payload, session_id)
+        generator = str(payload.get("chatlab", {}).get("generator") or "").strip()
+        is_weflow = generator.casefold() == "weflow"
         connector_id = self.customers.upsert_connector(
-            connector_type="weflow-chatlab",
-            name="WeFlow ChatLab 离线导入",
-            base_url="offline://weflow-chatlab",
+            connector_type="weflow-chatlab" if is_weflow else "chatlab-wechat-file",
+            name="WeFlow ChatLab 离线导入" if is_weflow else "ChatLab 微信离线导入",
+            base_url="offline://weflow-chatlab" if is_weflow else "offline://chatlab-wechat",
             status="ready",
-            config={"transport": "file", "api_required": False, "key_accessed": False},
+            config={
+                "transport": "file",
+                "generator": generator,
+                "api_required": False,
+                "key_accessed": False,
+            },
         )
         snapshot = self._store_json_snapshot(
             payload,
@@ -723,7 +731,7 @@ class WeFlowService:
         try:
             payload = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise WeFlowFormatError(f"无法读取 WeFlow ChatLab JSON：{exc}") from exc
+            raise WeFlowFormatError(f"无法读取 ChatLab 兼容微信 JSON：{exc}") from exc
         if not isinstance(payload, dict):
             raise WeFlowFormatError("ChatLab 文件顶层必须是 JSON 对象。")
         validate_chatlab(payload)

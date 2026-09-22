@@ -426,7 +426,7 @@
   .automated-section-heading > b { white-space: normal; }
 }
 
-/* 资料底座 0.1.18：先给出可理解的状态，再按需读取重型台账。 */
+/* 资料底座 0.1.19：先给出可理解的状态，再按需读取重型台账。 */
 .foundation-center { gap: 16px; }
 .foundation-workflow { gap: 15px; padding: 21px 23px; border-color: #2a515b; background: linear-gradient(118deg, rgba(32, 110, 106, .16), rgba(10, 21, 29, .94) 48%, #09131a); }
 .foundation-workflow > header { align-items: center; }

@@ -11,10 +11,11 @@ from pkas.ingest import SKIP_DIRECTORIES, IngestionService, is_sensitive_path
 from pkas.parsers import SUPPORTED_EXTENSIONS, ParseError
 from pkas.repository import Repository, new_id, utc_now
 
-CONNECTOR_TYPES = {"local_files", "codex_sessions"}
+CONNECTOR_TYPES = {"local_files", "obsidian_vault", "codex_sessions"}
 SYNC_MODES = {"catalog", "index"}
 DOMAINS = {"work", "self", "shared", "distill"}
 PRIVACY_LEVELS = {"public", "private", "restricted"}
+OBSIDIAN_SKIPPED_DIRECTORIES = {".obsidian", ".trash", ".git"}
 
 
 class SyncBoundaryError(ValueError):
@@ -297,14 +298,24 @@ class SyncService:
         normalized = relative_path.replace("\\", "/").casefold()
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    def _walk_files(self, root: Path, recursive: bool) -> Any:
+    def _walk_files(
+        self,
+        root: Path,
+        recursive: bool,
+        *,
+        additional_skipped_directories: set[str] | None = None,
+    ) -> Any:
+        skipped_directories = set(SKIP_DIRECTORIES)
+        skipped_directories.update(
+            name.casefold() for name in (additional_skipped_directories or set())
+        )
         if not recursive:
             for path in root.iterdir():
                 if path.is_file() and not path.is_symlink():
                     yield path
             return
         for directory, names, filenames in os.walk(root, followlinks=False):
-            names[:] = [name for name in names if name.casefold() not in SKIP_DIRECTORIES]
+            names[:] = [name for name in names if name.casefold() not in skipped_directories]
             base = Path(directory)
             for filename in filenames:
                 path = base / filename
@@ -438,7 +449,16 @@ class SyncService:
         }
         existing_items = self._existing_items(root["id"])
         pending_items: list[dict[str, Any]] = []
-        for path in self._walk_files(root_path, root["recursive"]):
+        additional_skips = (
+            OBSIDIAN_SKIPPED_DIRECTORIES
+            if root["connector_type"] == "obsidian_vault"
+            else None
+        )
+        for path in self._walk_files(
+            root_path,
+            root["recursive"],
+            additional_skipped_directories=additional_skips,
+        ):
             counts["files_seen"] += 1
             relative = str(path.relative_to(root_path))
             try:

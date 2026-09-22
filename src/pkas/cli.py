@@ -326,10 +326,10 @@ def weflow_export_import(
 
 @app.command("chatlab-inspect")
 def chatlab_inspect(
-    path: Annotated[Path, typer.Argument(help="WeFlow ChatLab JSON 绝对路径")],
+    path: Annotated[Path, typer.Argument(help="ChatLab 兼容微信 JSON 绝对路径")],
     session_id: Annotated[str | None, typer.Option(help="无法自动识别时提供私聊 wxid")] = None,
 ) -> None:
-    """只读检查 WeFlow ChatLab 文件。"""
+    """只读检查 ChatLab 兼容聊天文件。"""
     result = KnowledgeSystem.create().weflow.inspect_chatlab_file(
         str(path),
         session_id=session_id,
@@ -339,12 +339,12 @@ def chatlab_inspect(
 
 @app.command("chatlab-import")
 def chatlab_import(
-    path: Annotated[Path, typer.Argument(help="已检查的 WeFlow ChatLab JSON")],
+    path: Annotated[Path, typer.Argument(help="已检查的 ChatLab 兼容微信 JSON")],
     inspection_token: Annotated[str, typer.Option(help="检查时返回的 64 位令牌")],
     session_id: Annotated[str | None, typer.Option(help="无法自动识别时提供私聊 wxid")] = None,
     yes: Annotated[bool, typer.Option("--yes", help="确认导入为 restricted 客户聊天")] = False,
 ) -> None:
-    """导入已确认的 WeFlow ChatLab 客户会话。"""
+    """导入已确认的 ChatLab 兼容客户会话。"""
     if not yes:
         raise typer.BadParameter("必须添加 --yes 明确确认导入")
     result = KnowledgeSystem.create().customer_workflows.import_chatlab(

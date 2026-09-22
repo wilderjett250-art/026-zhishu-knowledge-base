@@ -76,6 +76,8 @@ def test_scheduled_sync_is_a_hidden_daily_trigger() -> None:
     assert "watchdogTrigger" not in installer
     assert "-check-daily-authorization" in runner
     assert "$dailyImportEnabled -and $weflowProcesses.Count -eq 0" in runner
+    assert "$env:WEFLOW_ROOT = $WeFlowRoot" in runner
+    assert "D:\\wx\\xwechat_files\\tools\\WeFlow" not in runner
     bootstrap = (ROOT / "scripts" / "bootstrap_windows.ps1").read_text(encoding="utf-8")
     assert "[string]$DailyAt = '00:00'" in bootstrap
     assert "-DailyAt $DailyAt" in bootstrap

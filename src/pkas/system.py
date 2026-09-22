@@ -14,6 +14,7 @@ from pkas.customer_workflows import CustomerWorkflowService
 from pkas.db import Database
 from pkas.distillation import DistillationService
 from pkas.embeddings import SiliconFlowEmbeddingProvider
+from pkas.import_providers import ImportProviderRegistry
 from pkas.index_outbox import IndexOutbox
 from pkas.ingest import IngestionService
 from pkas.machine_catalog import MachineCatalog
@@ -47,6 +48,7 @@ class KnowledgeSystem:
     weflow_manual: WeFlowManualSyncService
     customer_workflows: CustomerWorkflowService
     sync: SyncService
+    import_providers: ImportProviderRegistry
     rag: RagObservabilityService
     outbox: IndexOutbox
     backup: BackupManager
@@ -117,6 +119,11 @@ class KnowledgeSystem:
             ingestion=ingestion,
             initialize=False,
         )
+        import_providers = ImportProviderRegistry(
+            settings=resolved_settings,
+            sync=sync,
+            weflow=weflow,
+        )
         rag = RagObservabilityService(database, vector_index, retrieval)
         outbox = IndexOutbox(database, vector_index)
         backup = BackupManager(resolved_settings)
@@ -145,6 +152,7 @@ class KnowledgeSystem:
             weflow_manual=weflow_manual,
             customer_workflows=customer_workflows,
             sync=sync,
+            import_providers=import_providers,
             rag=rag,
             outbox=outbox,
             backup=backup,
