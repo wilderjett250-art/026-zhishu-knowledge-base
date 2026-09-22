@@ -9,7 +9,9 @@ import typer
 import uvicorn
 
 from pkas.config import get_settings
+from pkas.db import Database
 from pkas.local_secrets import save_user_secret
+from pkas.rpa_bridge import RpaBridgeConfigError, RpaBridgeService, require_loopback_bind_host
 from pkas.system import KnowledgeSystem
 
 app = typer.Typer(
@@ -58,14 +60,124 @@ def serve(
     settings = get_settings()
     resolved_host = host or settings.host
     resolved_port = port or settings.port
+    try:
+        resolved_host = require_loopback_bind_host(resolved_host)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--host") from exc
     if open_browser:
-        webbrowser.open(f"http://{resolved_host}:{resolved_port}")
+        browser_host = f"[{resolved_host}]" if ":" in resolved_host else resolved_host
+        webbrowser.open(f"http://{browser_host}:{resolved_port}")
     uvicorn.run(
         "pkas.api:app",
         host=resolved_host,
         port=resolved_port,
         reload=reload,
     )
+
+
+def rpa_bridge_service() -> RpaBridgeService:
+    settings = get_settings()
+    return RpaBridgeService(settings, Database(settings))
+
+
+@app.command("rpa-bridge-provision")
+def rpa_bridge_provision(
+    yes: Annotated[bool, typer.Option("--yes", help="确认创建本机 RPA 令牌并启用接口")] = False,
+    allow_restricted_context: Annotated[
+        bool,
+        typer.Option("--allow-restricted-context", help="允许 RPA 读取 restricted 资料"),
+    ] = False,
+    hybrid_search: Annotated[
+        bool,
+        typer.Option("--hybrid-search", help="启用向量检索；查询可能调用已配置的 Embedding 服务"),
+    ] = False,
+) -> None:
+    """首次创建仅本机可用的 RPA HTTP 令牌，并只显示一次。"""
+    if not yes:
+        raise typer.BadParameter("必须添加 --yes 确认创建 RPA 本机桥令牌")
+    try:
+        token, status = rpa_bridge_service().provision(
+            allow_restricted_context=allow_restricted_context,
+            retrieval_mode="ab" if hybrid_search else "a",
+        )
+    except RpaBridgeConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print_json(
+        {
+            "status": "success",
+            "summary": "RPA 本机桥已启用；请立即将令牌保存到实在 Agent 的凭据字段。",
+            "rpa_bearer_token": token,
+            "token_display": "本令牌只会在本次创建命令中显示，之后不会从状态接口返回。",
+            "bridge": status,
+        }
+    )
+
+
+@app.command("rpa-bridge-enable")
+def rpa_bridge_enable(
+    yes: Annotated[bool, typer.Option("--yes", help="确认启用已配置的本机 RPA 接口")] = False,
+    allow_restricted_context: Annotated[
+        bool,
+        typer.Option("--allow-restricted-context", help="允许 RPA 读取 restricted 资料"),
+    ] = False,
+    hybrid_search: Annotated[
+        bool,
+        typer.Option("--hybrid-search", help="启用向量检索；查询可能调用已配置的 Embedding 服务"),
+    ] = False,
+) -> None:
+    """使用现有令牌重新启用本机 RPA HTTP 接口。"""
+    if not yes:
+        raise typer.BadParameter("必须添加 --yes 确认启用 RPA 本机桥")
+    try:
+        status = rpa_bridge_service().configure(
+            enabled=True,
+            allow_restricted_context=allow_restricted_context,
+            retrieval_mode="ab" if hybrid_search else "a",
+        )
+    except RpaBridgeConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print_json({"status": "success", "bridge": status})
+
+
+@app.command("rpa-bridge-disable")
+def rpa_bridge_disable(
+    yes: Annotated[bool, typer.Option("--yes", help="确认停用本机 RPA 接口")] = False,
+) -> None:
+    """立即停用接口；已保护的令牌保留，以便后续恢复时不必重新配置。"""
+    if not yes:
+        raise typer.BadParameter("必须添加 --yes 确认停用 RPA 本机桥")
+    status = rpa_bridge_service().configure(
+        enabled=False,
+        allow_restricted_context=False,
+        retrieval_mode="a",
+    )
+    print_json({"status": "success", "bridge": status})
+
+
+@app.command("rpa-bridge-rotate-token")
+def rpa_bridge_rotate_token(
+    yes: Annotated[bool, typer.Option("--yes", help="确认使旧令牌立即失效")] = False,
+) -> None:
+    """轮换泄露或遗失的 RPA 令牌；需要在实在 Agent 中更新凭据。"""
+    if not yes:
+        raise typer.BadParameter("必须添加 --yes 确认轮换 RPA 本机桥令牌")
+    try:
+        token = rpa_bridge_service().create_token(rotate=True)
+    except RpaBridgeConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print_json(
+        {
+            "status": "success",
+            "summary": "旧 RPA 令牌已失效；请立即更新实在 Agent 的凭据字段。",
+            "rpa_bearer_token": token,
+        }
+    )
+
+
+@app.command("rpa-bridge-status")
+def rpa_bridge_status() -> None:
+    """读取本机 RPA 桥状态；不会输出令牌、聊天正文或资料路径。"""
+    print_json(rpa_bridge_service().status())
 
 
 @app.command("inspect")

@@ -1,3 +1,4 @@
+import ast
 import csv
 import io
 import json
@@ -51,6 +52,30 @@ TEXT_EXTENSIONS = {
     ".xml",
     ".yaml",
     ".yml",
+}
+CODE_TEXT_EXTENSIONS = {
+    ".bat",
+    ".c",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".ps1",
+    ".py",
+    ".rs",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".svelte",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".vue",
 }
 OOXML_WORD_EXTENSIONS = {".docx", ".docm", ".dotx", ".dotm"}
 OOXML_SHEET_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
@@ -169,14 +194,117 @@ def _clean_text(value: str) -> str:
     return re.sub(r"[ \t]+", " ", value.replace("\x00", " ")).strip()
 
 
-def _line_blocks(text: str, *, prefix: str = "paragraph") -> list[ParsedBlock]:
+def _line_blocks(
+    text: str,
+    *,
+    prefix: str = "paragraph",
+    preserve_indentation: bool = False,
+) -> list[ParsedBlock]:
     blocks: list[ParsedBlock] = []
     for index, raw in enumerate(text.splitlines(), start=1):
-        clean = _clean_text(raw)
-        if not clean:
+        clean = (
+            raw.replace("\x00", " ").rstrip()
+            if preserve_indentation
+            else _clean_text(raw)
+        )
+        if not clean.strip():
             continue
-        kind = "heading" if clean.startswith("#") else "paragraph"
+        kind = (
+            "code"
+            if preserve_indentation
+            else "heading"
+            if clean.startswith("#")
+            else "paragraph"
+        )
         blocks.append(ParsedBlock(kind=kind, text=clean, locator=f"{prefix}:{index}"))
+    return blocks
+
+
+def _python_symbol_blocks(text: str) -> list[ParsedBlock] | None:
+    """Return non-overlapping top-level Python symbol regions when syntax is valid.
+
+    The parser intentionally does not guess at malformed Python.  A syntax
+    error returns ``None`` so callers can retain the previous line-level,
+    lossless fallback instead of pretending that heuristic boundaries are AST
+    symbols.  Class bodies stay together: this avoids storing the same method
+    once as part of the class and once as a child symbol.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    lines = text.splitlines()
+    symbols = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if not symbols or not lines:
+        return []
+
+    blocks: list[ParsedBlock] = []
+
+    def append_module_region(start: int, end: int) -> None:
+        if start > end:
+            return
+        content = "\n".join(lines[start - 1 : end]).rstrip()
+        if not content.strip():
+            return
+        blocks.append(
+            ParsedBlock(
+                kind="code",
+                text=content,
+                locator=f"python:module:{start}-{end}",
+                metadata={
+                    "language": "python",
+                    "code_region": "module",
+                    "line_start": start,
+                    "line_end": end,
+                },
+            )
+        )
+
+    cursor = 1
+    for node in symbols:
+        node_start = int(getattr(node, "lineno", cursor) or cursor)
+        decorators = getattr(node, "decorator_list", ())
+        if decorators:
+            node_start = min(
+                [node_start, *[int(getattr(item, "lineno", node_start)) for item in decorators]]
+            )
+        node_end = int(getattr(node, "end_lineno", node_start) or node_start)
+        node_start = max(cursor, node_start)
+        node_end = max(node_start, min(len(lines), node_end))
+        append_module_region(cursor, node_start - 1)
+        content = "\n".join(lines[node_start - 1 : node_end]).rstrip()
+        if content.strip():
+            symbol_kind = (
+                "class"
+                if isinstance(node, ast.ClassDef)
+                else "async_function"
+                if isinstance(node, ast.AsyncFunctionDef)
+                else "function"
+            )
+            symbol_name = str(getattr(node, "name", "anonymous"))
+            blocks.append(
+                ParsedBlock(
+                    kind="code-symbol",
+                    text=content,
+                    locator=(
+                        f"python:symbol:{symbol_kind}:{symbol_name}:{node_start}-{node_end}"
+                    ),
+                    metadata={
+                        "language": "python",
+                        "symbol_name": symbol_name,
+                        "symbol_kind": symbol_kind,
+                        "line_start": node_start,
+                        "line_end": node_end,
+                        "symbol_boundary": True,
+                    },
+                )
+            )
+        cursor = max(cursor, node_end + 1)
+    append_module_region(cursor, len(lines))
     return blocks
 
 
@@ -601,6 +729,17 @@ def _parse_json(path: Path, json_lines: bool = False) -> ParsedDocument:
             kind="message",
             text=_message_to_text(message),
             locator=f"record:{message.sequence}",
+            metadata={
+                "message_sequence": message.sequence,
+                **({"speaker": message.speaker} if message.speaker else {}),
+                **({"sent_at": message.sent_at} if message.sent_at else {}),
+                **(
+                    {"conversation_id": message.conversation_id}
+                    if message.conversation_id
+                    else {}
+                ),
+                **({"message_metadata": message.metadata} if message.metadata else {}),
+            },
         )
         for message in messages
     ] or _line_blocks(text, prefix="json-line")
@@ -818,11 +957,22 @@ def _parse_pdf(path: Path) -> ParsedDocument:
             except (RuntimeError, ValueError):
                 pass
             try:
-                for field_index, widget in enumerate(page.widgets() or (), start=1):
+                for field_index, widget_candidate in enumerate(page.widgets() or (), start=1):
+                    # PyMuPDF's current type stubs expose widgets as generic
+                    # annotations even though the runtime object has form-field
+                    # attributes.  Keep the runtime guard explicit rather than
+                    # relying on a stub-specific cast at each access.
+                    widget = cast(Any, widget_candidate)
                     field_name = _clean_text(str(widget.field_name or ""))
                     field_value = _clean_text(str(widget.field_value or ""))
                     field_type = _clean_text(str(widget.field_type_string or "未声明类型"))
                     field_flags = int(widget.field_flags or 0)
+                    raw_rect = tuple(float(value) for value in (widget.rect or ()))
+                    widget_bbox = (
+                        cast(tuple[float, float, float, float], raw_rect)
+                        if len(raw_rect) == 4
+                        else None
+                    )
                     is_sensitive = bool(
                         re.search(
                             r"password|passcode|token|secret|key|密码|口令|密钥",
@@ -856,10 +1006,7 @@ def _parse_pdf(path: Path) -> ParsedDocument:
                             text="PDF 表单：" + "；".join(details),
                             locator=f"page:{page_index}/form-field:{field_index}",
                             page=page_index,
-                            bbox=cast(
-                                tuple[float, float, float, float],
-                                tuple(float(value) for value in widget.rect),
-                            ),
+                            bbox=widget_bbox,
                             metadata={
                                 "field_name": field_name or None,
                                 "field_type": field_type,
@@ -1473,6 +1620,13 @@ def _xlsx_merged_cell_map(
                         continue
                     reference = element.attrib.get("ref", "")
                     min_col, min_row, max_col, max_row = range_boundaries(reference)
+                    if (
+                        min_col is None
+                        or min_row is None
+                        or max_col is None
+                        or max_row is None
+                    ):
+                        continue
                     if min_col == max_col and min_row == max_row:
                         continue
                     range_count += 1
@@ -2127,12 +2281,34 @@ def parse_native_file(path: Path) -> ParsedDocument:
     if extension in TEXT_EXTENSIONS:
         text = _decode_text(path.read_bytes())
         mime_type = mimetypes.guess_type(path.name)[0] or "text/plain"
-        blocks = _line_blocks(text)
+        is_code = extension in CODE_TEXT_EXTENSIONS
+        metadata: dict[str, Any] = {}
+        if extension == ".py":
+            symbols = _python_symbol_blocks(text)
+            if symbols is None:
+                metadata["code_structure"] = "line_fallback_syntax_error"
+                blocks = _line_blocks(text, prefix="line", preserve_indentation=True)
+            elif symbols:
+                metadata["code_structure"] = "python_ast_top_level_symbols"
+                metadata["code_symbol_count"] = sum(
+                    block.kind == "code-symbol" for block in symbols
+                )
+                blocks = symbols
+            else:
+                metadata["code_structure"] = "line_fallback_no_top_level_symbol"
+                blocks = _line_blocks(text, prefix="line", preserve_indentation=True)
+        else:
+            blocks = _line_blocks(
+                text,
+                prefix="line" if is_code else "paragraph",
+                preserve_indentation=is_code,
+            )
         return ParsedDocument(
             title=path.stem,
             text=text,
             parser_name="plain-text",
             mime_type=mime_type,
+            metadata=metadata,
             blocks=blocks,
         )
     if extension in VISUAL_EXTENSIONS:

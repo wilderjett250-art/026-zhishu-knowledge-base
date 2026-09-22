@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +13,10 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     config = json.loads((TAURI_ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
 
     assert config["productName"] == "知域"
-    assert config["version"] == "0.1.13"
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project_version = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', project)
+    assert project_version is not None
+    assert config["version"] == project_version.group(1)
     assert config["identifier"] == "com.zhishu.pkas"
     assert config["build"]["frontendDist"] == "../../web/dist"
     assert config["bundle"]["active"] is True
@@ -20,14 +24,41 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     assert config["bundle"]["windows"]["nsis"]["installMode"] == "currentUser"
     assert config["bundle"]["windows"]["webviewInstallMode"]["type"] == "downloadBootstrapper"
     resources = config["bundle"]["resources"]
-    assert "../../src/pkas/" in resources
+    assert "../../src/pkas/" not in resources
+    assert "../../runtime/tauri-source/" in resources
+    assert "../../scripts/configure_rpa_loopback.ps1" in resources
     assert "../../pyproject.toml" in resources
     assert "../../uv.lock" in resources
     assert "../../web/dist/" in resources
     assert "../../runtime/tauri-payload/" in resources
     assert "../../tools/everything/" in resources
+    assert resources["icons/icon.ico"] == "pkas-app/app-icon.ico"
     assert "../../scripts/configure_weflow_manual.mjs" in resources
     assert config["app"]["windows"] == []
+
+
+def test_windows_icon_has_standard_multi_resolution_frames() -> None:
+    icon = ROOT / "desktop" / "src-tauri" / "icons" / "icon.ico"
+    payload = icon.read_bytes()
+    reserved, resource_type, frame_count = struct.unpack_from("<HHH", payload)
+
+    assert (reserved, resource_type) == (0, 1)
+    assert frame_count >= 7
+    frames: set[tuple[int, int, int]] = set()
+    for index in range(frame_count):
+        offset = 6 + (16 * index)
+        width, height, _, _, _, bit_count, byte_count, image_offset = struct.unpack_from(
+            "<BBBBHHII", payload, offset
+        )
+        width = width or 256
+        height = height or 256
+        assert byte_count > 0
+        assert image_offset + byte_count <= len(payload)
+        frames.add((width, height, bit_count))
+
+    expected = {16, 24, 32, 48, 64, 128, 256}
+    assert expected.issubset({width for width, _, _ in frames})
+    assert all(width == height and bit_count == 32 for width, height, bit_count in frames)
 
 
 def test_packaged_python_lock_and_runtime_manifest_follow_project_version() -> None:
@@ -48,13 +79,32 @@ def test_packaged_python_lock_and_runtime_manifest_follow_project_version() -> N
     assert "$appVersion = $versionMatch.Groups['version'].Value" in prepare_script
     assert "app_version = $appVersion" in prepare_script
     assert "function Get-DependencyLockSha256" in prepare_script
+    assert "function Get-PackagedPythonSourceFiles" in prepare_script
+    assert "function Assert-StagedPythonSource" in prepare_script
+    assert "__pycache__" in prepare_script
+    assert "$stagedPythonSource" in prepare_script
     assert "dependency_lock_sha256 = Get-DependencyLockSha256" in prepare_script
     assert '.get("dependency_lock_sha256")' in (TAURI_ROOT / "src" / "main.rs").read_text(
         encoding="utf-8"
     )
     assert "& $uvExe lock --locked" in build_script
     assert "tauri.conf.json" in build_script
+    assert "-Raw -Encoding UTF8 | ConvertFrom-Json" in build_script
+    assert "function Remove-StalePackagedResourceTree" in build_script
+    assert "release\\pkas-app" in build_script
     assert '$installerPattern = "*_$($tauriConfig.version)_*-setup.exe"' in build_script
+
+
+def test_packaged_rpa_helper_resolves_only_local_zhishu_context() -> None:
+    helper = (ROOT / "scripts" / "configure_rpa_loopback.ps1").read_text(encoding="utf-8")
+
+    assert "ValidateSet('Status', 'Provision', 'Enable', 'Disable', 'Rotate')" in helper
+    assert "Zhishu\\storage-root.txt" in helper
+    assert "PKAS_DATA_ROOT" in helper
+    assert "PKAS_RUNTIME_ROOT" in helper
+    assert "rpa-bridge-provision" in helper
+    assert "rpa-bridge-rotate-token" in helper
+    assert "rpa_bearer_token" not in helper
 
 
 def test_desktop_product_copy_uses_clear_chinese_titles_without_internal_badges() -> None:
@@ -127,6 +177,10 @@ def test_backend_lifetime_is_bound_after_tray_creation() -> None:
         'start_qdrant_via_backend(&paths, window)'
     )
     assert '"/api/runtime/services/qdrant"' in source
+    assert 'r#"{"action":"start","confirmed":true,"confirm_cloud":false}"#' in source
+    assert "repair_packaged_desktop_shortcut(&paths);" in source
+    assert 'join("app-icon.ico")' in source
+    assert 'Command::new("powershell.exe")' in source
     assert 'Command::new(&paths.qdrant)' not in source
 
 

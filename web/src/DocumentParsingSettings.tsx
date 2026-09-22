@@ -46,7 +46,7 @@ export default function DocumentParsingSettings() {
         <p><strong>本地旧Office转换</strong>：{policy.format_capabilities.local_converter_formats.join("、")}；{policy.format_capabilities.local_converter_available ? "LibreOffice已可用，会在明确入库时无窗口临时转换。" : "未发现LibreOffice，暂不转换。"}</p>
         <p><strong>其他可选转换</strong>：{policy.format_capabilities.optional_converter_formats.join("、")}；{policy.format_capabilities.optional_converter_available ? "Docling已可用。" : "当前未安装Docling，不会假装已读到正文。"}</p>
       </details>}
-      <div className="boundary-note"><strong>扫描件与图片视觉补全：尚未接入</strong><p>当前可检索图片来源、格式、尺寸及已有的本地标题/说明/关键词；不会读取截图文字、表格截图或图像语义，也不读取位置、设备或人脸信息。本地解析不会调用文档大模型，也不会下载解析模型；它不影响已独立运行的 Luna 资料理解、Embedding、重排或 Agent。</p></div>
+      <div className="boundary-note"><strong>扫描件与图片视觉补全：尚未接入</strong><p>当前可检索图片来源、格式、尺寸及已有的本地标题/说明/关键词；不会读取截图文字、表格截图或图像语义，也不读取位置、设备或人脸信息。本地解析不会调用文档大模型，也不会下载解析模型；它不影响已独立运行的 Luna 资料理解、Embedding 或重排。</p></div>
       <button role="switch" aria-checked={false} disabled title="视觉补全尚未接入">视觉补全：关闭（暂不可用）</button>{" "}
       <button disabled={busy || !policy} onClick={useLocal}>{busy ? "保存中…" : "保持本地解析并保存"}</button>
       {policy?.warning && <p role="alert">{policy.warning}</p>}

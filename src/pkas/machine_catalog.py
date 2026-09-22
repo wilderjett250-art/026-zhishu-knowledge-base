@@ -30,6 +30,10 @@ class MachineCatalogStart(BaseModel):
     confirmed: bool = False
 
 
+class MachineCatalogConflict(RuntimeError):
+    """The requested catalog operation conflicts with an active local worker."""
+
+
 SYSTEM_DIRECTORIES = {
     "$recycle.bin",
     "system volume information",
@@ -120,6 +124,8 @@ class MachineCatalog:
         self.home.mkdir(parents=True, exist_ok=True)
         self.summary_home.mkdir(parents=True, exist_ok=True)
         self._thread: threading.Thread | None = None
+        self._active_job_id: str | None = None
+        self._lifecycle_lock = threading.RLock()
         self._stop = threading.Event()
         self._excluded_roots = self._build_exact_exclusions()
         self.initialize()
@@ -304,33 +310,74 @@ class MachineCatalog:
         return self.view(job_id)
 
     def resume(self, job_id: str) -> dict:
-        if self._thread and self._thread.is_alive():
-            return self.view(job_id)
-        with self.connect() as c:
-            row = c.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
+        with self._lifecycle_lock:
+            if self._thread and self._thread.is_alive():
+                if self._active_job_id == job_id:
+                    return self.view(job_id)
+                raise MachineCatalogConflict("另一项A库索引正在当前程序中运行，不能并发继续。")
+            with self.connect() as c:
+                row = c.execute(
+                    "SELECT state,owner_pid FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if not row:
+                    raise ValueError("全机索引任务不存在")
+                if row["state"] == "completed":
+                    return self.view(job_id)
+                if (
+                    row["state"] == "running"
+                    and row["owner_pid"] != os.getpid()
+                    and process_alive(row["owner_pid"])
+                ):
+                    raise MachineCatalogConflict("该A库索引由另一程序实例运行，不能重复继续。")
+                c.execute(
+                    "UPDATE jobs SET state='running',updated_at=?,"
+                    "message='正在继续建立A库索引',owner_pid=? WHERE id=?",
+                    (now(), os.getpid(), job_id),
+                )
+                c.commit()
+            self._stop.clear()
+            self._active_job_id = job_id
+            self._thread = threading.Thread(target=self._run, args=(job_id,), daemon=True)
+            self._thread.start()
+        return self.view(job_id)
+
+    def pause(self, job_id: str) -> dict:
+        thread: threading.Thread | None = None
+        with self._lifecycle_lock:
+            with self.connect() as c:
+                row = c.execute(
+                    "SELECT state,owner_pid FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
             if not row:
                 raise ValueError("全机索引任务不存在")
             if row["state"] == "completed":
                 return self.view(job_id)
-            c.execute(
-                "UPDATE jobs SET state='running',updated_at=?,"
-                "message='正在继续建立A库索引',owner_pid=? WHERE id=?",
-                (now(), os.getpid(), job_id),
-            )
-            c.commit()
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, args=(job_id,), daemon=True)
-        self._thread.start()
-        return self.view(job_id)
-
-    def pause(self, job_id: str) -> dict:
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+            if self._thread and self._thread.is_alive():
+                if self._active_job_id != job_id:
+                    raise MachineCatalogConflict(
+                        "另一项A库索引正在当前程序中运行，不能暂停此任务。"
+                    )
+                self._stop.set()
+                thread = self._thread
+            elif (
+                row["state"] == "running"
+                and row["owner_pid"] != os.getpid()
+                and process_alive(row["owner_pid"])
+            ):
+                raise MachineCatalogConflict("该A库索引由另一程序实例运行，请在原实例中暂停。")
+        if thread is not None:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise MachineCatalogConflict("暂停请求仍在收尾，请稍后查看任务状态。")
         with self.connect() as c:
             c.execute(
+                "UPDATE directory_queue SET state='pending' "
+                "WHERE job_id=? AND state='working'",
+                (job_id,),
+            )
+            c.execute(
                 "UPDATE jobs SET state='paused',updated_at=?,"
-                "message='已暂停；目录队列和文件进度已保留' "
+                "message='已暂停；目录队列和文件进度已保留',"
                 "owner_pid=NULL WHERE id=? AND state<>'completed'",
                 (now(), job_id),
             )
@@ -338,9 +385,12 @@ class MachineCatalog:
         return self.view(job_id)
 
     def close(self) -> None:
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+        with self._lifecycle_lock:
+            thread = self._thread
+            if thread and thread.is_alive():
+                self._stop.set()
+        if thread and thread.is_alive():
+            thread.join(timeout=5)
 
     @staticmethod
     def _top_group(relative: str) -> str:
@@ -628,7 +678,11 @@ class MachineCatalog:
                         uncommitted_directories = 0
                 c.commit()
                 if self._stop.is_set():
-                    c.execute("UPDATE directory_queue SET state='pending' WHERE state='working'")
+                    c.execute(
+                        "UPDATE directory_queue SET state='pending' "
+                        "WHERE job_id=? AND state='working'",
+                        (job_id,),
+                    )
                     c.execute(
                         "UPDATE jobs SET state='paused',updated_at=?,"
                         "message='已暂停；进度已保留',owner_pid=NULL WHERE id=?",
@@ -665,7 +719,11 @@ class MachineCatalog:
             )
         except Exception:
             with self.connect() as c:
-                c.execute("UPDATE directory_queue SET state='pending' WHERE state='working'")
+                c.execute(
+                    "UPDATE directory_queue SET state='pending' "
+                    "WHERE job_id=? AND state='working'",
+                    (job_id,),
+                )
                 c.execute(
                     "UPDATE jobs SET state='warning',updated_at=?,"
                     "message='索引异常；进度已保留，可继续',"
@@ -673,6 +731,12 @@ class MachineCatalog:
                     (now(), job_id),
                 )
                 c.commit()
+        finally:
+            with self._lifecycle_lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+                if self._thread is threading.current_thread():
+                    self._thread = None
 
     def generate_summaries(self, job_id: str) -> int:
         target = self.summary_home / job_id

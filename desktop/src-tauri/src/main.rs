@@ -486,6 +486,52 @@ fn hide_console(command: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn hide_console(_command: &mut Command) {}
 
+// Tauri's NSIS shortcut can retain a stale EXE-only icon association after an
+// in-place upgrade. The packaged ICO is deliberately separate from the EXE,
+// so Explorer can render every desktop size without relying on that cache.
+// This is best-effort and only updates the product's own named shortcut.
+fn repair_packaged_desktop_shortcut(paths: &RuntimePaths) {
+    if !paths.packaged {
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let icon = paths.project_root.join("app-icon.ico");
+    if !icon.is_file() {
+        return;
+    }
+    let script = r#"
+$desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)
+if ([string]::IsNullOrWhiteSpace($desktop)) { exit 0 }
+$linkPath = Join-Path $desktop '知域.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$link = $shell.CreateShortcut($linkPath)
+$link.TargetPath = $env:ZHISHU_SHORTCUT_TARGET
+$link.WorkingDirectory = $env:ZHISHU_SHORTCUT_WORKING_DIRECTORY
+$link.IconLocation = ($env:ZHISHU_SHORTCUT_ICON + ',0')
+$link.Description = '知域 · 个人知识系统'
+$link.Save()
+"#;
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .env("ZHISHU_SHORTCUT_TARGET", executable)
+        .env(
+            "ZHISHU_SHORTCUT_WORKING_DIRECTORY",
+            paths.project_root.parent().unwrap_or(&paths.project_root),
+        )
+        .env("ZHISHU_SHORTCUT_ICON", icon);
+    hide_console(&mut command);
+    let _ = command.spawn();
+}
+
 // Keep the desktop and every child process started by it in one OS-owned
 // lifetime. Windows terminates the children when the user exits from the tray.
 #[cfg(target_os = "windows")]
@@ -738,7 +784,7 @@ fn start_qdrant_via_backend<R: Runtime>(
         PKAS_PORT,
         "POST",
         "/api/runtime/services/qdrant",
-        r#"{"action":"start","confirm_cloud":false}"#,
+        r#"{"action":"start","confirmed":true,"confirm_cloud":false}"#,
     )
     .ok_or_else(|| {
         std::io::Error::new(
@@ -884,6 +930,7 @@ fn start_application<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>) 
             return;
         }
     };
+    repair_packaged_desktop_shortcut(&paths);
     if let Err(error) = fs::create_dir_all(&paths.data_root) {
         show_startup_error(window, Some(&paths), &error);
         return;

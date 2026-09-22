@@ -2148,7 +2148,7 @@ wheels = [
 
 [[package]]
 name = "pkas"
-version = "0.1.13"
+version = "0.1.18"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },

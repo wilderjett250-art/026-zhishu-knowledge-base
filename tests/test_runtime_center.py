@@ -31,6 +31,22 @@ def test_usage_counts_and_no_samples(tmp_path):
     assert result["success_rate"] == 0.5
     assert result["operations"][0]["average_ms"] == 20
     assert result["operations"][0]["failures"] == 1
+    assert result["failure_count"] == 1
+    assert result["failure_details"][0]["reason"] == "未记录具体原因（旧版或未知错误）"
+
+
+def test_usage_failure_reason_is_safe_and_aggregated(tmp_path):
+    metrics = UsageMetrics(tmp_path)
+    metrics.record("api", "/api/capabilities/overview", "error", 0.01, "本机服务未能完成请求")
+    metrics.record("api", "/api/capabilities/overview", "error", 0.02, "C:/private-data/raw-error")
+
+    result = metrics.summary()
+
+    assert result["failure_count"] == 2
+    assert {item["reason"] for item in result["failure_details"]} == {
+        "本机服务未能完成请求",
+        "未记录具体原因（旧版或未知错误）",
+    }
 
 
 def test_runtime_does_not_adopt_external_process(test_settings, monkeypatch):

@@ -73,7 +73,7 @@ def is_sensitive_path(path: Path) -> bool:
     return path.suffix.lower() in SENSITIVE_SUFFIXES
 
 
-CHUNKER_VERSION = "typed-v2"
+CHUNKER_VERSION = "typed-v3"
 CODE_EXTENSIONS = {
     ".bat", ".c", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js",
     ".jsx", ".kt", ".ps1", ".py", ".rs", ".scss", ".sh", ".sql", ".svelte",
@@ -134,6 +134,156 @@ def chunk_text(text: str, max_chars: int = 900, overlap: int = 90) -> list[dict[
     return chunks
 
 
+_MESSAGE_ID_KEYS = (
+    "message_id",
+    "messageId",
+    "id",
+    "local_id",
+    "localId",
+    "dedup_key",
+    "dedupKey",
+)
+_MESSAGE_REPLY_KEYS = (
+    "reply_to",
+    "replyTo",
+    "reply_id",
+    "replyId",
+    "quote_id",
+    "quoteId",
+    "referenced_message_id",
+    "referencedMessageId",
+)
+
+
+def _message_value(block: ParsedBlock, keys: tuple[str, ...]) -> str | None:
+    """Read only scalar message linkage fields already retained in block metadata."""
+    values: list[dict[str, Any]] = [block.metadata]
+    nested = block.metadata.get("message_metadata")
+    if isinstance(nested, dict):
+        values.append(nested)
+    for mapping in values:
+        for key in keys:
+            value = mapping.get(key)
+            if isinstance(value, (str, int)) and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def _message_timestamp(block: ParsedBlock) -> float | None:
+    value = _message_value(block, ("sent_at", "timestamp", "time", "date"))
+    if not value:
+        return None
+    if value.isdigit() and len(value) in {10, 13}:
+        return int(value) / (1000 if len(value) == 13 else 1)
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized).timestamp()
+    except ValueError:
+        for pattern in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(value, pattern).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def _message_thread_chunks(
+    blocks: list[ParsedBlock],
+    *,
+    target: int,
+    max_units: int,
+) -> list[dict[str, Any]]:
+    """Chunk messages by conversation, explicit reply links and time boundaries.
+
+    We do not guess a semantic topic from a few chat lines. When an export
+    exposes a reply id, that reply remains with its parent across a long time
+    gap; otherwise a two-hour gap starts a new conservative conversation
+    window. The original per-message blocks remain the source of truth.
+    """
+    chunks: list[dict[str, Any]] = []
+    buffer: list[tuple[int, ParsedBlock]] = []
+    buffer_chars = 0
+    buffer_ids: set[str] = set()
+    conversation_id: str | None = None
+    previous_time: float | None = None
+
+    def flush() -> None:
+        nonlocal buffer, buffer_chars, buffer_ids, conversation_id, previous_time
+        if not buffer:
+            return
+        content = "\n\n".join(block.text.strip() for _, block in buffer if block.text.strip())
+        if content:
+            locator = (
+                buffer[0][1].locator
+                if len(buffer) == 1
+                else f"{buffer[0][1].locator}..{buffer[-1][1].locator}"
+            )
+            chunks.append(
+                {
+                    "sequence": len(chunks),
+                    "text": content,
+                    "locator": locator,
+                    "block_sequences": [sequence for sequence, _ in buffer],
+                    "chunk_kind": "message-thread",
+                    "chunker_version": CHUNKER_VERSION,
+                }
+            )
+        buffer = []
+        buffer_chars = 0
+        buffer_ids = set()
+        conversation_id = None
+        previous_time = None
+
+    for sequence, block in enumerate(blocks):
+        text = block.text.strip()
+        if not text:
+            continue
+        if block.kind != "message":
+            flush()
+            chunks.append(
+                {
+                    "sequence": len(chunks),
+                    "text": text,
+                    "locator": block.locator,
+                    "block_sequences": [sequence],
+                    "chunk_kind": "message-context",
+                    "chunker_version": CHUNKER_VERSION,
+                }
+            )
+            continue
+
+        current_conversation = _message_value(block, ("conversation_id",))
+        reply_to = _message_value(block, _MESSAGE_REPLY_KEYS)
+        message_id = _message_value(block, _MESSAGE_ID_KEYS)
+        timestamp = _message_timestamp(block)
+        conversation_changed = (
+            bool(buffer)
+            and bool(conversation_id)
+            and bool(current_conversation)
+            and conversation_id != current_conversation
+        )
+        time_gap = (
+            previous_time is not None
+            and timestamp is not None
+            and timestamp - previous_time > 2 * 60 * 60
+        )
+        direct_reply_in_window = bool(reply_to and reply_to in buffer_ids)
+        if conversation_changed or (time_gap and not direct_reply_in_window):
+            flush()
+
+        candidate_chars = buffer_chars + len(text) + (2 if buffer else 0)
+        if buffer and (candidate_chars > target or len(buffer) >= max_units):
+            flush()
+        buffer.append((sequence, block))
+        buffer_chars += len(text) + (2 if len(buffer) > 1 else 0)
+        conversation_id = current_conversation or conversation_id
+        if message_id:
+            buffer_ids.add(message_id)
+        previous_time = timestamp if timestamp is not None else previous_time
+    flush()
+    return chunks
+
+
 def chunk_document(
     parsed: ParsedDocument,
     max_chars: int | None = None,
@@ -151,7 +301,7 @@ def chunk_document(
     table_count = sum(kind in {"table", "table-row"} for kind in kinds)
     message_count = sum(kind == "message" for kind in kinds)
     if message_count >= max(1, len(kinds) // 2):
-        profile = "message-window"
+        profile = "message-thread"
         target = max_chars or 1200
         max_units = 30
     elif table_count >= max(1, len(kinds) // 2):
@@ -168,18 +318,27 @@ def chunk_document(
         max_units = 80
     resolved_overlap = min(target // 4, 90 if overlap is None else max(0, overlap))
 
+    if profile == "message-thread":
+        return _message_thread_chunks(parsed.blocks, target=target, max_units=max_units)
+
     chunks: list[dict[str, Any]] = []
     buffer: list[tuple[int, ParsedBlock]] = []
     buffer_chars = 0
 
-    def append(content: str, locator: str, sequences: list[int]) -> None:
+    def append(
+        content: str,
+        locator: str,
+        sequences: list[int],
+        *,
+        chunk_kind: str | None = None,
+    ) -> None:
         chunks.append(
             {
                 "sequence": len(chunks),
-                "text": content.strip(),
+                "text": content.rstrip() if profile == "code" else content.strip(),
                 "locator": locator,
                 "block_sequences": list(dict.fromkeys(sequences)),
-                "chunk_kind": profile,
+                "chunk_kind": chunk_kind or profile,
                 "chunker_version": CHUNKER_VERSION,
             }
         )
@@ -188,7 +347,12 @@ def chunk_document(
         nonlocal buffer, buffer_chars
         if not buffer:
             return
-        content = "\n\n".join(block.text.strip() for _, block in buffer if block.text.strip())
+        separator = "\n" if profile == "code" else "\n\n"
+        content = separator.join(
+            block.text.rstrip() if profile == "code" else block.text.strip()
+            for _, block in buffer
+            if block.text.strip()
+        )
         if len(buffer) == 1:
             locator = buffer[0][1].locator
         else:
@@ -201,8 +365,31 @@ def chunk_document(
     current_table_id: str | None = None
     section_heading: tuple[int, ParsedBlock] | None = None
     for block_sequence, block in enumerate(parsed.blocks):
-        text = block.text.replace("\x00", "").strip()
-        if not text:
+        raw_text = block.text.replace("\x00", "")
+        text = raw_text.rstrip() if profile == "code" else raw_text.strip()
+        if not text.strip():
+            continue
+        if profile == "code" and bool(block.metadata.get("symbol_boundary")):
+            flush()
+            if len(text) > target:
+                step = max(1, target - resolved_overlap)
+                for offset in range(0, len(text), step):
+                    segment = text[offset : offset + target]
+                    append(
+                        segment,
+                        f"{block.locator}/chars:{offset}-{offset + len(segment)}",
+                        [block_sequence],
+                        chunk_kind="code-symbol-fragment",
+                    )
+                    if offset + target >= len(text):
+                        break
+            else:
+                append(
+                    text,
+                    block.locator,
+                    [block_sequence],
+                    chunk_kind="code-symbol",
+                )
             continue
         if block.kind == "heading":
             flush()

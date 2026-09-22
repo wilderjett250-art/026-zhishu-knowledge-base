@@ -112,8 +112,12 @@ def system_taxonomy() -> dict:
 
 def load_taxonomy(data_root: Path) -> dict:
     path = data_root / "config" / "content-taxonomy.json"
-    categories = json.loads(path.read_text(encoding="utf-8")) if path.exists() else defaults()
-    validated = TaxonomyUpdate(expected_revision="", categories=categories)
+    raw_categories: object = (
+        json.loads(path.read_text(encoding="utf-8")) if path.exists() else defaults()
+    )
+    validated = TaxonomyUpdate.model_validate(
+        {"expected_revision": "", "categories": raw_categories}
+    )
     categories = [c.model_dump() for c in validated.categories]
     baseline = system_taxonomy()
     current_revision = revision(categories)

@@ -48,7 +48,7 @@ EXCLUDED = SKIP_DIRECTORIES | {
     "recovery",
     ".ssh",
 }
-DEFAULT_RULES = {
+DEFAULT_RULES: dict[str, Mode] = {
     "markdown": "full",
     "documents": "full",
     "code": "catalog",
@@ -109,10 +109,11 @@ def category(path: Path) -> str:
 
 
 def linked(path: Path) -> bool:
-    return any(
-        p.is_symlink() or (hasattr(p, "is_junction") and p.is_junction())
-        for p in [path, *path.parents]
-    )
+    def is_link_or_junction(candidate: Path) -> bool:
+        is_junction = getattr(candidate, "is_junction", None)
+        return candidate.is_symlink() or bool(callable(is_junction) and is_junction())
+
+    return any(is_link_or_junction(candidate) for candidate in [path, *path.parents])
 
 
 def extraction_quality(parsed) -> dict[str, object]:
@@ -657,7 +658,7 @@ class IntakeService:
                         self.stop,
                     )
                 )
-                with closing(candidates):
+                try:
                     for path in candidates:
                         if self.stop.is_set():
                             plan["state"] = "cancelled"
@@ -691,6 +692,10 @@ class IntakeService:
                                 "state": "pending",
                             }
                         )
+                finally:
+                    close = getattr(candidates, "close", None)
+                    if callable(close):
+                        close()
             plan.update(
                 state="ready",
                 scan_complete=True,

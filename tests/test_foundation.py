@@ -72,12 +72,15 @@ def test_catalog_then_content_and_vector_gap(knowledge_system, source_root):
     )
     sync.scan_root(root["id"])
     doc = service.documents()["items"][0]
-    assert doc["fulltext"] == "indexed"
+    assert doc["fulltext"] == "recorded"
     assert doc["vector"] == "not_fully_recorded"
     assert doc["quality"] == "not_manually_verified"
     assert doc["parser_version"] == "hybrid-v2"
     assert doc["parsing"] == "current"
-    assert service.documents()["fts_consistent"] is True
+    assert service.documents()["fts_consistent"] is None
+    verified = service.documents(verify_fulltext=True)
+    assert verified["items"][0]["fulltext"] == "indexed"
+    assert verified["fts_consistent"] is True
     assert service.documents(offset=1)["items"] == []
 
 
@@ -231,7 +234,14 @@ def test_api_readonly_no_scan_or_model(test_settings, monkeypatch):
 
     monkeypatch.setattr(SyncService, "scan_root", forbidden)
     with TestClient(create_app(test_settings)) as client:
-        for endpoint in ["overview", "analytics", "included-files", "documents", "scopes"]:
+        for endpoint in [
+            "overview",
+            "ledger-summary",
+            "analytics",
+            "included-files",
+            "documents",
+            "scopes",
+        ]:
             r = client.get(f"/api/foundation/{endpoint}")
             assert r.status_code == 200
         d = client.get("/api/foundation/scopes").json()["data"]
@@ -239,3 +249,18 @@ def test_api_readonly_no_scan_or_model(test_settings, monkeypatch):
         assert client.get("/api/foundation/documents?limit=999").status_code == 422
         assert client.get("/api/foundation/files?root_id=bad&state=error").status_code == 400
         assert client.get("/api/foundation/files?root_id=bad&state=unknown").status_code == 422
+
+
+def test_document_ledger_error_is_safe_and_actionable(test_settings, monkeypatch):
+    def interrupted(*args, **kwargs):
+        raise sqlite3.OperationalError("interrupted near C:/private-data/secret.sqlite")
+
+    monkeypatch.setattr(FoundationService, "documents", interrupted)
+    with TestClient(create_app(test_settings)) as client:
+        response = client.get("/api/foundation/documents")
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "read_budget_reached"
+    assert detail["retryable"] is True
+    assert "private-data" not in str(detail)

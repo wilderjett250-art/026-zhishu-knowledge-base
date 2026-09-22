@@ -40,6 +40,25 @@ $env:PATH = "$(Join-Path $cargoHome 'bin');$env:PATH"
 $env:CARGO_TARGET_DIR = $targetDir
 $env:CARGO_INCREMENTAL = '0'
 
+function Remove-StalePackagedResourceTree {
+    param([Parameter(Mandatory)][string]$TargetDirectory)
+
+    # Tauri reuses CARGO_TARGET_DIR. Its resource-copy phase does not remove
+    # files that disappeared from a resource source tree, so a prior build can
+    # otherwise leak stale bytecode into a later installer. This exact path is
+    # generated build output below the caller-selected build root, never user
+    # knowledge data or project source.
+    $targetFullPath = [System.IO.Path]::GetFullPath($TargetDirectory).TrimEnd('\')
+    $resourceRoot = Join-Path $targetFullPath 'release\pkas-app'
+    $resourceFullPath = [System.IO.Path]::GetFullPath($resourceRoot)
+    if (-not $resourceFullPath.StartsWith($targetFullPath + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean a packaged resource path outside the build target: $resourceFullPath"
+    }
+    if (Test-Path -LiteralPath $resourceFullPath) {
+        Remove-Item -LiteralPath $resourceFullPath -Recurse -Force
+    }
+}
+
 switch ($Mode) {
     "Check" {
         & $cargoExe check --locked --manifest-path $manifestPath
@@ -92,6 +111,8 @@ switch ($Mode) {
             -ProjectRoot $projectRoot -StagingRoot $StagingRoot
         if ($LASTEXITCODE -ne 0) { throw 'Pinned installer resources could not be prepared.' }
 
+        Remove-StalePackagedResourceTree -TargetDirectory $targetDir
+
         Push-Location (Join-Path $projectRoot 'desktop')
         try {
             & $npm.Source exec --yes --package='@tauri-apps/cli@2.11.4' -- tauri build --bundles nsis
@@ -101,7 +122,7 @@ switch ($Mode) {
         }
 
         $installerDirectory = Join-Path $targetDir 'release\bundle\nsis'
-        $tauriConfig = Get-Content -LiteralPath (Join-Path $projectRoot 'desktop\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
+        $tauriConfig = Get-Content -LiteralPath (Join-Path $projectRoot 'desktop\src-tauri\tauri.conf.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         $installerPattern = "*_$($tauriConfig.version)_*-setup.exe"
         $installers = @(Get-ChildItem -LiteralPath $installerDirectory -Filter $installerPattern -File -ErrorAction SilentlyContinue)
         if ($installers.Count -ne 1) {

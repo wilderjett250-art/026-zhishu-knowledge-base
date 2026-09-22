@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 
 const weflowRoot = process.env.WEFLOW_ROOT || 'D:\\wx\\xwechat_files\\tools\\WeFlow'
-const configDir = process.env.WEFLOW_CONFIG_DIR || 'C:\\Users\\25021\\AppData\\Roaming\\weflow'
+const defaultAppData = process.env.APPDATA || path.join(homedir(), 'AppData', 'Roaming')
+const configDir = process.env.WEFLOW_CONFIG_DIR || path.join(defaultAppData, 'weflow')
 const taskId = 'pkas-weflow-daily-v1'
 const taskName = '每日微信消息增量同步'
 const legacyTaskName = '每6小时微信消息增量同步'

@@ -53,13 +53,9 @@
 
 核心字段：id、example_type、input、preferred_output、rejected_output、rationale、source_ids、privacy、quality_score、approval_status、split。
 
-### WorkflowRun
+### WorkflowRun 与 AgentRun（历史兼容）
 
-记录工作流输入、步骤、状态、输出、验证和错误。
-
-### AgentRun
-
-记录任务目标、计划、工具调用、上下文来源、确认点、结果和评估。
+记录历史工作流或 Agent 的输入、步骤、状态、输出、验证和错误。它们默认不参与当前知识底座的资料入库、检索或 Codex MCP 主链路；如未来单独启用，必须有独立范围、预算、审计和完成证据门禁。
 
 ### ApprovalRecord
 

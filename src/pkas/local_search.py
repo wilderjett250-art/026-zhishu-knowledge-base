@@ -2,11 +2,12 @@
 
 import sqlite3
 import time
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
 from pkas.customer_repository import CustomerRepository
+from pkas.db import Database
 from pkas.foundation import FoundationService
 from pkas.repository import Repository
 
@@ -23,7 +24,7 @@ class LocalSearchRequest(BaseModel):
 class LocalSearchService:
     def __init__(self, database_path):
         # Repository constructors initialize/migrate the database. Read-only views do not.
-        readonly = FoundationService(database_path)
+        readonly = cast(Database, FoundationService(database_path))
         self.repository = Repository.__new__(Repository)
         self.repository.database = readonly
         self.customers = CustomerRepository.__new__(CustomerRepository)

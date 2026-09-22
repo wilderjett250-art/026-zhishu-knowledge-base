@@ -104,7 +104,7 @@ class RagObservabilityService:
         def evaluate(
             rows: list[dict[str, Any]], fts_weight: float, vector_weight: float
         ) -> dict[str, float]:
-            totals = Counter()
+            totals: dict[str, float] = {"hit": 0.0, "mrr": 0.0, "ndcg": 0.0}
             for row in rows:
                 case = row["case"]
                 grades = {
@@ -1174,9 +1174,16 @@ class RagObservabilityService:
         if not cases:
             return {"status": "warning", "case_count": 0, "warning": "尚未建立黄金测评样本。"}
         run_id, now = f"evalrun_{uuid.uuid4().hex}", utc_now()
-        totals = Counter()
-        mode_counts = Counter()
-        strata_totals: dict[str, Counter[str]] = {}
+        totals: dict[str, float] = {
+            "hit": 0.0,
+            "recall": 0.0,
+            "precision": 0.0,
+            "mrr": 0.0,
+            "ndcg": 0.0,
+            "judgment_coverage": 0.0,
+        }
+        mode_counts: Counter[str] = Counter()
+        strata_totals: dict[str, dict[str, float]] = {}
         details = []
         for case in cases:
             response = self.retrieval.search(
@@ -1218,20 +1225,32 @@ class RagObservabilityService:
             )
             reciprocal_rank = 1 / (hits[0] + 1) if hits else 0.0
             hit = int(bool(hits))
-            totals.update(
-                hit=hit, recall=recall, precision=precision, mrr=reciprocal_rank,
-                ndcg=ndcg, judgment_coverage=judgment_coverage,
-            )
+            totals["hit"] += hit
+            totals["recall"] += recall
+            totals["precision"] += precision
+            totals["mrr"] += reciprocal_rank
+            totals["ndcg"] += ndcg
+            totals["judgment_coverage"] += judgment_coverage
             stratum = f"{case['category']}:{case['difficulty']}"
-            strata_totals.setdefault(stratum, Counter()).update(
-                hit=hit,
-                recall=recall,
-                precision=precision,
-                mrr=reciprocal_rank,
-                ndcg=ndcg,
-                judgment_coverage=judgment_coverage,
-                count=1,
+            stratum_totals = strata_totals.setdefault(
+                stratum,
+                {
+                    "hit": 0.0,
+                    "recall": 0.0,
+                    "precision": 0.0,
+                    "mrr": 0.0,
+                    "ndcg": 0.0,
+                    "judgment_coverage": 0.0,
+                    "count": 0.0,
+                },
             )
+            stratum_totals["hit"] += hit
+            stratum_totals["recall"] += recall
+            stratum_totals["precision"] += precision
+            stratum_totals["mrr"] += reciprocal_rank
+            stratum_totals["ndcg"] += ndcg
+            stratum_totals["judgment_coverage"] += judgment_coverage
+            stratum_totals["count"] += 1
             mode_counts[response.mode] += 1
             details.append(
                 (

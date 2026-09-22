@@ -10,6 +10,12 @@ from pkas.parsers import SUPPORTED_EXTENSIONS, parse_file
 from pkas.repository import Repository, utc_now
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """Use the Windows-only junction check when the current Python supports it."""
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(callable(is_junction) and is_junction())
+
+
 def import_catalog_items(settings: Settings, item_ids: list[str], *, confirmed: bool) -> list[dict]:
     if not confirmed or not 1 <= len(item_ids) <= 10:
         raise ValueError("必须明确确认1至10份既有台账文件")
@@ -41,7 +47,7 @@ def import_catalog_items(settings: Settings, item_ids: list[str], *, confirmed: 
             if root not in path.parents or not path.is_file():
                 raise ValueError("文件越过授权目录边界")
             if any(
-                p.is_symlink() or (hasattr(p, "is_junction") and p.is_junction())
+                _is_link_or_junction(p)
                 for p in [raw, *raw.parents]
                 if p != root and root in p.parents
             ):

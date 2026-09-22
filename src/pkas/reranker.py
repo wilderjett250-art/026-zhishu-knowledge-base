@@ -20,7 +20,8 @@ class RerankResponse:
 
 
 class Reranker(Protocol):
-    model_name: str
+    @property
+    def model_name(self) -> str: ...
 
     @property
     def enabled(self) -> bool: ...

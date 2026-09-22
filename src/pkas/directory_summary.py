@@ -7,23 +7,27 @@ import sqlite3
 import threading
 import uuid
 from collections import Counter, defaultdict
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool
 
 from pkas.content_taxonomy import LOCK, atomic_write, classify, load_taxonomy
+from pkas.db import Database
 from pkas.everything_scanner import scan as everything_scan
 from pkas.file_inspector import inspect_file
 from pkas.ingest import is_sensitive_path
 from pkas.intake import EXCLUDED, category, linked
+from pkas.llm import DeepSeekGateway, LLMError
+from pkas.repository import Repository
 from pkas.summary_agent import AgentError, CodexAgent
 
 
 class DirectorySummaryRequest(BaseModel):
     path: str = Field(min_length=1, max_length=1000)
-    provider: str = Field(default="openai_luna", pattern="^(openai_luna|deepseek)$")
+    provider: Literal["openai_luna", "deepseek"] = "openai_luna"
     max_directories: int = Field(default=80, ge=1, le=300)
 
 
@@ -42,6 +46,7 @@ class ClassificationEdit(BaseModel):
 class CatalogOverviewRequest(BaseModel):
     """Build a resumable, directory-level plan from the local A catalog only."""
 
+    provider: Literal["openai_luna", "deepseek"] = "openai_luna"
     max_units_per_run: int = Field(default=10, ge=1, le=50)
     model: str = Field(default="gpt-5.6-luna", max_length=100)
     codex_executable: str = Field(default="", max_length=1000)
@@ -91,6 +96,17 @@ DIRECTORY_SAMPLE_INSTRUCTIONS = """PKAS_DIRECTORY_SAMPLE_SUMMARY_V1
 evidence_id必须从对应item的evidence_options中选择，不能自造。仅返回符合schema的JSON。"""
 
 
+# DeepSeekGateway performs one JSON repair request itself.  Only malformed or
+# semantically untrustworthy results become a terminal rejection for a unit;
+# network, provider and budget faults keep the unit pending for a later retry.
+DEEPSEEK_REJECTED_OUTPUT_CODES = frozenset({
+    "semantic_validation_error",
+    "invalid_json",
+    "invalid_json_shape",
+    "empty_content",
+})
+
+
 def user_documents_path() -> Path:
     """Use Explorer's redirected Documents location when available."""
     value = Path.home() / "Documents"
@@ -134,6 +150,153 @@ class DirectorySummaryService:
         atomic_write(self._path(plan["id"]),
                      json.dumps(plan, ensure_ascii=False, indent=2).encode("utf-8"))
 
+    @staticmethod
+    def _provider_label(provider: str) -> str:
+        return {"openai_luna": "Codex Luna", "deepseek": "DeepSeek"}.get(
+            provider, "未知模型"
+        )
+
+    def _planned_model(self, provider: str, luna_model: str = "gpt-5.6-luna") -> str:
+        if provider == "openai_luna":
+            return luna_model
+        if provider == "deepseek":
+            return self.settings.deepseek_flash_model
+        raise ValueError("不支持的目录摘要模型")
+
+    def _deepseek_gateway(self, provider: str) -> DeepSeekGateway | None:
+        if provider == "openai_luna":
+            return None
+        if provider != "deepseek":
+            raise ValueError("不支持的目录摘要模型")
+        if not self.settings.deepseek_enabled:
+            raise ValueError("DeepSeek 尚未配置；任务未调用模型，待配置后可继续")
+        return DeepSeekGateway(
+            settings=self.settings,
+            repository=Repository(Database(self.settings)),
+        )
+
+    def _complete_directory_packet(
+        self,
+        *,
+        plan: dict,
+        packet: dict,
+        luna_agent,
+        deepseek_gateway: DeepSeekGateway | None,
+        instructions: str,
+        task_type: str,
+        prompt_version: str,
+    ) -> tuple[dict, str | None, dict]:
+        """Complete one bounded packet without changing source material.
+
+        Luna keeps its durable Codex task id.  DeepSeek has no Codex task, so
+        the audit trail stores only model, token counters and cache state.
+        Packet ids are intentionally excluded from the DeepSeek payload: they
+        are local correlation ids and would defeat safe request caching.
+        """
+        provider = plan.get("provider", "openai_luna")
+        if provider == "deepseek":
+            if deepseek_gateway is None:
+                raise RuntimeError("DeepSeek 网关未初始化")
+
+            def validate(value: dict) -> dict:
+                self._validate_overview_result(packet, value)
+                return value
+
+            response = deepseek_gateway.complete_json(
+                task_type=task_type,
+                system_prompt=instructions,
+                payload={"items": packet["items"]},
+                complexity="simple",
+                prompt_version=prompt_version,
+                max_tokens=min(2000, max(700, len(packet["items"]) * 360)),
+                use_cache=True,
+                validator=validate,
+                validation_hint=(
+                    "每个输入id必须且只能对应一项；evidence_id必须来自对应"
+                    "evidence_options；只返回符合schema的JSON。"
+                ),
+            )
+            return response.content, None, {
+                "provider": "deepseek",
+                "model": response.model,
+                "usage": {key: int(value) for key, value in response.usage.items()},
+                "estimated_cost_usd": response.estimated_cost_usd,
+                "application_cache_hit": response.application_cache_hit,
+            }
+        if provider != "openai_luna" or luna_agent is None:
+            raise RuntimeError("Codex Luna 客户端未初始化")
+        result, thread_id = luna_agent.complete(packet)
+        return result, thread_id, {
+            "provider": "openai_luna",
+            "model": plan.get("model", "gpt-5.6-luna"),
+            "thread_id": thread_id,
+        }
+
+    def _complete_directory_batch(
+        self,
+        *,
+        plan: dict,
+        packet: dict,
+        luna_agent,
+        deepseek_gateway: DeepSeekGateway | None,
+        instructions: str,
+        task_type: str,
+        prompt_version: str,
+    ) -> tuple[list[dict] | None, str | None, dict | None, str | None]:
+        """Return accepted results or a bounded, per-batch rejection reason.
+
+        Operational provider failures deliberately bubble out.  The outer run
+        then remains resumable with its units still pending instead of marking
+        good source material as a permanent model rejection.
+        """
+        try:
+            result, thread_id, model_call = self._complete_directory_packet(
+                plan=plan,
+                packet=packet,
+                luna_agent=luna_agent,
+                deepseek_gateway=deepseek_gateway,
+                instructions=instructions,
+                task_type=task_type,
+                prompt_version=prompt_version,
+            )
+            return self._validate_overview_result(packet, result), thread_id, model_call, None
+        except LLMError as exc:
+            if exc.code not in DEEPSEEK_REJECTED_OUTPUT_CODES:
+                raise ValueError(f"DeepSeek 调用未完成（{exc.code}）；本批保持待处理") from exc
+            return None, None, None, "model_or_validation_rejected:" + exc.code
+        except (AgentError, ValueError, TypeError) as first_error:
+            if plan.get("provider", "openai_luna") != "openai_luna":
+                return (
+                    None,
+                    None,
+                    None,
+                    "model_or_validation_rejected:" + type(first_error).__name__,
+                )
+            retry_packet = dict(packet)
+            retry_packet["validation_notice"] = (
+                "上一份结果未通过严格校验。请确保每个id恰好一次，"
+                "evidence_id来自对应item，且只返回JSON。"
+            )
+            try:
+                result, thread_id, model_call = self._complete_directory_packet(
+                    plan=plan,
+                    packet=retry_packet,
+                    luna_agent=luna_agent,
+                    deepseek_gateway=deepseek_gateway,
+                    instructions=instructions,
+                    task_type=task_type,
+                    prompt_version=prompt_version,
+                )
+                accepted = self._validate_overview_result(retry_packet, result)
+                return accepted, thread_id, model_call, None
+            except (AgentError, LLMError, ValueError, TypeError) as final_error:
+                return (
+                    None,
+                    None,
+                    None,
+                    "model_or_validation_rejected:" + type(final_error).__name__,
+                )
+
     def read(self, job_id: str) -> dict:
         return json.loads(self._path(job_id).read_text(encoding="utf-8"))
 
@@ -142,6 +305,21 @@ class DirectorySummaryService:
             "default_provider": "openai_luna",
             "default_model": "gpt-5.6-luna",
             "remote_enabled": False,
+            "providers": [
+                {
+                    "id": "openai_luna",
+                    "label": "Codex Luna",
+                    "configured": True,
+                    "data_boundary": "仅在确认后发送有限目录统计或抽样文本",
+                },
+                {
+                    "id": "deepseek",
+                    "label": "DeepSeek",
+                    "configured": self.settings.deepseek_enabled,
+                    "model": self.settings.deepseek_flash_model,
+                    "data_boundary": "仅在确认后发送有限目录统计或抽样文本",
+                },
+            ],
             "write_location": str(self.settings.data_root / "derived" / "directory-summaries"),
             "source_write_default": False,
             "source_export_policy": (
@@ -150,7 +328,7 @@ class DirectorySummaryService:
             "c_policy": f"仅 {user_documents_path()} 及其子目录",
             "note": (
                 "单目录检查仍为本地抽样；全盘概览复用A库聚合统计，"
-                "仅在明确确认后调用Luna，且不读取原件正文。"
+                "仅在明确确认后调用所选模型，且不读取原件正文。"
             ),
             "classification": load_taxonomy(self.settings.data_root),
         }
@@ -214,7 +392,7 @@ class DirectorySummaryService:
         plan = {
             "id": uuid.uuid4().hex, "created_at": datetime.now(UTC).isoformat(),
             "root": str(root), "provider": request.provider, "state": "ready_for_confirmation",
-            "model": "gpt-5.6-luna" if request.provider == "openai_luna" else "deepseek",
+            "model": self._planned_model(request.provider),
             "units": items,
             "revision": 1,
             "taxonomy": taxonomy,
@@ -223,6 +401,8 @@ class DirectorySummaryService:
             "excluded_files": excluded,
             "discovered_files": seen,
             "cloud_called": False,
+            "remote_called": False,
+            "remote_attempted": False,
             "source_files_written": 0,
             "derived_md_files_written": 0,
             "summary_path": None,
@@ -373,8 +553,8 @@ class DirectorySummaryService:
             "kind": "catalog_directory_overview",
             "created_at": datetime.now(UTC).isoformat(),
             "state": "ready_for_confirmation",
-            "provider": "openai_luna",
-            "model": request.model,
+            "provider": request.provider,
+            "model": self._planned_model(request.provider, request.model),
             "codex_executable": request.codex_executable,
             "max_units_per_run": request.max_units_per_run,
             "source": {
@@ -387,9 +567,11 @@ class DirectorySummaryService:
             "units": units,
             "restricted_units": restricted,
             "remote_called": False,
+            "remote_attempted": False,
             "runs": [],
             "notice": (
-                "本计划复用A库的全盘索引，只向Luna发送非受限目录的聚合统计；"
+                "本计划复用A库的全盘索引，只向"
+                f"{self._provider_label(request.provider)}发送非受限目录的聚合统计；"
                 "不发送文件正文、不发送单个文件名、不复制或移动原件。"
             ),
         }
@@ -517,6 +699,8 @@ class DirectorySummaryService:
     def _run_catalog_overview(self, plan: dict, request: DirectorySummaryRunRequest) -> dict:
         if not request.allow_remote_processing:
             raise ValueError("目录概览会发送有限的目录索引统计，请明确开启云端处理")
+        provider = plan.get("provider", "openai_luna")
+        deepseek_gateway = self._deepseek_gateway(provider)
         pending = [unit for unit in plan["units"] if unit["state"] == "pending"]
         selected = pending[: min(request.max_units, plan["max_units_per_run"])]
         if not selected:
@@ -530,45 +714,51 @@ class DirectorySummaryService:
             "completed_units": 0,
             "rejected_units": 0,
             "thread_ids": [],
+            "model_calls": [],
         }
         plan["state"] = "running"
         self._save(plan)
         batches = [selected[index:index + 5] for index in range(0, len(selected), 5)]
-        try:
-            with CodexAgent(
+        luna_context = (
+            CodexAgent(
                 self.settings.project_root,
                 plan["model"],
-                plan["codex_executable"],
+                plan.get("codex_executable", ""),
                 instructions=DIRECTORY_INSTRUCTIONS,
                 output_schema=DIRECTORY_RESULT_SCHEMA,
                 client_name="pkas_directory_overview",
                 client_title="知枢全盘目录概览",
-            ) as agent:
+            )
+            if provider == "openai_luna"
+            else nullcontext(None)
+        )
+        try:
+            with luna_context as luna_agent:
                 for batch in batches:
                     packet = self._overview_packet(batch)
-                    try:
-                        result, thread_id = agent.complete(packet)
-                        accepted = self._validate_overview_result(packet, result)
-                    except (AgentError, ValueError, TypeError):
-                        # One bounded correction attempt, never an unbounded quota loop.
-                        retry_packet = dict(packet)
-                        retry_packet["validation_notice"] = (
-                            "上一份结果未通过严格校验。请确保每个id恰好一次，"
-                            "evidence逐字来自对应item，且只返回JSON。"
+                    # Persist the attempt before invoking a remote provider so a
+                    # process interruption never looks like a purely local plan.
+                    plan["remote_attempted"] = True
+                    self._save(plan)
+                    accepted, thread_id, model_call, rejection_reason = (
+                        self._complete_directory_batch(
+                            plan=plan,
+                            packet=packet,
+                            luna_agent=luna_agent,
+                            deepseek_gateway=deepseek_gateway,
+                            instructions=DIRECTORY_INSTRUCTIONS,
+                            task_type="catalog_directory_overview",
+                            prompt_version="directory-overview-v2",
                         )
-                        try:
-                            result, thread_id = agent.complete(retry_packet)
-                            accepted = self._validate_overview_result(retry_packet, result)
-                        except (AgentError, ValueError, TypeError) as final_error:
-                            for unit in batch:
-                                unit["state"] = "rejected"
-                                unit["rejection_reason"] = (
-                                    "model_or_validation_rejected:"
-                                    + str(final_error)[:160]
-                                )
-                                unit["updated_at"] = datetime.now(UTC).isoformat()
-                            run["rejected_units"] += len(batch)
-                            continue
+                    )
+                    if accepted is None:
+                        for unit in batch:
+                            unit["state"] = "rejected"
+                            unit["rejection_reason"] = rejection_reason
+                            unit["updated_at"] = datetime.now(UTC).isoformat()
+                        run["rejected_units"] += len(batch)
+                        self._save(plan)
+                        continue
                     for item in accepted:
                         unit = next(unit for unit in batch if unit["id"] == item["id"])
                         unit["state"] = "done"
@@ -583,7 +773,7 @@ class DirectorySummaryService:
                             "confidence": "directory_index_only",
                             "review_status": "unreviewed",
                         }
-                        unit["model"] = plan["model"]
+                        unit["model"] = model_call["model"] if model_call else plan["model"]
                         unit["thread_id"] = thread_id
                         unit["updated_at"] = datetime.now(UTC).isoformat()
                         run["completed_units"] += 1
@@ -592,6 +782,8 @@ class DirectorySummaryService:
                     plan["remote_called"] = True
                     if thread_id and thread_id not in run["thread_ids"]:
                         run["thread_ids"].append(thread_id)
+                    if model_call:
+                        run["model_calls"].append(model_call)
                     self._save(plan)
         finally:
             run["finished_at"] = datetime.now(UTC).isoformat()
@@ -619,7 +811,8 @@ class DirectorySummaryService:
             f"- 主题：{topics}\n"
             f"- 证据：{summary.get('evidence', '未提供')}\n"
             f"- 不确定项：{summary.get('uncertainty', '未提供')}\n"
-            f"- 处理状态：Luna有限抽样摘要，未代表全文理解，待人工复核\n\n"
+            f"- 处理状态：{self._provider_label(plan.get('provider', 'openai_luna'))}"
+            "有限抽样摘要，未代表全文理解，待人工复核\n\n"
             f"{summary.get('text', '暂无摘要')}\n"
         )
         unit_id = hashlib.sha256(
@@ -630,10 +823,10 @@ class DirectorySummaryService:
         return str(path)
 
     def _run_sample_summary(self, plan: dict, request: DirectorySummaryRunRequest) -> dict:
-        if plan.get("provider") != "openai_luna":
-            raise ValueError("当前目录抽样摘要只支持Codex Luna；DeepSeek通道尚未接通")
         if not request.allow_remote_processing:
             raise ValueError("目录摘要会发送有限文本样本，请明确开启云端处理")
+        provider = plan.get("provider", "openai_luna")
+        deepseek_gateway = self._deepseek_gateway(provider)
         pending = [unit for unit in plan["units"] if unit["state"] == "planned"]
         limit = min(request.max_units, plan.get("max_units_per_run", request.max_units))
         selected = pending[:limit]
@@ -648,6 +841,7 @@ class DirectorySummaryService:
             "completed_units": 0,
             "rejected_units": 0,
             "thread_ids": [],
+            "model_calls": [],
         }
         plan["state"] = "running"
         plan["summary_path"] = str(
@@ -655,38 +849,43 @@ class DirectorySummaryService:
         )
         self._save(plan)
         batches = [selected[index:index + 3] for index in range(0, len(selected), 3)]
-        try:
-            with CodexAgent(
+        luna_context = (
+            CodexAgent(
                 self.settings.project_root,
                 plan.get("model", "gpt-5.6-luna"),
                 instructions=DIRECTORY_SAMPLE_INSTRUCTIONS,
                 output_schema=DIRECTORY_RESULT_SCHEMA,
                 client_name="pkas_directory_sample_summary",
                 client_title="知枢目录抽样摘要",
-            ) as agent:
+            )
+            if provider == "openai_luna"
+            else nullcontext(None)
+        )
+        try:
+            with luna_context as luna_agent:
                 for batch in batches:
                     packet = self._sample_packet(batch)
-                    try:
-                        result, thread_id = agent.complete(packet)
-                        accepted = self._validate_overview_result(packet, result)
-                    except (AgentError, ValueError, TypeError):
-                        retry_packet = dict(packet)
-                        retry_packet["validation_notice"] = (
-                            "上一份结果未通过严格校验。请保证每个id恰好一次，"
-                            "evidence逐字来自对应统计，只返回JSON。"
+                    plan["remote_attempted"] = True
+                    self._save(plan)
+                    accepted, thread_id, model_call, rejection_reason = (
+                        self._complete_directory_batch(
+                            plan=plan,
+                            packet=packet,
+                            luna_agent=luna_agent,
+                            deepseek_gateway=deepseek_gateway,
+                            instructions=DIRECTORY_SAMPLE_INSTRUCTIONS,
+                            task_type="directory_sample_summary",
+                            prompt_version="directory-sample-v2",
                         )
-                        try:
-                            result, thread_id = agent.complete(retry_packet)
-                            accepted = self._validate_overview_result(retry_packet, result)
-                        except (AgentError, ValueError, TypeError) as final_error:
-                            for unit in batch:
-                                unit["state"] = "rejected"
-                                unit["rejection_reason"] = (
-                                    "model_or_validation_rejected:" + type(final_error).__name__
-                                )
-                                unit["updated_at"] = datetime.now(UTC).isoformat()
-                            run["rejected_units"] += len(batch)
-                            continue
+                    )
+                    if accepted is None:
+                        for unit in batch:
+                            unit["state"] = "rejected"
+                            unit["rejection_reason"] = rejection_reason
+                            unit["updated_at"] = datetime.now(UTC).isoformat()
+                        run["rejected_units"] += len(batch)
+                        self._save(plan)
+                        continue
                     for item in accepted:
                         unit = next(unit for unit in batch if unit["name"] == item["id"])
                         unit["state"] = "done"
@@ -701,15 +900,20 @@ class DirectorySummaryService:
                             "confidence": "sampled_files_only",
                             "review_status": "unreviewed",
                         }
-                        unit["model"] = plan.get("model", "gpt-5.6-luna")
+                        unit["model"] = model_call["model"] if model_call else plan.get(
+                            "model", "gpt-5.6-luna"
+                        )
                         unit["thread_id"] = thread_id
                         unit["derived_md_path"] = self._write_sample_summary(plan, unit)
                         unit["updated_at"] = datetime.now(UTC).isoformat()
                         run["completed_units"] += 1
                         plan["derived_md_files_written"] += 1
                     plan["cloud_called"] = True
+                    plan["remote_called"] = True
                     if thread_id and thread_id not in run["thread_ids"]:
                         run["thread_ids"].append(thread_id)
+                    if model_call:
+                        run["model_calls"].append(model_call)
                     self._save(plan)
         finally:
             run["finished_at"] = datetime.now(UTC).isoformat()

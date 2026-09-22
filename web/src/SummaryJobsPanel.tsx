@@ -3,7 +3,7 @@ import { api, post } from "./api";
 import "./summary-jobs.css";
 type Data = Record<string, any>;
 const base = "/api/foundation/summary-jobs";
-const states:Data={paused:"已暂停",running:"处理中",warning:"需核对",completed:"已完成",awaiting_agent:"等待外部Agent",budget_paused:"批次额度用完"};
+const states:Data={paused:"已暂停",running:"处理中",warning:"需核对",completed:"已完成",awaiting_agent:"等待资料理解服务",budget_paused:"批次额度用完"};
 const stages:Data={discover:"登记文件",inspect:"轻读分类",agent:"AI理解",markdown:"生成MD",done:"完成"};
 const coverage:Data={partial:"内容抽样",signature_only:"仅文件签名",failed:"读取失败"};
 const aiState:Data={pending:"待AI处理",not_requested:"本地处理",done:"AI已返回",rejected:"AI结果拒绝",unavailable:"无文字样本",stale:"来源已变化"};

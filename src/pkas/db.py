@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pkas.config import Settings, get_settings
 
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -609,6 +609,23 @@ CREATE TABLE IF NOT EXISTS capability_profile_bindings (
     PRIMARY KEY(profile_id, asset_kind, asset_id)
 );
 
+-- RPA inputs are a restricted operational ledger, not regular knowledge.
+-- They intentionally have no FTS or vector trigger: an external workflow may
+-- provide the latest message for retrieval, but it cannot silently turn every
+-- received message into general-purpose knowledge.
+CREATE TABLE IF NOT EXISTS rpa_bridge_messages (
+    id TEXT PRIMARY KEY,
+    event_key TEXT NOT NULL UNIQUE,
+    conversation_key TEXT NOT NULL,
+    sender_key TEXT,
+    message_at TEXT,
+    text_content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    redaction_count INTEGER NOT NULL DEFAULT 0,
+    received_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sources_domain ON sources(domain);
 CREATE INDEX IF NOT EXISTS idx_sources_privacy ON sources(privacy);
 CREATE INDEX IF NOT EXISTS idx_source_aliases_source_id ON source_aliases(source_id);
@@ -723,6 +740,8 @@ CREATE INDEX IF NOT EXISTS idx_capability_profiles_client
     ON capability_profiles(client_id, status);
 CREATE INDEX IF NOT EXISTS idx_capability_profile_bindings_kind
     ON capability_profile_bindings(asset_kind, asset_id);
+CREATE INDEX IF NOT EXISTS idx_rpa_bridge_messages_conversation_time
+    ON rpa_bridge_messages(conversation_key, received_at DESC);
 """
 
 

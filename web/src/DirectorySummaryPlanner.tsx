@@ -76,7 +76,7 @@ export default function DirectorySummaryPlanner() {
             <header><div><small>{selected.parent_id ? "二级分类" : "一级分类"}</small><h3>{selected.name}</h3></div><code>{selected.id}</code></header>
             <div className="taxonomy-breadcrumb"><span>全部分类</span><b>›</b>{selected.parent_id && <><span>{parents.find(item => item.id === selected.parent_id)?.name}</span><b>›</b></>}<strong>{selected.name}</strong></div>
             <label>显示名称<input aria-label={`分类名称 ${selected.id}`} value={selected.name} disabled={busy} onChange={e => updateCategory(selected.id, {name: e.target.value})} /></label>
-            {selected.parent_id ? <label>内容识别关键词<textarea aria-label={`关键词 ${selected.id}`} value={selected.keywords.join("，")} disabled={busy} onChange={e => updateCategory(selected.id, {keywords: e.target.value.split(/[,，]/)})} placeholder="多个关键词用逗号分隔"/><small>关键词用于本地初筛；Luna会结合文字样本理解用途，不会只靠关键词硬判。</small></label> : <div className="taxonomy-child-overview"><strong>包含的二级分类</strong>{children.filter(c => c.parent_id === selected.id).map(child => <button key={child.id} onClick={() => setSelectedCategory(child.id)}><span>{child.name}</span><small>{child.keywords.length ? child.keywords.slice(0, 3).join(" · ") : "由文件类型和Luna语义判断"}</small><b>查看 →</b></button>)}</div>}
+            {selected.parent_id ? <label>内容识别关键词<textarea aria-label={`关键词 ${selected.id}`} value={selected.keywords.join("，")} disabled={busy} onChange={e => updateCategory(selected.id, {keywords: e.target.value.split(/[,，]/)})} placeholder="多个关键词用逗号分隔"/><small>关键词用于本地初筛；确认后，所选模型会结合有限文字样本理解用途，不会只靠关键词硬判。</small></label> : <div className="taxonomy-child-overview"><strong>包含的二级分类</strong>{children.filter(c => c.parent_id === selected.id).map(child => <button key={child.id} onClick={() => setSelectedCategory(child.id)}><span>{child.name}</span><small>{child.keywords.length ? child.keywords.slice(0, 3).join(" · ") : "由文件类型和所选模型语义判断"}</small><b>查看 →</b></button>)}</div>}
           </> : <div className="taxonomy-empty">从左侧选择一个分类节点。</div>}
         </main>
         <aside className="taxonomy-control-pane">
@@ -109,7 +109,7 @@ export default function DirectorySummaryPlanner() {
     <ProjectMapPanel />
     <details><summary>旧版小范围检查记录</summary>
     <label className="intake-path">检查目录<input aria-label="目录摘要目录" value={path} disabled={busy} onChange={e => setPath(e.target.value)} placeholder="例如 E:\资料\某个项目" /></label>
-    <p>会读取文件签名及有限正文/结构样本。PDF抽样前中后页面，Office抽样内部结构。模型语义总结尚未接通，本次使用本地内容规则。</p>
+    <p>会读取文件签名及有限正文/结构样本。PDF抽样前中后页面，Office抽样内部结构。此旧页面只生成本地检查记录；需要模型摘要，请使用上方“AI 整理电脑资料”任务，并先明确确认有限样本的云端处理范围。</p>
     <button disabled={busy || !status || dirty || !path.trim()} onClick={() => perform(async () => {const result = await post<Data>("/api/foundation/directory-summaries/preview", {path: path.trim()}); setPlan(result.data); setHistoryId(result.data.id); setPage(0); setFilter("");})}>{busy ? "正在处理…" : "逐文件轻读并分类"}</button>
     {dirty && <p>请先保存分类规则。</p>}
     <div className="foundation-filters"><label>恢复检查记录<input aria-label="检查记录编号" value={historyId} onChange={e => setHistoryId(e.target.value)} /></label><button disabled={busy || !/^[0-9a-f]{32}$/.test(historyId)} onClick={() => perform(async () => {setPlan((await api<Data>(`/api/foundation/directory-summaries/${historyId}`)).data); setPage(0); setFilter("");})}>读取记录</button></div>

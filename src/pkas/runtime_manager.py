@@ -140,6 +140,8 @@ class RuntimeManager:
             if action == "stop":
                 if not running:
                     raise ValueError("不能停止非本管理器启动的进程")
+                if process is None:
+                    raise ValueError("运行进程状态异常，已拒绝停止操作")
                 if name == "indexer":
                     self.stopping.add(name)
                     (self.settings.data_root / "runtime" / "indexer.stop").touch()

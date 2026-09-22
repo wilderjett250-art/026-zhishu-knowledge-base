@@ -8,9 +8,36 @@ from pkas.api import create_app
 from pkas.capability_registry import _stable_id
 from pkas.config import Settings
 from pkas.db import CURRENT_SCHEMA_VERSION, Database
+from pkas.machine_catalog import MachineCatalogConflict
 from pkas.system import KnowledgeSystem
 
 WEFLOW_FIXTURE = Path(__file__).parent / "fixtures" / "weflow_chatlab_private.json"
+
+
+def test_machine_catalog_conflict_is_an_explicit_api_conflict(
+    test_settings: Settings, monkeypatch
+) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        catalog = app.state.system.machine_catalog
+
+        def blocked(_job_id: str) -> dict:
+            raise MachineCatalogConflict("另一项A库索引正在当前程序中运行，不能暂停此任务。")
+
+        monkeypatch.setattr(catalog, "pause", blocked)
+        response = client.post("/api/foundation/machine-catalog/example/pause")
+
+    assert response.status_code == 409
+    assert "另一项A库索引" in response.json()["detail"]
+
+
+def test_api_rejects_non_loopback_clients_before_any_data_route(test_settings: Settings) -> None:
+    with TestClient(create_app(test_settings), client=("198.51.100.9", 51234)) as client:
+        response = client.get("/api/runtime/ping")
+
+    assert response.status_code == 403
+    assert response.headers["cache-control"] == "no-store"
+    assert "pkas-runtime" not in response.text
 
 
 def test_api_startup_initializes_main_database_once(test_settings: Settings, monkeypatch) -> None:

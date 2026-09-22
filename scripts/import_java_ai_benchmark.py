@@ -1,10 +1,9 @@
-"""Import the user-authorized local Java AI/Skill/MCP benchmark corpus."""
+"""Import an explicitly selected Java AI/Skill/MCP benchmark corpus."""
 
+import argparse
 from pathlib import Path
 
 from pkas.system import KnowledgeSystem
-
-SOURCE_ROOT = Path(r"E:\wordspace\7.26\java-ai-materials_20260803")
 
 CURATED_PATHS = [
     "INDEX.md",
@@ -48,13 +47,26 @@ GOLDEN_CASES = [
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Import the curated Java AI benchmark from an explicitly supplied directory."
+    )
+    parser.add_argument(
+        "source_root",
+        type=Path,
+        help="Root directory containing the curated benchmark files.",
+    )
+    args = parser.parse_args()
+    source_root = args.source_root.expanduser().resolve()
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"Benchmark source directory does not exist: {source_root}")
+
     system = KnowledgeSystem.create()
     system.database.initialize()
     source_ids: dict[str, str] = {}
     imported = 0
     reused = 0
     for relative in CURATED_PATHS:
-        path = SOURCE_ROOT / relative
+        path = source_root / relative
         if not path.is_file():
             raise FileNotFoundError(path)
         result = system.ingestion.import_file(path, domain="work", privacy="private")

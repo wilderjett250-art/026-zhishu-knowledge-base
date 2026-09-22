@@ -27,9 +27,8 @@ Windows 桌面版用 Tauri 提供正式安装、窗口与托盘；网页控制�
 构建机需要本项目的 Rust 工具链、Node.js/npm 和联网能力；这些是构建依赖，不是用户的安装依赖。先准备 `web/node_modules`，然后运行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  E:\codex-kb\scripts\build_tauri_desktop.ps1 `
-  -Mode Installer
+$repoRoot = (Resolve-Path ..).Path
+& "$repoRoot\scripts\build_tauri_desktop.ps1" -Mode Installer
 ```
 
 构建脚本先构建网页，再按 `config/desktop_runtime.json` 下载并校验 uv、Qdrant 与 Node.js 官方发布包，并校验随仓库维护的 Everything 可执行文件，最后生成当前用户安装版。安装包和 Rust 构建缓存优先输出到 I 盘，缺少 I 盘时使用 G 盘。生成的包位于构建目录 `tauri-target\release\bundle\nsis`。

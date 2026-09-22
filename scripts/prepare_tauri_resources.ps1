@@ -37,6 +37,44 @@ function Get-Sha256 {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-PackagedPythonSourceFiles {
+    param([Parameter(Mandatory)][string]$SourceRoot)
+
+    # Python bytecode is a machine-local cache, not application source.  It
+    # must neither affect the package identity nor be accidentally bundled.
+    @(Get-ChildItem -LiteralPath $SourceRoot -File -Recurse | Where-Object {
+        $_.Extension -ne '.pyc' -and $_.FullName -notmatch '\\__pycache__(\\|$)'
+    })
+}
+
+function Assert-StagedPythonSource {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$StagedRoot,
+        [Parameter(Mandatory)][System.IO.FileInfo[]]$SourceFiles
+    )
+
+    $stagedFiles = Get-PackagedPythonSourceFiles -SourceRoot $StagedRoot
+    if ($stagedFiles.Count -ne $SourceFiles.Count) {
+        throw "The staged Python source file count does not match the source tree: $($stagedFiles.Count) staged vs $($SourceFiles.Count) source."
+    }
+
+    foreach ($sourceFile in $SourceFiles) {
+        $relative = $sourceFile.FullName.Substring($SourceRoot.Length).TrimStart('\\')
+        $stagedFile = Join-Path $StagedRoot $relative
+        if (-not (Test-Path -LiteralPath $stagedFile -PathType Leaf)) {
+            throw "The staged Python source tree is missing: $relative"
+        }
+        $stagedInfo = Get-Item -LiteralPath $stagedFile
+        if ($sourceFile.Length -ne $stagedInfo.Length -or
+            (Get-Sha256 -Path $sourceFile.FullName) -ne (Get-Sha256 -Path $stagedFile)) {
+            throw "The staged Python source tree does not match: $relative"
+        }
+    }
+
+    $stagedFiles
+}
+
 function Get-DependencyLockSha256 {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -174,11 +212,39 @@ try {
         throw 'A runtime executable changed while being copied into the application resource tree.'
     }
 
+    $pythonSourceRoot = Join-Path $resolvedRoot 'src\pkas'
+    $pythonSourceFiles = Get-PackagedPythonSourceFiles -SourceRoot $pythonSourceRoot
+    # Keep the build-only source staging tree outside runtime/tauri-payload.
+    # The payload directory itself is bundled as runtime/, so keeping it there
+    # would duplicate every Python module in the finished installer.
+    $stagedPythonSource = Join-Path $resolvedRoot 'runtime\tauri-source'
+    if (Test-Path -LiteralPath $stagedPythonSource) {
+        Remove-Item -LiteralPath $stagedPythonSource -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $stagedPythonSource -Force | Out-Null
+    foreach ($sourceFile in $pythonSourceFiles) {
+        $relative = $sourceFile.FullName.Substring($pythonSourceRoot.Length).TrimStart('\')
+        $destination = Join-Path $stagedPythonSource $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $sourceFile.FullName -Destination $destination -Force
+    }
+    $stagedPythonSourceFiles = Assert-StagedPythonSource `
+        -SourceRoot $pythonSourceRoot `
+        -StagedRoot $stagedPythonSource `
+        -SourceFiles $pythonSourceFiles
+
+    # A prior package format staged the same files inside the runtime payload.
+    # It is generated build state only and must not be bundled as a duplicate.
+    $legacyStagedPythonSource = Join-Path $runtimePayload 'pkas-source'
+    if (Test-Path -LiteralPath $legacyStagedPythonSource) {
+        Remove-Item -LiteralPath $legacyStagedPythonSource -Recurse -Force
+    }
+
     $inputs = @(
         Get-Item -LiteralPath (Join-Path $resolvedRoot 'pyproject.toml')
         Get-Item -LiteralPath (Join-Path $resolvedRoot 'uv.lock')
         Get-Item -LiteralPath (Join-Path $resolvedRoot 'README.md')
-    ) + @(Get-ChildItem -LiteralPath (Join-Path $resolvedRoot 'src\pkas') -File -Recurse)
+    ) + @($pythonSourceFiles)
     $sourceParts = @(
         $inputs | Sort-Object FullName | ForEach-Object {
             $relative = $_.FullName.Substring($resolvedRoot.Length).TrimStart('\')
@@ -212,7 +278,9 @@ try {
         node_sha256 = Get-Sha256 -Path (Join-Path $nodeDestination 'node.exe')
         npm_cli_sha256 = Get-Sha256 -Path (Join-Path $nodeDestination 'node_modules\npm\bin\npm-cli.js')
         everything_version = [string]$runtimeConfig.everything.version
+        packaged_python_source_files = $stagedPythonSourceFiles.Count
         everything_sha256 = Get-Sha256 -Path $everythingExecutable
+        rpa_loopback_helper_sha256 = Get-Sha256 -Path (Join-Path $resolvedRoot 'scripts\configure_rpa_loopback.ps1')
         manual_weflow_helper_sha256 = Get-Sha256 -Path (Join-Path $resolvedRoot 'scripts\configure_weflow_manual.mjs')
     }
     $manifestPath = Join-Path $runtimePayload 'desktop-runtime.json'
@@ -227,6 +295,7 @@ try {
         qdrant_version = $runtimeConfig.qdrant.version
         node_version = $runtimeConfig.node.version
         everything_version = $runtimeConfig.everything.version
+        packaged_python_source_files = $stagedPythonSourceFiles.Count
         source_file_count = $inputs.Count
         uv_archive_sha256 = $runtimeConfig.uv.sha256
         qdrant_archive_sha256 = $runtimeConfig.qdrant.sha256

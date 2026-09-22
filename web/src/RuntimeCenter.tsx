@@ -4,13 +4,17 @@ import "./runtime-center.css";
 
 type Service = { id: string; name: string; status: string; owned: boolean; controllable: boolean; detail: string };
 type Operation = { channel: string; operation: string; calls: number; failures: number; warnings: number; average_ms: number };
+type FailureDetail = { channel: string; operation: string; reason: string; calls: number; last_seen_at: string | null };
 type ThreadJournal = {
   enabled: boolean; running: boolean; interval_days: number; last_status: string;
   last_completed_at: string | null; last_result: { summaries_written?: number; pending_files?: number; completed_files?: number } | null;
 };
 type State = {
   services: Service[];
-  usage: { days: number; calls: number | null; success_rate: number | null; operations: Operation[]; coverage: string };
+  usage: {
+    days: number; calls: number | null; success_rate: number | null; operations: Operation[];
+    failure_count?: number; failure_details?: FailureDetail[]; failure_detail_coverage?: string; coverage: string;
+  };
   queues: Record<string, Record<string, number>>;
   thread_journal: ThreadJournal;
 };
@@ -22,6 +26,35 @@ const RUNTIME_CACHE_KEY = "pkas.runtime.overview.v2";
 const RUNTIME_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const serviceLabels: Record<string, string> = { running: "可用", starting: "正在启动", stopping: "正在停止", stopped: "已关闭", external: "可用", not_managed: "未开启", failed: "需要检查" };
 const queueLabels: Record<string, string> = { pending: "等待处理", processing: "处理中", completed: "历史完成", failed: "失败", skipped: "无需处理" };
+const apiOperationLabels: Record<string, string> = {
+  "/api/capabilities/overview": "功能总览读取",
+  "/api/capabilities/profiles": "功能方案读取",
+  "/api/capabilities/clients/config": "客户端配置读取",
+};
+const mcpOperationLabels: Record<string, string> = {
+  search_knowledge: "知识库检索",
+  get_knowledge_status: "知识库状态读取",
+  list_sources: "资料来源读取",
+};
+
+function operationLabel(channel: string, operation: string) {
+  if (channel === "mcp") return mcpOperationLabels[operation] ?? "知识库工具调用";
+  if (apiOperationLabels[operation]) return apiOperationLabels[operation];
+  if (operation.includes("/mcp/") && operation.endsWith("/probe")) return "MCP 连通性检查";
+  if (operation.startsWith("/api/capabilities/")) return "功能管理操作";
+  if (operation.startsWith("/api/weflow/")) return "微信导入管理操作";
+  return "本机功能调用";
+}
+
+function channelLabel(channel: string) {
+  return channel === "mcp" ? "知识库 MCP" : channel === "api" ? "桌面应用" : "本机服务";
+}
+
+function formatRecordedTime(value: string | null) {
+  if (!value) return "时间未记录";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "时间未记录" : date.toLocaleString();
+}
 
 function total(states: Record<string, number> | undefined, names: string[]) {
   return names.reduce((sum, name) => sum + (states?.[name] ?? 0), 0);
@@ -123,6 +156,8 @@ export default function RuntimeCenter() {
   const waiting = total(vectorQueue, ["pending", "processing"]);
   const failed = total(vectorQueue, ["failed"]);
   const backgroundPending = total(backgroundQueue, ["pending", "processing", "failed"]);
+  const usageFailureCount = data?.usage.failure_count ?? data?.usage.operations.reduce((sum, item) => sum + item.failures, 0) ?? 0;
+  const usageFailureDetails = data?.usage.failure_details ?? [];
   const threadJournal = serviceState?.thread_journal;
   const systemState = connection === "offline" ? "本机服务需要检查" : connection === "connected" ? (detailsLoading ? "本机服务已连接" : "知识库状态已更新") : "正在连接本机服务";
   const systemDescription = connection === "offline"
@@ -188,8 +223,13 @@ export default function RuntimeCenter() {
       {data && <>
         <section className="runtime-usage">
           <header><div><small>最近 {data.usage.days ?? 7} 天</small><h2>使用情况</h2></div><p>这里只表示系统调用是否成功，不代表回答一定准确。</p></header>
-          <div className="runtime-metrics"><article><strong>{data.usage.calls ?? "—"}</strong><span>已观测调用</span></article><article><strong>{data.usage.success_rate === null ? "—" : `${(data.usage.success_rate * 100).toFixed(1)}%`}</strong><span>技术调用成功</span></article><article><strong>{data.usage.operations.length}</strong><span>使用过的功能</span></article></div>
-          <details><summary>查看调用明细</summary>{data.usage.operations.length ? <table><thead><tr><th>功能</th><th>次数</th><th>失败</th><th>平均耗时</th></tr></thead><tbody>{data.usage.operations.map((item) => <tr key={item.channel + item.operation}><td>{item.operation.replace("/api/", "")}</td><td>{item.calls}</td><td>{item.failures}</td><td>{item.average_ms} ms</td></tr>)}</tbody></table> : <p>还没有可显示的使用记录。</p>}<p className="runtime-footnote">{data.usage.coverage}</p></details>
+          <div className="runtime-metrics"><article><strong>{data.usage.calls ?? "—"}</strong><span>已观测调用</span></article><article><strong>{data.usage.success_rate === null ? "—" : `${(data.usage.success_rate * 100).toFixed(1)}%`}</strong><span>技术调用成功</span></article><article><strong>{data.usage.operations.length}</strong><span>使用过的功能</span></article><article className={usageFailureCount ? "attention" : ""}><strong>{usageFailureCount}</strong><span>需要说明的失败</span></article></div>
+          {usageFailureCount > 0 && <section className="runtime-failure-summary" aria-label="最近失败原因">
+            <header><div><small>失败说明</small><h3>这 {usageFailureCount} 次调用为什么没有完成？</h3><p>这里只保存固定的失败类别，不保存你的问题、文件路径、聊天内容或异常原文。</p></div><span>{usageFailureDetails.length ? "已记录原因" : "历史记录"}</span></header>
+            {usageFailureDetails.length ? <div className="runtime-failure-list">{usageFailureDetails.slice(0, 5).map((item) => <article key={`${item.channel}:${item.operation}:${item.reason}`}><div><strong>{operationLabel(item.channel, item.operation)}</strong><span>{channelLabel(item.channel)} · 最近 {formatRecordedTime(item.last_seen_at)}</span></div><p>{item.reason}</p><b>{item.calls} 次</b></article>)}</div> : <div className="runtime-failure-legacy"><strong>这些是旧版汇总记录</strong><p>{data.usage.failure_detail_coverage ?? "旧记录尚未保存原因；新的失败会自动按安全类别归纳。"}</p></div>}
+            <details><summary>查看完整失败明细</summary>{usageFailureDetails.length ? <table><thead><tr><th>功能</th><th>记录来源</th><th>原因</th><th>次数</th><th>最近一次</th></tr></thead><tbody>{usageFailureDetails.map((item) => <tr key={`${item.channel}:${item.operation}:${item.reason}:all`}><td>{operationLabel(item.channel, item.operation)}</td><td>{channelLabel(item.channel)}</td><td>{item.reason}</td><td>{item.calls}</td><td>{formatRecordedTime(item.last_seen_at)}</td></tr>)}</tbody></table> : <p>没有可追溯的历史原因；从本次升级后的新失败开始记录。</p>}</details>
+          </section>}
+          <details><summary>查看调用明细</summary>{data.usage.operations.length ? <table><thead><tr><th>功能</th><th>次数</th><th>失败</th><th>平均耗时</th></tr></thead><tbody>{data.usage.operations.map((item) => <tr key={item.channel + item.operation}><td>{operationLabel(item.channel, item.operation)}<small>{channelLabel(item.channel)}</small></td><td>{item.calls}</td><td>{item.failures}</td><td>{item.average_ms} ms</td></tr>)}</tbody></table> : <p>还没有可显示的使用记录。</p>}<p className="runtime-footnote">{data.usage.coverage}</p></details>
         </section>
         <details className="runtime-advanced"><summary>技术详情与历史任务</summary>
           <div className="runtime-service-list">{data.services.map((service) => <article key={service.id}><div><strong>{service.name}</strong><span>{serviceLabels[service.status] ?? service.status}</span></div><p>{service.detail}</p></article>)}</div>
@@ -200,7 +240,7 @@ export default function RuntimeCenter() {
 
     {confirm && <section className="runtime-confirm" role="dialog" aria-label="确认运行操作">
       <small>确认操作</small><h3>{confirm.id === "qdrant" ? (confirm.action === "start" ? "开启语义搜索？" : "关闭语义搜索？") : (confirm.action === "start" ? "处理待索引资料？" : "停止处理资料？")}</h3>
-      <p>{confirm.id === "indexer" ? "只处理已经进入队列的资料，可能调用 Embedding API；不会同步微信，也不会运行 Agent。" : "关闭后仍能按关键词搜索，但暂时不能按相近含义搜索。"}</p>
+      <p>{confirm.id === "indexer" ? "只处理已经进入队列的资料，可能调用 Embedding API；不会同步微信，也不会触发历史兼容模块。" : "关闭后仍能按关键词搜索，但暂时不能按相近含义搜索。"}</p>
       <footer><button disabled={busy} onClick={() => setConfirm(null)}>取消</button><button className="primary" disabled={busy} onClick={() => void act()}>确认</button></footer>
     </section>}
   </div>;

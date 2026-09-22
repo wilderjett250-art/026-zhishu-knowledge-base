@@ -34,7 +34,10 @@ def structured_sample(path: Path, detected: str) -> tuple[str, str, list[str]]:
             pages = sorted({0, document.page_count // 2, document.page_count - 1})
             for page in pages:
                 if page >= 0:
-                    parts.append(f"第{page + 1}页：" + document[page].get_text()[:1800])
+                    page_text = document[page].get_text("text")
+                    if not isinstance(page_text, str):
+                        page_text = str(page_text)
+                    parts.append(f"第{page + 1}页：" + page_text[:1800])
             return detected, "\n".join(parts), [f"抽样{len(pages)}页/共{document.page_count}页"]
     if detected != "zip_container":
         return detected, "", []

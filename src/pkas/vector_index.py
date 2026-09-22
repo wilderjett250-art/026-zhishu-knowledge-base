@@ -120,7 +120,7 @@ class QdrantVectorIndex:
         return QdrantClient(
             url=self.settings.qdrant_url,
             api_key=api_key,
-            timeout=max(0.5, min(2.0, float(self.settings.embedding_timeout_seconds))),
+            timeout=max(1, min(2, int(self.settings.embedding_timeout_seconds))),
         )
 
     def runtime_status(self) -> dict[str, Any]:

@@ -30,7 +30,7 @@ mcp = MCPServer(
         "回复客户时只生成草稿，不直接发送微信消息。普通资料检索由 Codex 自己编排，"
         "本地同步和检索不消耗生成模型 Token。"
     ),
-    version="0.1.13",
+    version="0.1.18",
 )
 
 _SYSTEM: KnowledgeSystem | None = None
@@ -126,7 +126,7 @@ def envelope(
 @observe_tool
 def search_knowledge(
     query: str,
-    domain: str | None = None,
+    domain: Literal["work", "self", "shared", "distill"] | None = None,
     limit: int = 10,
     include_restricted: bool = False,
     include_unverified_claims: bool = False,

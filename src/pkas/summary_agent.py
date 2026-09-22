@@ -201,7 +201,10 @@ class CodexAgent:
 
     def _reader(self):
         try:
-            for line in iter(self.proc.stdout.readline, b""):
+            stdout = self.proc.stdout
+            if stdout is None:
+                return
+            for line in iter(stdout.readline, b""):
                 if len(line) > 2_000_000:
                     break
                 try:
@@ -217,8 +220,11 @@ class CodexAgent:
                 self.messages.put(None, timeout=1)
 
     def send(self, message):
-        self.proc.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
-        self.proc.stdin.flush()
+        stdin = self.proc.stdin
+        if stdin is None:
+            raise AgentError("Codex连接不可写；请重新启动本地整理任务")
+        stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
+        stdin.flush()
 
     def next(self, deadline):
         while time.monotonic() < deadline:

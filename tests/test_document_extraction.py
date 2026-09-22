@@ -41,7 +41,93 @@ def test_jsonl_message_blocks_preserve_time_and_speaker(
 
     expected = "[2026-08-07 10:00:00 · 客户甲] 需要更新项目排期"
     assert parsed.blocks[0].text == expected
+    assert parsed.blocks[0].metadata == {
+        "message_sequence": 0,
+        "speaker": "客户甲",
+        "sent_at": "2026-08-07 10:00:00",
+    }
     assert chunks[0]["text"] == expected
+
+
+def test_code_parser_and_chunks_preserve_indentation(
+    test_settings: Settings,
+    source_root: Path,
+) -> None:
+    path = source_root / "service.py"
+    path.write_text(
+        "def answer():\n    if True:\n        return 'kept'\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_file(path, settings=test_settings)
+    chunks = chunk_document(parsed, max_chars=200)
+
+    assert [block.kind for block in parsed.blocks] == ["code-symbol"]
+    assert parsed.metadata["code_structure"] == "python_ast_top_level_symbols"
+    assert parsed.blocks[0].metadata["symbol_name"] == "answer"
+    assert "    if True:" in parsed.text
+    assert "        return 'kept'" in parsed.text
+    assert chunks[0]["chunk_kind"] == "code-symbol"
+    assert "    if True:" in chunks[0]["text"]
+    assert "        return 'kept'" in chunks[0]["text"]
+
+
+def test_python_ast_symbol_chunks_keep_top_level_functions_separate(
+    test_settings: Settings,
+    source_root: Path,
+) -> None:
+    path = source_root / "symbols.py"
+    path.write_text(
+        "import os\n\n"
+        "@decorator\n"
+        "def first(value):\n"
+        "    return value + 1\n\n"
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        return 'ok'\n\n"
+        "async def second():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_file(path, settings=test_settings)
+    chunks = chunk_document(parsed, max_chars=500)
+
+    assert [block.kind for block in parsed.blocks] == [
+        "code",
+        "code-symbol",
+        "code-symbol",
+        "code-symbol",
+    ]
+    assert [block.metadata.get("symbol_name") for block in parsed.blocks[1:]] == [
+        "first",
+        "Worker",
+        "second",
+    ]
+    assert [chunk["chunk_kind"] for chunk in chunks] == [
+        "code",
+        "code-symbol",
+        "code-symbol",
+        "code-symbol",
+    ]
+    assert all(
+        not ("def first" in chunk["text"] and "async def second" in chunk["text"])
+        for chunk in chunks
+    )
+    assert chunks[1]["locator"].startswith("python:symbol:function:first:")
+
+
+def test_python_syntax_error_uses_lossless_line_fallback(
+    test_settings: Settings,
+    source_root: Path,
+) -> None:
+    path = source_root / "broken.py"
+    path.write_text("def broken(:\n    return 1\n", encoding="utf-8")
+
+    parsed = parse_file(path, settings=test_settings)
+
+    assert parsed.metadata["code_structure"] == "line_fallback_syntax_error"
+    assert [block.kind for block in parsed.blocks] == ["code", "code"]
 
 
 def test_invalid_json_falls_back_to_readable_text_with_quality_warning(
@@ -852,7 +938,7 @@ def test_semantic_chunking_preserves_block_locators() -> None:
             "locator": "page:1/block:1..page:1/block:2",
             "block_sequences": [0, 1],
             "chunk_kind": "document-section",
-            "chunker_version": "typed-v2",
+            "chunker_version": "typed-v3",
         }
     ]
 
@@ -899,13 +985,67 @@ def test_typed_chunking_uses_table_message_and_code_profiles() -> None:
     assert all(chunk["chunk_kind"] == "table-rows" for chunk in table_chunks)
     assert all("编号 | 状态" in chunk["text"] for chunk in table_chunks)
     assert len(message_chunks) == 2
-    assert all(chunk["chunk_kind"] == "message-window" for chunk in message_chunks)
+    assert all(chunk["chunk_kind"] == "message-thread" for chunk in message_chunks)
     assert all(len(chunk["block_sequences"]) <= 30 for chunk in message_chunks)
     assert len(code_chunks) >= 2
     assert all(chunk["chunk_kind"] == "code" for chunk in code_chunks)
 
 
-def test_typed_v2_uses_each_table_own_header() -> None:
+def test_message_chunks_preserve_reply_links_without_guessing_topic() -> None:
+    messages = ParsedDocument(
+        title="客户会话",
+        text="",
+        parser_name="test",
+        blocks=[
+            ParsedBlock(
+                kind="message",
+                text="客户：请确认周五可否交付",
+                locator="record:0",
+                metadata={
+                    "message_metadata": {
+                        "conversation_id": "customer-a",
+                        "message_id": "m-1",
+                        "sent_at": "2026-09-22T10:00:00+08:00",
+                    }
+                },
+            ),
+            ParsedBlock(
+                kind="message",
+                text="我：可以，具体内容稍后确认",
+                locator="record:1",
+                metadata={
+                    "message_metadata": {
+                        "conversation_id": "customer-a",
+                        "message_id": "m-2",
+                        "reply_to": "m-1",
+                        "sent_at": "2026-09-22T13:30:00+08:00",
+                    }
+                },
+            ),
+            ParsedBlock(
+                kind="message",
+                text="客户：另一个问题需要后续讨论",
+                locator="record:2",
+                metadata={
+                    "message_metadata": {
+                        "conversation_id": "customer-a",
+                        "message_id": "m-3",
+                        "sent_at": "2026-09-22T16:30:00+08:00",
+                    }
+                },
+            ),
+        ],
+    )
+
+    chunks = chunk_document(messages, max_chars=800)
+
+    assert [chunk["block_sequences"] for chunk in chunks] == [[0, 1], [2]]
+    assert [chunk["chunk_kind"] for chunk in chunks] == ["message-thread", "message-thread"]
+    assert "周五可否交付" in chunks[0]["text"]
+    assert "另一个问题" not in chunks[0]["text"]
+
+
+def test_typed_v3_uses_each_table_own_header() -> None:
     parsed = ParsedDocument(
         title="多表格",
         text="",
@@ -981,7 +1121,7 @@ def test_ingested_chunks_have_resolvable_block_relations(
         ).fetchall()
     assert blocks >= 2
     assert orphans == 0
-    assert [row[0] for row in versions] == ["typed-v2"]
+    assert [row[0] for row in versions] == ["typed-v3"]
 
 
 def test_text_metrics_report_recall_and_precision_separately() -> None:

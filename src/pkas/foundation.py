@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar, cast
 
-from pkas.ingest import SKIP_DIRECTORIES
+from pkas.ingest import CHUNKER_VERSION, SKIP_DIRECTORIES
 
 
 def suggested_scopes() -> dict:
@@ -144,6 +144,92 @@ class FoundationService:
                 "目录状态是上次扫描结果；打开页面不会扫描、导入或调用模型。",
                 "无向量登记不等于正在排队；索引台账不等于向量服务在线。",
             ],
+        }
+
+    def ledger_summary(self) -> dict:
+        """Return the fast, user-facing state of the local knowledge ledger.
+
+        This intentionally avoids counting the FTS virtual table.  On a large
+        database that count can turn a simple page visit into a full-table
+        verification.  The detailed comparison remains available through an
+        explicit user action in :meth:`documents`.
+        """
+        with self.connect() as c:
+            roots = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT id,name,root_uri,connector_type,sync_mode,enabled,last_scan_at "
+                    "FROM sync_roots ORDER BY name COLLATE NOCASE"
+                )
+            ]
+            catalog_states = dict(
+                c.execute("SELECT state,count(*) FROM sync_items GROUP BY state").fetchall()
+            )
+            documents = int(
+                c.execute(
+                    "SELECT count(*) FROM sources WHERE status='indexed' "
+                    "AND source_type NOT IN ('codex-turn','thread-summary','thread-journal')"
+                ).fetchone()[0]
+            )
+            chunks = int(c.execute("SELECT count(*) FROM chunks").fetchone()[0])
+            vectors = int(c.execute("SELECT count(*) FROM vector_index_state").fetchone()[0])
+            failed_catalog_items = int(
+                c.execute("SELECT count(*) FROM sync_items WHERE state='error'").fetchone()[0]
+            )
+            # This only proves the FTS table can be opened.  A complete row-count
+            # comparison is deliberately deferred to an explicit deep check.
+            c.execute("SELECT 1 FROM chunks_fts LIMIT 1").fetchone()
+
+        vector_summary = (
+            "尚未登记向量" if not chunks else f"已登记 {vectors:,} / {chunks:,} 个切片"
+        )
+        return {
+            "checked_at": datetime.now(UTC).isoformat(),
+            "roots": roots,
+            "catalog_states": catalog_states,
+            "summary": {
+                "documents": documents,
+                "chunks": chunks,
+                "vectors": vectors,
+                "failed_catalog_items": failed_catalog_items,
+            },
+            "checks": [
+                {
+                    "id": "source_ledger",
+                    "title": "资料来源台账",
+                    "status": "ready",
+                    "summary": f"已登记 {len(roots):,} 个资料源；不会重新扫描磁盘。",
+                },
+                {
+                    "id": "content_records",
+                    "title": "可检索资料",
+                    "status": "ready",
+                    "summary": f"{documents:,} 份资料已建立正文记录，{chunks:,} 个切片可供检索。",
+                },
+                {
+                    "id": "fulltext_deep_check",
+                    "title": "全文深度对账",
+                    "status": "not_checked",
+                    "summary": "为了保持页面响应速度，尚未逐行比对全文索引；需要时可手动执行。",
+                },
+                {
+                    "id": "vector_records",
+                    "title": "语义向量登记",
+                    "status": "ready" if vectors or not chunks else "attention",
+                    "summary": vector_summary,
+                },
+                {
+                    "id": "catalog_failures",
+                    "title": "目录索引异常",
+                    "status": "attention" if failed_catalog_items else "ready",
+                    "summary": (
+                        f"有 {failed_catalog_items:,} 条目录记录需要复查。"
+                        if failed_catalog_items
+                        else "当前没有已记录的目录读取失败。"
+                    ),
+                },
+            ],
+            "note": "先显示轻量状态；深度全文对账和逐盘清单只在你主动展开时读取。",
         }
 
     def analytics(self, days: int = 30) -> dict:
@@ -548,7 +634,9 @@ class FoundationService:
             ),
         }
 
-    def documents(self, limit: int = 50, offset: int = 0) -> dict:
+    def documents(
+        self, limit: int = 50, offset: int = 0, *, verify_fulltext: bool = False
+    ) -> dict:
         with self.connect() as c:
             total = c.execute(
                 "SELECT count(*) FROM sources WHERE status='indexed' AND source_type<>'codex-turn'"
@@ -562,14 +650,15 @@ class FoundationService:
                 (limit, offset),
             ).fetchall()
             total_chunks = int(c.execute("SELECT count(*) FROM chunks").fetchone()[0])
-            total_fts_rows = int(c.execute("SELECT count(*) FROM chunks_fts").fetchone()[0])
-            # chunks_fts is a virtual table whose rowid is deliberately unrelated
-            # to chunks.rowid.  Fetching every unindexed chunk_id for each ledger
-            # page used to cost a full 190k-row materialization.  The repository
-            # writes chunks and FTS entries in the same transaction, so expose the
-            # fast database-wide count consistency status and keep per-file counts
-            # for chunks/vector records only.
-            fts_consistent = total_chunks == total_fts_rows
+            total_fts_rows: int | None = None
+            fts_consistent: bool | None = None
+            if verify_fulltext:
+                # chunks_fts is a virtual table whose rowid is deliberately
+                # unrelated to chunks.rowid.  The count is useful evidence, but
+                # it can be expensive for a large archive, so only run it after
+                # the user explicitly requests a deep ledger check.
+                total_fts_rows = int(c.execute("SELECT count(*) FROM chunks_fts").fetchone()[0])
+                fts_consistent = total_chunks == total_fts_rows
             source_ids = [str(source["id"]) for source in sources]
             chunks_by_source: dict[str, list[sqlite3.Row]] = {
                 source_id: [] for source_id in source_ids
@@ -618,14 +707,25 @@ class FoundationService:
                         "path": source["original_uri"],
                         "type": source["source_type"],
                         "chunks": n,
-                        "fts_chunks": n if fts_consistent else None,
+                        "fts_chunks": n if fts_consistent is True else None,
                         "vector_chunks": vectors,
-                        "fulltext": "indexed" if n and fts_consistent else "needs_global_check",
+                        "fulltext": (
+                            "indexed"
+                            if n and fts_consistent is True
+                            else "needs_global_check"
+                            if fts_consistent is False
+                            else "recorded"
+                            if n
+                            else "no_chunks"
+                        ),
                         "vector": "recorded" if n and vectors == n else "not_fully_recorded",
                         "quality": "attention" if attention else "not_manually_verified",
                         "quality_reasons": quality_reasons,
                         "visual_pages": visual_pages,
-                        "typed_v2": sum(r["chunker_version"] == "typed-v2" for r in chunks),
+                        "chunker_version": CHUNKER_VERSION,
+                        "typed_current": sum(
+                            r["chunker_version"] == CHUNKER_VERSION for r in chunks
+                        ),
                         "parser_version": source["parser_version"],
                         "parsing": (
                             "current"
@@ -640,12 +740,29 @@ class FoundationService:
             "offset": offset,
             "limit": limit,
             "note": (
-                "全文索引存在不证明提取完整；当前页按全库切片/FTS 行数一致性显示，"
-                "不再为每次翻页扫描全部 FTS ID。向量仅核对登记数量，不证明服务在线。"
+                "正文切片记录不等于提取质量已人工确认；向量登记也不等于向量服务在线。"
+                if verify_fulltext
+                else "当前先读取文件明细，不做全库全文行数比对；需要时可手动执行深度对账。"
             ),
             "fts_consistent": fts_consistent,
             "total_chunks": total_chunks,
             "total_fts_rows": total_fts_rows,
+            "fulltext_check": {
+                "status": (
+                    "consistent"
+                    if fts_consistent is True
+                    else "attention"
+                    if fts_consistent is False
+                    else "not_checked"
+                ),
+                "summary": (
+                    "切片与全文索引行数一致。"
+                    if fts_consistent is True
+                    else "切片与全文索引行数不一致，需要检查。"
+                    if fts_consistent is False
+                    else "尚未执行全库全文行数对账。"
+                ),
+            },
         }
 
     def files(self, *, root_id: str, state: str, limit: int = 50, offset: int = 0) -> dict:

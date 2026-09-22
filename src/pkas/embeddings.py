@@ -20,8 +20,11 @@ _RECOVERABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 class EmbeddingProvider(Protocol):
-    provider_name: str
-    model_name: str
+    @property
+    def provider_name(self) -> str: ...
+
+    @property
+    def model_name(self) -> str: ...
 
     @property
     def enabled(self) -> bool: ...

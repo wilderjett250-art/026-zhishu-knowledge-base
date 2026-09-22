@@ -464,7 +464,17 @@ def _merge_documents(
         )
         blocks = [block for _index, block in indexed_blocks]
 
-    text = "\n\n".join(block.text.strip() for block in blocks if block.text.strip()).strip()
+    text_parts: list[str] = []
+    previous_code = False
+    for block in blocks:
+        block_text = block.text.rstrip() if block.kind == "code" else block.text.strip()
+        if not block_text.strip():
+            continue
+        if text_parts:
+            text_parts.append("\n" if previous_code and block.kind == "code" else "\n\n")
+        text_parts.append(block_text)
+        previous_code = block.kind == "code"
+    text = "".join(text_parts).strip()
     if not text:
         raise ParseError("文件中没有可索引文字。")
     extractors = [candidate.parser_name for candidate in candidates]

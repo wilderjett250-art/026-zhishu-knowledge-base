@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "知域",
-  "version": "0.1.13",
+  "version": "0.1.18",
   "identifier": "com.zhishu.pkas",
   "build": {
     "frontendDist": "../../web/dist"
@@ -21,13 +21,15 @@
     "longDescription": "帮助个人整理本机资料、建立可追溯的全文与向量检索，并连接兼容的 AI 客户端。",
     "icon": ["icons/icon.ico"],
     "resources": {
-      "../../src/pkas/": "pkas-app/src/pkas/",
+      "../../runtime/tauri-source/": "pkas-app/src/pkas/",
       "../../pyproject.toml": "pkas-app/pyproject.toml",
       "../../uv.lock": "pkas-app/uv.lock",
       "../../README.md": "pkas-app/README.md",
       "../../web/dist/": "pkas-app/web/dist/",
       "../../runtime/tauri-payload/": "pkas-app/runtime/",
       "../../tools/everything/": "pkas-app/tools/everything/",
+      "icons/icon.ico": "pkas-app/app-icon.ico",
+      "../../scripts/configure_rpa_loopback.ps1": "pkas-app/scripts/configure_rpa_loopback.ps1",
       "../../scripts/configure_weflow_manual.mjs": "pkas-app/scripts/configure_weflow_manual.mjs"
     },
     "useLocalToolsDir": true,

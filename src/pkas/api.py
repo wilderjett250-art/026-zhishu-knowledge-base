@@ -10,9 +10,10 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from pkas.auto_promotion import (
     AutoPromotionRequest,
@@ -57,7 +58,7 @@ from pkas.intake import (
     IntakeRequest,
     IntakeService,
 )
-from pkas.machine_catalog import MachineCatalogStart, eligible_scopes
+from pkas.machine_catalog import MachineCatalogConflict, MachineCatalogStart, eligible_scopes
 from pkas.mcp_inspector import McpInspectorConflict, McpInspectorError, McpInspectorService
 from pkas.processing_profiles import (
     ProcessingProfileUpdate,
@@ -72,6 +73,13 @@ from pkas.project_map import (
     ProjectMapRunRequest,
     ProjectMapService,
 )
+from pkas.rpa_bridge import (
+    RPA_API_PREFIX,
+    RPA_MAX_REQUEST_BYTES,
+    RpaBridgeService,
+    is_loopback_host,
+)
+from pkas.rpa_routes import router as rpa_router
 from pkas.runtime_manager import RuntimeManager
 from pkas.schemas import (
     AgentCloseoutRequest,
@@ -123,6 +131,56 @@ class RuntimeAction(BaseModel):
     confirm_cloud: bool = False
 
 
+def foundation_read_problem(component: str, exc: sqlite3.Error) -> dict[str, str | bool]:
+    """Return a safe, actionable explanation for read-only ledger failures.
+
+    SQLite exception strings can contain schema or local path fragments.  They
+    must not be sent to the desktop UI, so the client receives a stable code and
+    a plain-language next step instead.
+    """
+    lowered = str(exc).lower()
+    base = {
+        "component": component,
+        "retryable": True,
+        "technical_detail": "SQLite/read-only",
+    }
+    if "interrupted" in lowered:
+        return {
+            **base,
+            "code": "read_budget_reached",
+            "title": "本次明细读取已被保护性停止",
+            "message": "这项检查超过本机 8 秒保护阈值，系统已停止它，避免拖慢正常检索。",
+            "impact": "资料本身没有被改动；你仍可查看轻量概览或缩小到单个资料源。",
+            "action": "先查看概要；需要完整对账时再主动执行深度检查。",
+        }
+    if "locked" in lowered or "busy" in lowered:
+        return {
+            **base,
+            "code": "local_database_busy",
+            "title": "本机资料库正在处理另一项任务",
+            "message": "当前只读检查暂时无法取得稳定快照。",
+            "impact": "不会丢失资料，也不会重复导入。",
+            "action": "稍后重试；如持续出现，请在运行状态中检查是否有资料处理任务。",
+        }
+    if "no such table" in lowered or "malformed" in lowered:
+        return {
+            **base,
+            "code": "local_ledger_needs_check",
+            "title": "本机资料台账需要检查",
+            "message": "当前资料库的这项只读结构检查没有通过。",
+            "impact": "系统不会据此修改或删除任何资料。",
+            "action": "先查看基础服务状态；持续出现时再执行受控的本机检查。",
+        }
+    return {
+        **base,
+        "code": "local_read_unavailable",
+        "title": "暂时无法读取这项本机台账",
+        "message": "这次只读检查没有完成，系统没有启动扫描、同步或模型处理。",
+        "impact": "已有资料和索引未被改动。",
+        "action": "可以重试；若反复出现，请在运行状态中查看本机服务。",
+    }
+
+
 def success(
     summary: str,
     data: Any = None,
@@ -153,6 +211,119 @@ def warning(
         next_actions=next_actions or [],
         artifacts=artifacts or [],
     )
+
+
+class LocalKnowledgeServiceMiddleware:
+    """Fail closed when the local service is accidentally bound beyond loopback.
+
+    The supported launchers already use 127.0.0.1.  This second guard protects
+    the whole API even if a developer starts Uvicorn directly with an unsafe
+    host argument.  RPA requests additionally receive a streamed body limit,
+    so a missing or forged Content-Length header cannot bypass the boundary.
+    """
+
+    def __init__(self, app: ASGIApp, *, max_rpa_request_bytes: int) -> None:
+        self.app = app
+        self.max_rpa_request_bytes = max_rpa_request_bytes
+
+    @staticmethod
+    async def _reject(
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        *,
+        status_code: int,
+        detail: str,
+    ) -> None:
+        response = JSONResponse(
+            status_code=status_code,
+            content={"detail": detail},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+        await response(scope, receive, send)
+
+    @staticmethod
+    def _is_local_client(scope: Scope) -> bool:
+        client = scope.get("client")
+        host = str(client[0]) if client else None
+        # ``testclient`` is Starlette's in-process ASGI transport identity; it
+        # cannot be supplied by an external TCP caller.
+        return host == "testclient" or is_loopback_host(host)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if not self._is_local_client(scope):
+            await self._reject(
+                scope,
+                receive,
+                send,
+                status_code=403,
+                detail="本机知识服务不接受非回环网络访问。",
+            )
+            return
+        if not str(scope.get("path") or "").startswith(RPA_API_PREFIX):
+            await self.app(scope, receive, send)
+            return
+
+        content_length: bytes | None = None
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"content-length":
+                content_length = value
+                break
+        if content_length is not None:
+            try:
+                announced_size = int(content_length)
+            except ValueError:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    status_code=400,
+                    detail="无效的请求长度。",
+                )
+                return
+            if announced_size < 0 or announced_size > self.max_rpa_request_bytes:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    status_code=413,
+                    detail="RPA 请求体超过限制。",
+                )
+                return
+
+        captured: list[Message] = []
+        received_size = 0
+        while True:
+            message = await receive()
+            captured.append(message)
+            if message["type"] == "http.request":
+                received_size += len(message.get("body", b""))
+                if received_size > self.max_rpa_request_bytes:
+                    await self._reject(
+                        scope,
+                        receive,
+                        send,
+                        status_code=413,
+                        detail="RPA 请求体超过限制。",
+                    )
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                break
+
+        async def replay_receive() -> Message:
+            if captured:
+                return captured.pop(0)
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
 
 
 def capability_rag_status(system: KnowledgeSystem) -> dict[str, Any]:
@@ -237,6 +408,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ThreadJournalService(resolved_settings, system.repository),
             resolved_settings,
         )
+        app.state.rpa_bridge = RpaBridgeService(resolved_settings, system.database)
         app.state.thread_journal.start()
         # The complete RAG matrix can take several seconds on a large local
         # archive. Start its safe, read-only refresh now rather than blocking
@@ -259,6 +431,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.include_router(summary_router)
+    app.include_router(rpa_router)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=resolved_settings.allowed_origins,
@@ -266,14 +439,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type"],
     )
+    app.add_middleware(
+        LocalKnowledgeServiceMiddleware,
+        max_rpa_request_bytes=RPA_MAX_REQUEST_BYTES,
+    )
 
     @app.middleware("http")
     async def observe_api(request: Request, call_next):
+        rpa_request = request.url.path.startswith(RPA_API_PREFIX)
         started = time.monotonic()
         outcome = "error"
+        failure_reason = "本机服务出现未处理异常"
         try:
             response = await call_next(request)
             outcome = "success" if response.status_code < 400 else "error"
+            if response.status_code >= 500:
+                failure_reason = "本机服务未能完成请求"
+            elif response.status_code >= 400:
+                failure_reason = "请求条件不满足或权限被拒绝"
+            else:
+                failure_reason = None
+            if rpa_request:
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["X-Content-Type-Options"] = "nosniff"
             return response
         finally:
             route = request.scope.get("route")
@@ -286,7 +474,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     from starlette.concurrency import run_in_threadpool
 
                     await run_in_threadpool(
-                        metrics.record, "api", path, outcome, time.monotonic() - started
+                        metrics.record,
+                        "api",
+                        path,
+                        outcome,
+                        time.monotonic() - started,
+                        failure_reason,
                     )
 
     @app.get("/api/runtime/ping")
@@ -1114,6 +1307,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def machine_catalog_resume(job_id: str, request: Request) -> Envelope:
         try:
             data = system_from(request).machine_catalog.resume(job_id)
+        except MachineCatalogConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
         return success("全机A库索引已继续", data)
@@ -1122,6 +1317,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def machine_catalog_pause(job_id: str, request: Request) -> Envelope:
         try:
             data = system_from(request).machine_catalog.pause(job_id)
+        except MachineCatalogConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
         return success("全机A库索引已暂停，进度已保留", data)
@@ -1150,15 +1347,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             data = FoundationService(system_from(request).settings.database_path).overview()
         except sqlite3.Error as exc:
-            raise HTTPException(503, "资料台账读取超时或不可用，请重试") from exc
+            raise HTTPException(503, foundation_read_problem("资料来源台账", exc)) from exc
         return success("只读资料台账；未触发扫描", data)
+
+    @app.get("/api/foundation/ledger-summary", response_model=Envelope)
+    def foundation_ledger_summary(request: Request) -> Envelope:
+        try:
+            data = FoundationService(system_from(request).settings.database_path).ledger_summary()
+        except sqlite3.Error as exc:
+            raise HTTPException(503, foundation_read_problem("资料检查概览", exc)) from exc
+        return success("已读取轻量资料检查概览；未扫描磁盘或对账全文索引", data)
 
     @app.get("/api/foundation/analytics", response_model=Envelope)
     def foundation_analytics(request: Request, days: int = Query(30, ge=7, le=90)) -> Envelope:
         try:
             data = FoundationService(system_from(request).settings.database_path).analytics(days)
         except sqlite3.Error as exc:
-            raise HTTPException(503, "资料统计读取超时或不可用，请重试") from exc
+            raise HTTPException(503, foundation_read_problem("资料构成统计", exc)) from exc
         return success("已读取资料底座可视化统计；未触发扫描", data)
 
     @app.get("/api/foundation/included-files", response_model=Envelope)
@@ -1175,7 +1380,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 settings.data_root / "machine-catalog" / "catalog.sqlite",
             ).included_files(drive=drive, limit=limit, offset=offset)
         except sqlite3.Error as exc:
-            raise HTTPException(503, "纳入范围读取超时或不可用，请重试") from exc
+            raise HTTPException(503, foundation_read_problem("已纳入资料清单", exc)) from exc
         return success("已读取知识库实际纳入范围；未扫描原文件", data)
 
     @app.get("/api/foundation/documents", response_model=Envelope)
@@ -1183,13 +1388,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         limit: int = Query(50, ge=1, le=100),
         offset: int = Query(0, ge=0, le=1000000),
+        verify_fulltext: bool = Query(False),
     ) -> Envelope:
         try:
             service = FoundationService(system_from(request).settings.database_path)
-            data = service.documents(limit, offset)
+            data = service.documents(limit, offset, verify_fulltext=verify_fulltext)
         except sqlite3.Error as exc:
-            raise HTTPException(503, "文档对账读取超时或不可用，请重试") from exc
-        return success("当前有效文件的全文与向量登记状态", data)
+            raise HTTPException(503, foundation_read_problem("文档全文与向量明细", exc)) from exc
+        return success(
+            "当前有效文件的全文与向量登记状态"
+            if verify_fulltext
+            else "当前有效文件明细；未执行全库全文深度对账",
+            data,
+        )
 
     @app.get("/api/foundation/files", response_model=Envelope)
     def foundation_files(
