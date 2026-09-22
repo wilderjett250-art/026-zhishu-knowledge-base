@@ -192,5 +192,122 @@ def test_exporter_excludes_personal_and_secret_artifacts() -> None:
     exporter = (ROOT / "scripts" / "export_windows_package.ps1").read_text(
         encoding="utf-8"
     )
-    for marker in ("'data'", "'.venv'", "'runtime'", "'.env'", "'*.dpapi'", "'*.sqlite'"):
+    for marker in (
+        "git -C $resolvedRoot ls-files",
+        "Source worktree is dirty",
+        "'data'",
+        "'.venv'",
+        "'runtime'",
+        "'.pytest_cache'",
+        "'target'",
+        "'HANDOFF.md'",
+        "'.env'",
+        "'*.dpapi'",
+        "'*.sqlite'",
+    ):
         assert marker in exporter
+    assert "robocopy.exe" not in exporter
+
+
+def test_exporter_copies_only_clean_git_tracked_source(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    git = shutil.which("git")
+    assert powershell is not None
+    assert git is not None
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".gitignore").write_text(
+        "HANDOFF.md\n.pytest_cache/\ndata/\nruntime/\ndesktop/src-tauri/target/\n.env\n",
+        encoding="utf-8",
+    )
+    (source / "tracked.txt").write_text("tracked source", encoding="utf-8")
+    (source / "HANDOFF.md").write_text("local-only path", encoding="utf-8")
+    (source / ".env").write_text("LOCAL_SECRET=not-for-export", encoding="utf-8")
+    (source / ".pytest_cache").mkdir()
+    (source / ".pytest_cache" / "state").write_text("cache", encoding="utf-8")
+    (source / "data").mkdir()
+    (source / "data" / "pkas.sqlite").write_text("not a real database", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "runtime.log").write_text("runtime", encoding="utf-8")
+    target = source / "desktop" / "src-tauri" / "target"
+    target.mkdir(parents=True)
+    (target / "artifact.bin").write_text("build output", encoding="utf-8")
+
+    def run_git(*args: str) -> None:
+        result = subprocess.run(
+            [git, "-C", str(source), *args], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    run_git("init", "--quiet")
+    run_git("add", ".gitignore", "tracked.txt")
+    run_git(
+        "-c",
+        "user.name=PKAS Test",
+        "-c",
+        "user.email=pkas-test@example.invalid",
+        "commit",
+        "-m",
+        "initial",
+    )
+
+    destination = tmp_path / "package"
+    exporter = ROOT / "scripts" / "export_windows_package.ps1"
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(exporter),
+            "-ProjectRoot",
+            str(source),
+            "-Destination",
+            str(destination),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (destination / "tracked.txt").read_text(encoding="utf-8") == "tracked source"
+    assert (destination / ".gitignore").is_file()
+    for forbidden in (
+        "HANDOFF.md",
+        ".env",
+        ".pytest_cache/state",
+        "data/pkas.sqlite",
+        "runtime/runtime.log",
+        "desktop/src-tauri/target/artifact.bin",
+    ):
+        assert not (destination / forbidden).exists()
+    manifest = json.loads((destination / "PACKAGE_MANIFEST.json").read_text(encoding="utf-8-sig"))
+    assert manifest["schema_version"] == 2
+    assert manifest["source_worktree_dirty"] is False
+    assert manifest["exclusions"]["git_tracked_source_only"] is True
+    assert {entry["path"] for entry in manifest["files"]} == {".gitignore", "tracked.txt"}
+
+    (source / "tracked.txt").write_text("changed", encoding="utf-8")
+    dirty_destination = tmp_path / "dirty-package"
+    dirty = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(exporter),
+            "-ProjectRoot",
+            str(source),
+            "-Destination",
+            str(dirty_destination),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert dirty.returncode != 0
+    assert "Source worktree is dirty" in (dirty.stdout + dirty.stderr)
+    assert not dirty_destination.exists()
