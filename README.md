@@ -1,109 +1,43 @@
-# 知域（Zhishu）
+# 知域
 
-知域是一个**本地优先、可追溯、可选择处理深度**的个人知识系统。它不把整块硬盘或聊天记录直接交给模型，而是先让你看清电脑里有什么，再由你决定哪些资料只保留目录、哪些做全文检索、哪些进入语义向量检索。
+把电脑里的资料找回来。
 
-桌面端、Codex MCP、本机 HTTP API 和 RPA 回环桥共用同一条检索链路：结果始终带来源和定位，而不是只返回一段无法核对的“答案”。
+文件可能没有丢，只是散在不同的盘、项目文件夹、Obsidian 笔记和聊天导出里。知域把它们放进一个可以搜索的本地界面：先看有哪些资料，再按文件名、正文中的词句或大概意思去找。找到后，还能查看内容来自哪个文件、哪个位置。
 
-> 当前仓库提供 Windows 本地部署源码。个人资料、聊天导出、数据库、向量数据、运行日志与 API 凭据均不在 Git 中，也不会随源码复制。
+如果你平时用 Codex，也可以让它查这份资料目录。问起以前的项目、文档或讨论时，Codex 能先找到相关记录，再根据来源回答。
 
-## 适合做什么
+## 用起来是什么样
 
-- 盘点指定目录或已授权本地资料，建立轻量目录索引；
-- 解析 Word、Excel、PDF、PPT、Markdown、文本、代码、JSON/JSONL、邮件等内容；
-- 使用 SQLite FTS5 做本地全文检索，按需启用 Qdrant + Embedding 做语义与混合检索；
-- 让 Codex 通过 MCP 先检索、再回答，并回到来源文件、文档或段落；
-- 管理已授权的聊天导出文件（WeFlow XLSX 与 ChatLab 兼容微信 JSON），增量去重后检索历史沟通；
-- 在桌面端查看资料范围、处理层级、失败原因、来源状态与 RAG 评测记录。
+比如你想找一份去年写的项目交付说明。记得项目名，就搜项目名；记得其中一句话，就搜那句话；只记得大概内容，可以把相关资料加入语义搜索后再查。搜索结果会显示来源，方便打开原文件核对。
 
-## 它如何组织资料
+整理资料也不用一次做完。可以先建立文件目录，等真正需要搜索某类内容时，再选择为它生成摘要、加入全文搜索或语义搜索。知域会显示哪些资料已经处理、哪些还没处理，以及处理失败的原因。
 
-```text
-本地文件 / Obsidian Vault / 已授权聊天导出
-                    │
-                    ▼
-           A 库：目录索引（路径、类型、时间、分类）
-                    │  选择处理深度
-        ┌───────────┼───────────┬────────────┐
-        ▼           ▼           ▼            ▼
-       L0          L1          L2           L3
-    仅目录     摘要/来源    正文 + FTS   正文 + FTS + 向量
-                    │
-                    ▼
-       SQLite（正式记录与全文） + Qdrant（可重建向量）
-                    │
-                    ▼
-     统一检索 → 桌面端 / Codex MCP / 本机 API / RPA 回环桥
-```
+## 开始使用
 
-- **L0**：只记录文件在哪里；不读取正文、不调用模型。
-- **L1**：记录来源与有限摘要，回答“它大概是什么”。
-- **L2**：本地解析正文并建立全文索引，可精确查文档内容。
-- **L3**：在 L2 基础上构建向量，用于“意思相近”的语义检索。
+目前提供 Windows 10/11 x64 安装包。从 [Releases](https://github.com/wilderjett250-art/026-zhishu-knowledge-base/releases/latest) 下载并安装，打开知域后，在“资料接入”确认整理范围，点击“一键开始整理”。完成目录整理后，就可以按分类挑选需要进一步读取的资料，并在应用里搜索。
 
-原文件默认留在原处。只有经过确认的资料才会被解析或向量化；Qdrant 只是可重建的派生索引，不是事实源。
+首次打开需要联网准备本机运行环境，可能要等几分钟。安装后不会自行扫描硬盘或导入聊天记录；整理范围由你在应用里确认。普通使用不需要安装 Python、数据库或开发工具。
 
-## 快速开始（源码方式）
+## 可以整理哪些资料
 
-适用于 Windows 10/11 x64。先安装 Git、Python 3.11+、Node.js 20+ 与 [uv](https://docs.astral.sh/uv/)。不配置 Embedding 也可以直接使用全文检索。
+- 电脑上的文件和文件夹，包括常见文档、表格、PDF、演示文稿、文本和代码文件；
+- 你指定的 Obsidian 笔记库；
+- 你自行导出的聊天文件，目前支持 WeFlow 导出的 XLSX，以及符合 ChatLab 微信文件约定的 JSON。
 
-```powershell
-git clone https://github.com/wilderjett250-art/026-zhishu-knowledge-base.git zhishu
-Set-Location zhishu
+聊天记录需要先由你使用合适的工具导出为文件。知域负责检查和导入这些文件，不负责获取微信密钥或直接读取受保护的微信数据库。
 
-uv sync --extra dev
-Push-Location web
-npm ci
-npm run build
-Pop-Location
+## 资料留在哪里
 
-uv run pkas init
-uv run pkas serve --open-browser
-```
+原文件默认留在原处。知域在本机保存整理结果和搜索索引，应用退出后也不会替你移动或删除原件。模型分类、云端语义服务等能力需要你自行配置并启用；如果选择云端服务，相关请求会交给该服务处理。受限资料默认不会发送给云端服务。
 
-管理台默认地址为 `http://127.0.0.1:8765`，只监听当前电脑。首次使用请在“资料接入”中确认范围；系统不会静默扫描磁盘、导入聊天、配置 API 密钥或修改 Codex 设置。
+Codex 接入需要单独配置。知域也提供受限的本机接口，方便其他支持 HTTP 的应用查询资料；这些接口默认不对局域网或公网开放。
 
-### Windows 桌面安装包
+## 当前版本
 
-维护者可从源码构建当前用户安装版 NSIS 安装包；安装后用户不需要预装 Python、Node.js、uv、Rust 或 Qdrant。完整构建、复制安装、卸载和恢复说明见 [Windows 安装与恢复](docs/windows-replication.md)。
+知域仍处于技术预览阶段。Windows 安装包尚未签名，首次运行可能出现系统的“未知发布者”提示；另一台实体电脑上的完整安装体验仍待验证。遇到找不到资料的情况，可以先在应用里检查资料是否已接入、是否只建立了目录，以及解析任务是否失败。
 
-给同学或新电脑使用时，请从 [GitHub Releases](https://github.com/wilderjett250-art/026-zhishu-knowledge-base/releases/latest) 下载 `知域_*_x64-setup.exe` 并正常安装；不要复制单个 EXE，也不要复制其他人的 `data`、运行目录或聊天导出。安装包与个人数据分离，首次启动只准备本机运行环境，不会自动扫盘、导入聊天、配置模型密钥或启用 Codex/MCP。
-
-当前 `main` 分支发布源码与构建脚本，不提交个人数据或安装产物。源码方式适合开发者；普通使用者优先使用上面的正式安装包。
-
-## Codex / RPA 接入
-
-- **Codex MCP**：运行项目虚拟环境中的 `python -m pkas.mcp_server`，将其作为 stdio MCP 注册到 Codex。工具包括检索、读文档、列来源、目录定位和经确认的资料导入。
-- **RPA / 实在 Agent**：只能通过受限的 `127.0.0.1` HTTP 桥访问检索结果，不能直连 SQLite。桥使用独立 DPAPI 令牌，不开放 SQL、任意路径或原文下载。见 [RPA 本机桥](docs/rpa-loopback-bridge.md)。
-
-## 隐私与安全边界
-
-- `data/`、向量、数据库、聊天导出、日志、恢复包、`.env` 和 DPAPI 密钥均被 Git 忽略；
-- 服务默认只绑定 `127.0.0.1`，不向局域网或公网暴露资料；
-- 云端 Embedding、重排、文档视觉解析均为显式可选能力；`restricted` 资料默认不会被发送；
-- 聊天导入采用可扩展的文件适配器：WeFlow 仅是已导出 XLSX 的兼容来源之一；不读取微信解密密钥、不直接访问 WCDB、不自动发送消息，也不随安装包分发第三方导出器；
-- 每个检索结果保留来源、时间、隐私级别和处理状态；模型推断不能替代原始证据。
-
-## 开发与验证
-
-```powershell
-uv run ruff check src tests
-uv run pyright
-uv run python -m pytest
-
-Push-Location web
-npm run build
-Pop-Location
-```
-
-更多设计细节：
-
-- [核心架构](docs/architecture.md)
-- [数据模型](docs/data-model.md)
-- [检索评测协议](docs/RAG_EVALUATION.md)
-- [Windows 安装与恢复](docs/windows-replication.md)
-- [资料接入适配器契约](docs/import-provider-contract.md)
-- [ChatLab 微信文件约定 v1](docs/chatlab-wechat-format-v1.md)
+想从源码运行或了解接入方式，可查看 [Windows 安装与恢复](docs/windows-replication.md)、[Codex 与本机知识库的实现说明](docs/architecture.md) 和 [聊天文件接入说明](docs/import-provider-contract.md)。
 
 ## 授权
 
-仓库目前是公开源码的技术预览，具体使用、再发布和商业授权以 [LICENSE.md](LICENSE.md) 为准。该文件当前不是 OSI 开源许可证；若要开放二次分发或商业使用，需要由维护者另行选择并发布明确许可证。
+本仓库公开供内测和技术交流，目前尚未采用 OSI 开源许可证。使用、再发布及商业授权以 [LICENSE.md](LICENSE.md) 为准。
