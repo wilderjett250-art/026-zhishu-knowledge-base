@@ -1,11 +1,20 @@
 import json
+import tomllib
 from pathlib import Path
 
 from openpyxl import Workbook
 
+import pkas
 import pkas.mcp_server as mcp_server
 from pkas.codex_capture import capture_notification
 from pkas.system import KnowledgeSystem
+
+
+def test_mcp_version_matches_project_release() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pkas.__version__ == project["project"]["version"]
+    assert mcp_server.mcp.version == pkas.__version__
 
 
 def test_mcp_tool_annotations_match_side_effects() -> None:

@@ -5,6 +5,7 @@ from typing import Any, Literal
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
+from pkas import __version__
 from pkas.config import get_settings
 from pkas.customer_service import CustomerReviewRequired
 from pkas.search_gateway import UnifiedSearchRequest, unified_search
@@ -30,7 +31,7 @@ mcp = MCPServer(
         "回复客户时只生成草稿，不直接发送微信消息。普通资料检索由 Codex 自己编排，"
         "本地同步和检索不消耗生成模型 Token。"
     ),
-    version="0.1.19",
+    version=__version__,
 )
 
 _SYSTEM: KnowledgeSystem | None = None
