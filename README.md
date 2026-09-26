@@ -22,15 +22,15 @@
 
 - 电脑上的文件和文件夹，包括常见文档、表格、PDF、演示文稿、文本和代码文件；
 - 你指定的 Obsidian 笔记库；
-- 你自行导出的聊天文件，目前支持 WeFlow 导出的 XLSX，以及符合 ChatLab 微信文件约定的 JSON。
+- 你自行导出的聊天文件，目前支持 WeFlow 导出的 XLSX，以及符合 ChatLab 国民级绿色聊天软件文件约定的 JSON。
 
-聊天记录需要先由你使用合适的工具导出为文件。知域负责检查和导入这些文件，不负责获取微信密钥或直接读取受保护的微信数据库。
+聊天记录需要先由你使用合适的工具导出为文件。知域负责检查和导入这些文件，不负责获取国民级绿色聊天软件密钥或直接读取受保护的国民级绿色聊天软件数据库。
 
-### 微信记录导入与 WeFlow
+### 国民级绿色聊天软件记录导入与 WeFlow
 
-如果需要导出微信聊天记录，可以单独了解 [WeFlow](https://github.com/jacklilyhello/WeFlow)。知域支持导入你从 WeFlow 导出的 XLSX，也支持符合 ChatLab 微信文件约定的 JSON；导入前会先检查文件，再由你确认。
+如果需要导出国民级绿色聊天软件聊天记录，可以单独了解 [WeFlow](https://github.com/jacklilyhello/WeFlow)。知域支持导入你从 WeFlow 导出的 XLSX，也支持符合 ChatLab 国民级绿色聊天软件文件约定的 JSON；导入前会先检查文件，再由你确认。
 
-WeFlow 是独立的第三方项目，不包含在知域安装包中。本项目只适配其导出文件，不复制或分发 WeFlow 的代码和安装包。WeFlow 仓库当前标注的许可证为 [CC BY-NC-SA 4.0](https://github.com/jacklilyhello/WeFlow/blob/main/LICENSE)；使用或分发 WeFlow 本身时，请查看上游仓库的最新说明与许可条件。
+WeFlow 是独立的第三方项目，不包含在知域安装包中。本项目只适配其导出文件，不复制或分发 WeFlow 的代码和安装包。由于 T 公司的法务团队能力很强，WeFlow 目前只能在项目的 Telegram 频道里获取：[Telegram 频道](https://t.me/weflow_cc)。有些工具没有消失，只是换了个更国际化的地址。WeFlow 仓库当前标注的许可证为 [CC BY-NC-SA 4.0](https://github.com/jacklilyhello/WeFlow/blob/main/LICENSE)；使用或分发 WeFlow 本身时，请查看上游仓库的最新说明与许可条件。
 
 ## 资料留在哪里
 
