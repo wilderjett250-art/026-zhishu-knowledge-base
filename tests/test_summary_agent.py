@@ -1,5 +1,6 @@
 import io
 from collections import deque
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +34,67 @@ def test_dedicated_agent_disables_inherited_notify(monkeypatch, source_root):
     with CodexAgent(source_root):
         pass
     assert "notify=[]" in captured[0]
+
+
+def test_summary_agent_resumes_its_recorded_thread_without_creating_another():
+    agent = CodexAgent.__new__(CodexAgent)
+    agent.model = "test"
+    agent.cwd = Path("I:/test-summary-agent")
+    agent.instructions = "Only analyze current packet"
+    agent.output_schema = {"type": "object"}
+    agent.thread_id = None
+    agent._resume_thread_id = "thread-1"
+    agent.events = deque()
+    agent.models = lambda: [{"model": "test"}]
+    calls = []
+
+    def rpc(method, params, timeout=30):
+        calls.append((method, params))
+        if method == "thread/resume":
+            return {"thread": {"id": "thread-1"}}
+        assert method == "turn/start"
+        agent.events.extend([
+            {"method": "item/completed", "params": {
+                "threadId": "thread-1", "turnId": "turn-1",
+                "item": {"type": "agentMessage", "text": '{"items": []}'},
+            }},
+            {"method": "turn/completed", "params": {
+                "threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"},
+            }},
+        ])
+        return {"turn": {"id": "turn-1"}}
+
+    agent.rpc = rpc
+    saved = []
+    output, ident = agent.summarize({"items": []}, saved.append)
+    assert output == {"items": []}
+    assert ident == "thread-1"
+    assert saved == ["thread-1"]
+    assert [method for method, _ in calls] == ["thread/resume", "turn/start"]
+    assert calls[0][1]["config"]["mcp_servers"] == {}
+    assert calls[0][1]["approvalPolicy"] == "never"
+
+
+def test_summary_agent_rejects_wrong_resumed_thread_id():
+    agent = CodexAgent.__new__(CodexAgent)
+    agent.model = "test"
+    agent.cwd = Path("I:/test-summary-agent")
+    agent.instructions = "Only analyze current packet"
+    agent.output_schema = {"type": "object"}
+    agent.thread_id = None
+    agent._resume_thread_id = "thread-expected"
+    agent.events = deque()
+    agent.models = lambda: [{"model": "test"}]
+    calls = []
+
+    def rpc(method, params, timeout=30):
+        calls.append(method)
+        return {"thread": {"id": "thread-different"}}
+
+    agent.rpc = rpc
+    with pytest.raises(AgentError, match="任务编号不符"):
+        agent.summarize({"items": []})
+    assert calls == ["thread/resume"]
 
 
 def test_fast_turn_events_before_rpc_ack_are_not_lost():

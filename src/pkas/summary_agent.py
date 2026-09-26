@@ -156,6 +156,7 @@ class CodexAgent:
         output_schema: dict | None = None,
         client_name: str = "pkas_summary",
         client_title: str = "知枢资料整理",
+        resume_thread_id: str | None = None,
     ):
         self.cwd, self.model = cwd, model
         self.instructions = instructions
@@ -164,6 +165,7 @@ class CodexAgent:
         self.messages: queue.Queue = queue.Queue(maxsize=2048)
         self.sequence = 0
         self.thread_id = None
+        self._resume_thread_id = resume_thread_id
         self.events = deque()
         self.proc = subprocess.Popen(
             [
@@ -193,6 +195,10 @@ class CodexAgent:
                         "version": "0.1.0",
                     }
                 },
+                # The desktop app server can take ~35-40s to initialize on a
+                # warm Windows profile. This is a connection timeout, not a
+                # model-call retry; keep the single durable job/thread intact.
+                timeout=90,
             )
             self.send({"method": "initialized", "params": {}})
         except BaseException:
@@ -278,28 +284,33 @@ class CodexAgent:
         if self.thread_id is None:
             if self.model not in {m["model"] for m in self.models()}:
                 raise AgentError("当前Codex未提供所选模型；请自行选择，不会自动换模型")
-            result = self.rpc(
-                "thread/start",
-                {
-                    "model": self.model,
-                    "cwd": str(self.cwd),
-                    "approvalPolicy": "never",
-                    "sandbox": "read-only",
-                    "baseInstructions": instructions,
-                    "developerInstructions": instructions,
-                    "config": {
-                        "notify": [],
-                        "web_search": "disabled",
-                        "features.shell_tool": False,
-                        "features.multi_agent": False,
-                        "features.memories": False,
-                        "features.apps": False,
-                        "project_doc_max_bytes": 0,
-                        "mcp_servers": {},
-                    },
+            options = {
+                "model": self.model,
+                "cwd": str(self.cwd),
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "baseInstructions": instructions,
+                "developerInstructions": instructions,
+                "config": {
+                    "notify": [],
+                    "web_search": "disabled",
+                    "features.shell_tool": False,
+                    "features.multi_agent": False,
+                    "features.memories": False,
+                    "features.apps": False,
+                    "project_doc_max_bytes": 0,
+                    "mcp_servers": {},
                 },
-                timeout=60,
-            )
+            }
+            previous = self._resume_thread_id
+            if previous:
+                result = self.rpc(
+                    "thread/resume", {"threadId": previous, **options}, timeout=60
+                )
+                if result.get("thread", {}).get("id") != previous:
+                    raise AgentError("Codex续接任务编号不符；已停止，未创建新任务")
+            else:
+                result = self.rpc("thread/start", options, timeout=60)
             self.thread_id = result["thread"]["id"]
             if on_thread:
                 on_thread(self.thread_id)

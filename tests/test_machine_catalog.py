@@ -71,6 +71,40 @@ def test_machine_catalog_requires_confirmation(test_settings, tmp_path: Path) ->
         raise AssertionError("unconfirmed machine scan was accepted")
 
 
+def test_machine_catalog_can_rescan_the_same_scope(test_settings, tmp_path: Path) -> None:
+    source = tmp_path / "same-drive"
+    source.mkdir()
+    (source / "note.txt").write_text("same scoped file", encoding="utf-8")
+    service = MachineCatalog(test_settings)
+    service._excluded_roots = []
+
+    jobs = []
+    for _ in range(2):
+        job = service.start(
+            confirmed=True,
+            scopes=[{"path": str(source), "kind": "fixed_data_drive"}],
+        )
+        deadline = time.monotonic() + 10
+        while job["state"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.02)
+            job = service.view(job["id"])
+        assert job["state"] == "completed"
+        jobs.append(job["id"])
+
+    with service.connect() as connection:
+        scope_ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT id FROM scopes WHERE job_id IN (?,?) ORDER BY job_id",
+                jobs,
+            )
+        ]
+    assert len(scope_ids) == 2
+    assert len(set(scope_ids)) == 2
+    assert service.integrity()["files"] == 1
+    service.close()
+
+
 def test_pause_only_changes_the_requested_catalog_job(test_settings, tmp_path: Path) -> None:
     service = MachineCatalog(test_settings)
     timestamp = datetime.now(UTC).isoformat()

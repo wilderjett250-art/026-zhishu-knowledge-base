@@ -296,7 +296,9 @@ class MachineCatalog:
             )
             for item in selected:
                 root = str(Path(item["path"]).resolve())
-                scope_id = "scope_" + hashlib.sha256(root.casefold().encode()).hexdigest()[:20]
+                scope_id = "scope_" + hashlib.sha256(
+                    f"{job_id}\0{root.casefold()}".encode()
+                ).hexdigest()[:20]
                 c.execute(
                     "INSERT INTO scopes(id,job_id,root_path,kind) VALUES(?,?,?,?)",
                     (scope_id, job_id, root, item["kind"]),

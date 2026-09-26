@@ -106,7 +106,14 @@ class ProjectMapService:
         paths = sorted(
             self.home.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True
         )
-        return self.read(paths[0].stem) if paths else None
+        return self.public_read(paths[0].stem) if paths else None
+
+    def public_read(self, project_map_id: str) -> dict:
+        """Show saved cards without presenting superseded evidence as current."""
+        plan = self.read(project_map_id)
+        minimum = int(plan.get("source", {}).get("minimum_evidence_files", 1))
+        current = {unit["id"]: unit for unit in self._candidate_units(minimum)}
+        return self._view(plan, limit=None, current=current)
 
     @staticmethod
     def _group_id(scope_path: str, source_path: str) -> tuple[str, str]:
@@ -120,18 +127,32 @@ class ProjectMapService:
 
     @staticmethod
     def _evidence_revision(files: list[dict]) -> str:
-        """Fingerprint opaque catalog identifiers only, never paths or source text."""
-        values = sorted(str(item["id"]) for item in files)
-        return hashlib.sha256("\0".join(values).encode()).hexdigest()
+        """Bind cards to source versions and verified summaries, not only file IDs."""
+        values = sorted(files, key=lambda item: str(item["id"]))
+        payload = json.dumps(values, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _candidate_units(self, minimum_evidence_files: int) -> list[dict]:
         groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
         with self.ledger.connect() as db:
             rows = db.execute(
-                "SELECT catalog_file_id,source_path,scope_path,record,summary FROM entries "
+                "SELECT catalog_file_id,source_path,scope_path,byte_size,modified_ns,"
+                "record,summary FROM entries "
                 "WHERE state='inspected' AND record IS NOT NULL ORDER BY catalog_file_id"
             ).fetchall()
         for row in rows:
+            source_path = Path(row["source_path"])
+            try:
+                if source_path.is_symlink():
+                    continue
+                current = source_path.stat()
+            except OSError:
+                continue
+            if (
+                current.st_size != int(row["byte_size"])
+                or current.st_mtime_ns != int(row["modified_ns"])
+            ):
+                continue
             record = json.loads(row["record"])
             if trusted_recommended_mode(record) is None:
                 continue
@@ -147,6 +168,8 @@ class ProjectMapService:
                     "recommended_mode": understanding.get("recommended_mode"),
                     "extension": Path(row["source_path"]).suffix.lower() or "无扩展名",
                     "relative": record.get("relative") or Path(row["source_path"]).name,
+                    "source_bytes": int(row["byte_size"]),
+                    "source_modified_ns": int(row["modified_ns"]),
                 }
             )
         units = []
@@ -161,6 +184,7 @@ class ProjectMapService:
                     "top_group": top,
                     "evidence_file_count": len(files),
                     "evidence_revision": self._evidence_revision(files),
+                    "evidence_revision_version": 2,
                     "extensions": dict(extensions.most_common(8)),
                     "materials": files[:12],
                     "state": "pending",
@@ -200,15 +224,11 @@ class ProjectMapService:
 
     @staticmethod
     def _same_evidence(existing: dict, candidate: dict) -> bool:
-        """Keep legacy cards stable when their known evidence has not changed."""
+        """An old ID-only fingerprint cannot prove a card is still current."""
+        if existing.get("evidence_revision_version") != 2:
+            return False
         revision = existing.get("evidence_revision")
-        if revision:
-            return revision == candidate["evidence_revision"]
-        return (
-            existing.get("evidence_file_count") == candidate["evidence_file_count"]
-            and [item.get("id") for item in existing.get("materials", [])]
-            == [item.get("id") for item in candidate.get("materials", [])]
-        )
+        return bool(revision and revision == candidate["evidence_revision"])
 
     def refresh(self, project_map_id: str) -> dict:
         """Merge new verified evidence without silently replacing project cards."""
@@ -226,6 +246,14 @@ class ProjectMapService:
             if self._same_evidence(previous, candidate):
                 unchanged += 1
                 continue
+            if previous.get("state") == "done" and previous.get("overview"):
+                plan.setdefault("superseded_cards", []).append(
+                    {
+                        "unit": previous,
+                        "superseded_at": datetime.now(UTC).isoformat(),
+                        "reason": "verified_evidence_changed",
+                    }
+                )
             candidate.update(
                 state="pending",
                 overview=None,
@@ -264,13 +292,32 @@ class ProjectMapService:
         return value
 
     @staticmethod
-    def _view(plan: dict) -> dict:
+    def _view(
+        plan: dict, *, limit: int | None = 100, current: dict[str, dict] | None = None
+    ) -> dict:
         value = dict(plan)
-        counts = Counter(unit["state"] for unit in plan["units"])
+        units = []
+        stale_evidence = 0
+        for unit in plan["units"]:
+            shown = dict(unit)
+            candidate = current.get(unit["id"]) if current is not None else None
+            current_matches = candidate is not None and ProjectMapService._same_evidence(
+                unit, candidate
+            )
+            if unit["state"] == "done" and (
+                unit.get("evidence_revision_version") != 2
+                or (current is not None and not current_matches)
+            ):
+                shown["state"] = "stale"
+                shown["refresh_reason"] = "evidence_requires_refresh"
+                stale_evidence += 1
+            units.append(shown)
+        counts = Counter(unit["state"] for unit in units)
         value["counts"] = dict(counts)
-        value["total_units"] = len(plan["units"])
-        value["units"] = plan["units"][:100]
-        value["has_more_units"] = len(plan["units"]) > 100
+        value["stale_evidence_count"] = stale_evidence
+        value["total_units"] = len(units)
+        value["units"] = units if limit is None else units[:limit]
+        value["has_more_units"] = limit is not None and len(units) > limit
         return value
 
     @staticmethod
@@ -470,6 +517,13 @@ class ProjectMapService:
         done = {unit["id"]: unit for unit in plan["units"] if unit["state"] == "done"}
         if not selected <= set(done):
             raise ValueError("只能选择已完成总览的项目")
+        minimum = int(plan.get("source", {}).get("minimum_evidence_files", 1))
+        current = {unit["id"]: unit for unit in self._candidate_units(minimum)}
+        if any(
+            unit_id not in current or not self._same_evidence(done[unit_id], current[unit_id])
+            for unit_id in selected
+        ):
+            raise ValueError("项目证据已过期；请先刷新项目清单并重新生成项目卡")
         file_ids: list[int] = []
         for unit_id in request.unit_ids:
             for material in done[unit_id]["materials"]:

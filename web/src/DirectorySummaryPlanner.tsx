@@ -4,6 +4,7 @@ import ProjectMapPanel from "./ProjectMapPanel";
 import SummaryJobsPanel from "./SummaryJobsPanel";
 type Data = Record<string, any>;
 type Category = {id: string; name: string; parent_id: string | null; keywords: string[]};
+const evidenceLabel = (item: Data) => !item.source_current ? "源文件已变化，待重新索引" : item.classification_basis === "content_keywords" ? "正文关键词暂定" : item.classification_basis === "format_only" ? "仅格式依据" : "证据不足";
 
 export default function DirectorySummaryPlanner() {
   const [status, setStatus] = useState<Data | null>(null);
@@ -13,6 +14,7 @@ export default function DirectorySummaryPlanner() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [categories, setCategories] = useState<Category[]>([]);
+  const [localStats, setLocalStats] = useState<Data | null>(null);
   const [revision, setRevision] = useState("");
   const [customized, setCustomized] = useState(false);
   const [systemCategoryCount, setSystemCategoryCount] = useState(0);
@@ -24,22 +26,46 @@ export default function DirectorySummaryPlanner() {
   const [historyId, setHistoryId] = useState("");
   const [dirty, setDirty] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState("");
+  const [fileOffset, setFileOffset] = useState(0);
+  const [filePage, setFilePage] = useState<Data | null>(null);
+  const [fileLoading, setFileLoading] = useState(false);
+  const [fileError, setFileError] = useState("");
   const [categoryQuery, setCategoryQuery] = useState("");
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set());
   const load = async () => {
-    const [a, b] = await Promise.all([api<Data>("/api/foundation/directory-summaries"), api<Data>("/api/foundation/content-categories")]);
+    const [a, b, local] = await Promise.all([
+      api<Data>("/api/foundation/directory-summaries"),
+      api<Data>("/api/foundation/content-categories"),
+      api<Data>("/api/foundation/summary-jobs/catalog-preflight/categories").catch(() => ({ data: null } as Data)),
+    ]);
     const loaded: Category[] = b.data.categories;
-    setStatus(a.data); setCategories(loaded); setRevision(b.data.revision); setCustomized(Boolean(b.data.customized)); setSystemCategoryCount(b.data.system_category_count ?? 0); setDirty(false);
+    setStatus(a.data); setCategories(loaded); setRevision(b.data.revision); setCustomized(Boolean(b.data.customized)); setSystemCategoryCount(b.data.system_category_count ?? 0); setDirty(false); setLocalStats(local.data);
     setSelectedCategory(current => loaded.some(c => c.id === current) ? current : loaded[0]?.id || "");
     setExpandedParents(new Set(loaded.filter(c => !c.parent_id).map(c => c.id)));
   };
   useEffect(() => { load().catch(e => setError(e.message)); }, []);
+  useEffect(() => { setFileOffset(0); }, [selectedCategory]);
+  useEffect(() => {
+    if (!selectedCategory || dirty || !revision) { setFilePage(null); return; }
+    let current = true;
+    setFileLoading(true); setFileError("");
+    api<Data>(`/api/foundation/summary-jobs/catalog-preflight/files?category_id=${encodeURIComponent(selectedCategory)}&offset=${fileOffset}&limit=20`)
+      .then(result => { if (current) setFilePage(result.data); })
+      .catch(exception => { if (current) { setFilePage(null); setFileError((exception as Error).message); } })
+      .finally(() => { if (current) setFileLoading(false); });
+    return () => { current = false; };
+  }, [selectedCategory, fileOffset, dirty, revision, localStats?.total]);
   const perform = async (fn: () => Promise<void>) => {
     setBusy(true); setError(""); setNotice("");
     try { await fn(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
   const parents = categories.filter(c => !c.parent_id);
   const children = categories.filter(c => c.parent_id);
+  const provisionalCounts = new Map<string, number>((localStats?.categories ?? []).map((item: Data) => [item.id, Number(item.count ?? 0)]));
+  const categoryCount = (id: string) => provisionalCounts.get(id) ?? 0;
+  const parentCount = (id: string) => children.filter(child => child.parent_id === id).reduce((count, child) => count + categoryCount(child.id), 0);
+  const shownCount = (id: string, parentId: string | null) => parentId ? categoryCount(id) : parentCount(id);
+  const refreshLocalStats = async () => setLocalStats((await api<Data>("/api/foundation/summary-jobs/catalog-preflight/categories")).data);
   const records: Data[] = plan?.units.flatMap((u: Data) => u.inspected || []) || [];
   const filtered = records.filter(r => !filter || r.classification?.category_id === filter);
   const label = (c: Category) => `${parents.find(p => p.id === c.parent_id)?.name} / ${c.name}`;
@@ -50,24 +76,25 @@ export default function DirectorySummaryPlanner() {
   const toggleParent = (id: string) => setExpandedParents(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   return <section className="foundation-panel directory-summary-panel">
     <h2>整机资料整理 · 首轮检查与分类</h2>
-    <p>先轻读每个文件，再按内容用途分成两级分类。分类显示正文依据；信息不足或类别冲突的文件留在“待判断”。分类标签不会移动原文件。</p>
+    <p>先按方案轻读需要理解的文件，再按内容用途分成两级分类；系统与低价值文件保留目录索引。信息不足或类别冲突的文件留在“待判断”，分类标签不会移动原文件。</p>
     <p>C 盘范围：{status?.c_policy || "正在读取"}。其他盘按用户所选范围整理。</p>
     {error && <p role="alert">{error} <button disabled={busy} onClick={() => perform(load)}>重新加载</button></p>}
     {notice && <p role="status">{notice}</p>}
     <SummaryJobsPanel categories={categories} />
     <section className="taxonomy-editor">
       <header className="taxonomy-editor-head">
-        <div><small>分类管理</small><h3>知识分类</h3><p>按一级分类、二级分类和规则详情逐层查看；一次只编辑一个节点。</p></div>
-        <div className="taxonomy-head-actions"><span className={dirty ? "dirty" : ""}>{dirty ? "有未保存修改" : customized ? "客户自定义版本" : "系统基准版本"}</span><button disabled={busy || !revision || !dirty} onClick={() => perform(async () => { const result = await post<Data>("/api/foundation/content-categories", {expected_revision: revision, categories: categories.map(c => ({...c, keywords: c.keywords.map(x => x.trim()).filter(Boolean)}))}); setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(Boolean(result.data.customized)); setSystemCategoryCount(result.data.system_category_count ?? systemCategoryCount); setDirty(false); setNotice("分类已保存，下次检查生效；系统基准仍独立保留。"); })}>保存分类</button></div>
+        <div><small>分类管理</small><h3>知识分类</h3><p>左边看两级分类和本地暂定数量，右边改规则。暂定数量不等于 AI 已复核或已入库。</p></div>
+        <div className="taxonomy-head-actions"><span className={dirty ? "dirty" : ""}>{dirty ? "有未保存修改" : customized ? "客户自定义版本" : "系统基准版本"}</span><button disabled={busy} onClick={() => perform(refreshLocalStats)}>刷新数量</button><button disabled={busy || !revision || !dirty} onClick={() => perform(async () => { const result = await post<Data>("/api/foundation/content-categories", {expected_revision: revision, categories: categories.map(c => ({...c, keywords: c.keywords.map(x => x.trim()).filter(Boolean)}))}); setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(Boolean(result.data.customized)); setSystemCategoryCount(result.data.system_category_count ?? systemCategoryCount); setDirty(false); await refreshLocalStats(); setNotice("分类已保存；旧规则的本地建议需到资料接入页重新轻读。系统基准仍独立保留。"); })}>保存分类</button></div>
       </header>
+      {Number(localStats?.stale_total ?? 0) > 0 && <p className="taxonomy-stale-note" role="status">{Number(localStats?.stale_total).toLocaleString()} 份本地建议来自旧分类规则，暂不计入右侧数字；到“资料接入”继续本地轻读后会逐步更新。</p>}
       <div className="taxonomy-registry">
         <aside className="taxonomy-tree-pane">
-          <header><strong>分类目录</strong><span>{parents.length} 组 / {children.length} 类</span></header>
+          <header><strong>分类目录</strong><span>{parents.length} 组 / {children.length} 类 · 本地暂定 {Number(localStats?.total ?? 0).toLocaleString()} 份</span></header>
           <input aria-label="搜索知识分类" value={categoryQuery} onChange={e => setCategoryQuery(e.target.value)} placeholder="搜索分类或关键词" />
           <div className="taxonomy-tree" role="tree">
             {visibleParents.map(group => { const groupChildren = children.filter(c => c.parent_id === group.id && (!normalizedQuery || (c.name + " " + c.keywords.join(" ")).toLocaleLowerCase().includes(normalizedQuery))); const expanded = expandedParents.has(group.id) || !!normalizedQuery; return <div className="taxonomy-branch" key={group.id}>
-              <div className={`taxonomy-node parent ${selectedCategory === group.id ? "active" : ""}`}><button className="tree-toggle" aria-label={`${expanded ? "折叠" : "展开"}${group.name}`} onClick={() => toggleParent(group.id)}>{expanded ? "−" : "+"}</button><button role="treeitem" onClick={() => setSelectedCategory(group.id)}><i>◇</i><span>{group.name}</span><b>{children.filter(c => c.parent_id === group.id).length}</b></button></div>
-              {expanded && <div className="taxonomy-children">{groupChildren.map(child => <button role="treeitem" aria-selected={selectedCategory === child.id} className={`taxonomy-node child ${selectedCategory === child.id ? "active" : ""}`} key={child.id} onClick={() => setSelectedCategory(child.id)}><i>└</i><span>{child.name}</span></button>)}</div>}
+              <div className={`taxonomy-node parent ${selectedCategory === group.id ? "active" : ""}`}><button className="tree-toggle" aria-label={`${expanded ? "折叠" : "展开"}${group.name}`} onClick={() => toggleParent(group.id)}>{expanded ? "−" : "+"}</button><button role="treeitem" onClick={() => setSelectedCategory(group.id)}><i>◇</i><span>{group.name}</span><b>{parentCount(group.id).toLocaleString()} 份</b></button></div>
+              {expanded && <div className="taxonomy-children">{groupChildren.map(child => <button role="treeitem" aria-selected={selectedCategory === child.id} className={`taxonomy-node child ${selectedCategory === child.id ? "active" : ""}`} key={child.id} onClick={() => setSelectedCategory(child.id)}><i>└</i><span>{child.name}</span><b>{categoryCount(child.id).toLocaleString()}</b></button>)}</div>}
             </div>})}
           </div>
         </aside>
@@ -75,18 +102,22 @@ export default function DirectorySummaryPlanner() {
           {selected ? <>
             <header><div><small>{selected.parent_id ? "二级分类" : "一级分类"}</small><h3>{selected.name}</h3></div><code>{selected.id}</code></header>
             <div className="taxonomy-breadcrumb"><span>全部分类</span><b>›</b>{selected.parent_id && <><span>{parents.find(item => item.id === selected.parent_id)?.name}</span><b>›</b></>}<strong>{selected.name}</strong></div>
+            <div className="taxonomy-live-count"><small>本地暂定分类 · 未经 AI 复核</small><strong>{shownCount(selected.id, selected.parent_id).toLocaleString()} 份</strong><span>这是当前规则下有正文样本的文件数，不代表已经进入知识库。</span></div>
+            <section className="taxonomy-files"><header><strong>这一类有哪些文件</strong><small>逐文件轻读的暂定结果；只展示路径和依据，不展示正文</small></header>
+              {dirty ? <p>分类规则有未保存修改，保存后可查看对应的最新文件清单。</p> : fileError ? <p role="alert">读取文件清单失败：{fileError}</p> : fileLoading ? <p>正在读取文件清单…</p> : !filePage?.items?.length ? <p>当前分类还没有符合当前规则的轻读文件。</p> : <><ul>{filePage.items.map((item: Data) => <li key={item.catalog_file_id}><code title={item.path}>{item.path}</code><span>{evidenceLabel(item)} · {item.privacy_classification === "restricted" ? "受限资料" : "本机资料"} · 未经 AI 复核</span></li>)}</ul><footer><button type="button" disabled={fileOffset === 0} onClick={() => setFileOffset(Math.max(0, fileOffset - 20))}>上一页</button><span>{fileOffset + 1}–{Math.min(Number(filePage.total), fileOffset + filePage.items.length)} / {Number(filePage.total).toLocaleString()}</span><button type="button" disabled={fileOffset + 20 >= Number(filePage.total)} onClick={() => setFileOffset(fileOffset + 20)}>下一页</button></footer></>}
+            </section>
             <label>显示名称<input aria-label={`分类名称 ${selected.id}`} value={selected.name} disabled={busy} onChange={e => updateCategory(selected.id, {name: e.target.value})} /></label>
             {selected.parent_id ? <label>内容识别关键词<textarea aria-label={`关键词 ${selected.id}`} value={selected.keywords.join("，")} disabled={busy} onChange={e => updateCategory(selected.id, {keywords: e.target.value.split(/[,，]/)})} placeholder="多个关键词用逗号分隔"/><small>关键词用于本地初筛；确认后，所选模型会结合有限文字样本理解用途，不会只靠关键词硬判。</small></label> : <div className="taxonomy-child-overview"><strong>包含的二级分类</strong>{children.filter(c => c.parent_id === selected.id).map(child => <button key={child.id} onClick={() => setSelectedCategory(child.id)}><span>{child.name}</span><small>{child.keywords.length ? child.keywords.slice(0, 3).join(" · ") : "由文件类型和所选模型语义判断"}</small><b>查看 →</b></button>)}</div>}
           </> : <div className="taxonomy-empty">从左侧选择一个分类节点。</div>}
         </main>
         <aside className="taxonomy-control-pane">
-          <section><small>系统分类</small><strong>{customized ? "当前为自定义副本" : "当前为系统基准"}</strong><p>系统基准永久保留 {systemCategoryCount || 38} 个节点。用户修改不会覆盖参考版本。</p><button disabled={busy || !revision || (!customized && !dirty)} onClick={() => { if (!window.confirm("恢复系统基准分类？当前修改会先保存为上一版本，旧扫描记录不会改变。")) return; void perform(async () => {const result = await post<Data>("/api/foundation/content-categories/restore", {expected_revision: revision}); setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(false); setDirty(false); setNotice("已恢复系统基准分类；修改前版本仍保留。");}) }}>恢复系统分类</button></section>
+          <section><small>系统分类</small><strong>{customized ? "当前为自定义副本" : "当前为系统基准"}</strong><p>系统基准永久保留 {systemCategoryCount || 38} 个节点。用户修改不会覆盖参考版本。</p><button disabled={busy || !revision || (!customized && !dirty)} onClick={() => { if (!window.confirm("恢复系统基准分类？当前修改会先保存为上一版本，旧扫描记录不会改变。")) return; void perform(async () => {const result = await post<Data>("/api/foundation/content-categories/restore", {expected_revision: revision}); setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(false); setDirty(false); await refreshLocalStats(); setNotice("已恢复系统基准分类；旧规则的本地建议需重新轻读。");}) }}>恢复系统分类</button></section>
           <section><small>新增分类</small><strong>新增分类</strong><label>所属<select aria-label="新增分类所属" value={parent} onChange={e => setParent(e.target.value)}><option value="">新建一级分类</option>{parents.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>名称<input aria-label="新增分类名称" value={name} onChange={e => setName(e.target.value)} /></label>{parent && <label>关键词<input aria-label="新增分类关键词" value={keywords} onChange={e => setKeywords(e.target.value)} placeholder="逗号分隔" /></label>}<button disabled={!name.trim() || busy} onClick={() => {const id="custom_" + crypto.randomUUID().replaceAll("-", ""); setCategories([...categories, {id, name: name.trim(), parent_id: parent || null, keywords: parent ? keywords.split(/[,，]/).map(x => x.trim()).filter(Boolean) : []}]); if(parent)setExpandedParents(current => new Set(current).add(parent)); setSelectedCategory(id); setName(""); setKeywords(""); setDirty(true);}}>添加节点</button></section>
         </aside>
       </div>
     </section>
     <details className="legacy-taxonomy-flat"><summary>高级：旧版批量编辑全部分类</summary>
-      <div className="taxonomy-baseline"><div><strong>{customized ? "正在使用客户自定义分类" : "正在使用系统基准分类"}</strong><small>系统参考固定保留 {systemCategoryCount || 38} 项；扫描资料时自动使用当前副本分类，旧检查记录保留当时版本。</small></div><button disabled={busy || !revision || (!customized && !dirty)} onClick={() => { if (!window.confirm("恢复系统基准分类？当前修改会先保存为上一版本，旧扫描记录不会改变。")) return; void perform(async () => {const result = await post<Data>("/api/foundation/content-categories/restore", {expected_revision: revision}); setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(false); setDirty(false); setNotice("已恢复系统基准分类；修改前版本仍保留。")}); }}>恢复系统分类</button></div>
+      <div className="taxonomy-baseline"><div><strong>{customized ? "正在使用客户自定义分类" : "正在使用系统基准分类"}</strong><small>系统参考固定保留 {systemCategoryCount || 38} 项；扫描资料时自动使用当前副本分类，旧检查记录保留当时版本。</small></div><button disabled={busy || !revision || (!customized && !dirty)} onClick={() => { if (!window.confirm("恢复系统基准分类？当前修改会先保存为上一版本，旧扫描记录不会改变。")) return; void perform(async () => {const result = await post<Data>("/api/foundation/content-categories/restore", {expected_revision: revision}); setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(false); setDirty(false); await refreshLocalStats(); setNotice("已恢复系统基准分类；旧规则的本地建议需重新轻读。")}); }}>恢复系统分类</button></div>
       <p>可修改名称与关键词、增加一级或二级分类。关键词匹配抽样正文；保存后用于下次检查，系统基准不会被客户修改覆盖。</p>
       {parents.map(group => <div key={group.id} className="foundation-hit">
         <label>一级名称<input aria-label={`一级名称 ${group.id}`} value={group.name} disabled={busy} onChange={e => {setCategories(categories.map(c => c.id === group.id ? {...c, name: e.target.value} : c)); setDirty(true);}} /></label>
@@ -103,7 +134,7 @@ export default function DirectorySummaryPlanner() {
       </div>
       <button disabled={busy || !revision || !dirty} onClick={() => perform(async () => {
         const result = await post<Data>("/api/foundation/content-categories", {expected_revision: revision, categories: categories.map(c => ({...c, keywords: c.keywords.map(x => x.trim()).filter(Boolean)}))});
-        setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(Boolean(result.data.customized)); setSystemCategoryCount(result.data.system_category_count ?? systemCategoryCount); setDirty(false); setNotice("分类已保存，下次检查生效；系统基准仍独立保留。");
+        setRevision(result.data.revision); setCategories(result.data.categories); setCustomized(Boolean(result.data.customized)); setSystemCategoryCount(result.data.system_category_count ?? systemCategoryCount); setDirty(false); await refreshLocalStats(); setNotice("分类已保存；旧规则的本地建议需重新轻读。系统基准仍独立保留。");
       })}>保存分类规则</button>
     </details>
     <ProjectMapPanel />

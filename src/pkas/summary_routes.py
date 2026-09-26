@@ -60,6 +60,67 @@ def catalog_progress(request: Request):
         raise HTTPException(409, "无法读取A库分类台账") from None
 
 
+@router.post("/catalog-progress/retry")
+def retry_catalog_progress(request: Request):
+    try:
+        return result(service(request).retry_catalog_progress())
+    except (ValueError, OSError):
+        raise HTTPException(409, "无法重新计算A库分类范围") from None
+
+
+@router.get("/catalog-preflight")
+def catalog_preflight_status(request: Request):
+    return result(service(request).catalog_preflight_status())
+
+
+@router.get("/catalog-preflight/categories")
+def catalog_preflight_categories(request: Request):
+    try:
+        return result(service(request).catalog_preflight_categories())
+    except (ValueError, OSError):
+        raise HTTPException(409, "无法读取本地暂定分类") from None
+
+
+@router.get("/catalog-preflight/reviews")
+def catalog_preflight_reviews(
+    request: Request, offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100)
+):
+    try:
+        return result(service(request).catalog_preflight_reviews(offset=offset, limit=limit))
+    except (ValueError, OSError):
+        raise HTTPException(409, "无法读取本地待复查明细") from None
+
+
+@router.get("/catalog-preflight/files")
+def catalog_preflight_files(
+    request: Request,
+    category_id: str = Query(..., min_length=1, max_length=64),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=50),
+):
+    try:
+        return result(service(request).catalog_preflight_files(
+            category_id, offset=offset, limit=limit
+        ))
+    except (ValueError, OSError):
+        raise HTTPException(409, "无法读取当前分类的文件明细") from None
+
+
+@router.post("/catalog-preflight/start")
+def start_catalog_preflight(request: Request):
+    try:
+        return result(service(request).start_catalog_preflight())
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(
+            409, str(exc) if isinstance(exc, ValueError) else "无法启动本地逐文件轻读"
+        ) from None
+
+
+@router.post("/catalog-preflight/pause")
+def pause_catalog_preflight(request: Request):
+    return result(service(request).pause_catalog_preflight())
+
+
 @router.get("/catalog-classifications")
 def catalog_classifications(request: Request):
     try:

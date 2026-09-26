@@ -18,6 +18,7 @@ def _seed_ledger(settings):
     source_path = source_root / "demo" / "README.md"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text("demo project", encoding="utf-8")
+    source_stat = source_path.stat()
     ledger = CatalogClassificationLedger(settings.data_root)
     with ledger.connect() as db:
         record = {
@@ -39,8 +40,8 @@ def _seed_ledger(settings):
                 str(source_path),
                 str(source_root),
                 "document",
-                10,
-                1,
+                source_stat.st_size,
+                source_stat.st_mtime_ns,
                 "inspected",
                 json.dumps(record),
                 json.dumps({"text": "项目说明"}),
@@ -214,6 +215,50 @@ def test_project_map_can_select_completed_project_materials(test_settings):
     assert [item["summary_file_id"] for item in selection["items"]] == ["catalog:1"]
 
 
+def test_legacy_project_card_is_visible_as_stale_and_cannot_be_promoted(test_settings):
+    _seed_ledger(test_settings)
+    service = ProjectMapService(test_settings)
+    plan = service.create(ProjectMapCreateRequest())
+    plan["units"][0].update(state="done", overview={"title": "旧卡"})
+    plan["units"][0].pop("evidence_revision_version")
+    service._save(plan)
+
+    shown = service.latest()
+    assert shown["stale_evidence_count"] == 1
+    assert shown["counts"]["stale"] == 1
+    assert shown["units"][0]["state"] == "stale"
+    assert service.read(plan["id"])["units"][0]["state"] == "done"
+    with TestClient(create_app(test_settings)) as client:
+        read = client.get(f"/api/foundation/project-map/{plan['id']}")
+        assert read.status_code == 200
+        assert read.json()["data"]["units"][0]["state"] == "stale"
+        preview = client.post(
+            f"/api/foundation/project-map/{plan['id']}/promote-preview",
+            json={"unit_ids": [plan["units"][0]["id"]], "mode": "full"},
+        )
+        assert preview.status_code == 409
+
+
+def test_changed_project_source_cannot_be_promoted_without_refresh(test_settings):
+    _seed_ledger(test_settings)
+    service = ProjectMapService(test_settings)
+    plan = service.create(ProjectMapCreateRequest())
+    plan["units"][0]["state"] = "done"
+    service._save(plan)
+    source = test_settings.project_root / "workspace" / "demo" / "README.md"
+    source.write_text("changed after card", encoding="utf-8")
+
+    shown = service.latest()
+    assert shown["units"][0]["state"] == "stale"
+    assert shown["stale_evidence_count"] == 1
+    with TestClient(create_app(test_settings)) as client:
+        preview = client.post(
+            f"/api/foundation/project-map/{plan['id']}/promote-preview",
+            json={"unit_ids": [plan["units"][0]["id"]], "mode": "full"},
+        )
+        assert preview.status_code == 409
+
+
 def test_project_map_refresh_marks_changed_evidence_pending_without_replacing_plan(test_settings):
     _seed_ledger(test_settings)
     service = ProjectMapService(test_settings)
@@ -222,6 +267,7 @@ def test_project_map_refresh_marks_changed_evidence_pending_without_replacing_pl
     service._save(plan)
     source_path = test_settings.project_root / "workspace" / "demo" / "notes.md"
     source_path.write_text("new verified note", encoding="utf-8")
+    source_stat = source_path.stat()
     ledger = CatalogClassificationLedger(test_settings.data_root)
     with ledger.connect() as db:
         record = {
@@ -243,8 +289,8 @@ def test_project_map_refresh_marks_changed_evidence_pending_without_replacing_pl
                 str(source_path),
                 str(source_path.parents[1]),
                 "document",
-                10,
-                2,
+                source_stat.st_size,
+                source_stat.st_mtime_ns,
                 "inspected",
                 json.dumps(record),
                 json.dumps({"text": "补充说明"}),
@@ -262,6 +308,35 @@ def test_project_map_refresh_marks_changed_evidence_pending_without_replacing_pl
     assert refreshed["units"][0]["state"] == "pending"
     assert refreshed["units"][0]["overview"] is None
     assert refreshed["units"][0]["evidence_file_count"] == 2
+    assert refreshed["superseded_cards"][0]["unit"]["overview"]["title"] == "旧项目卡"
+    assert service.read(plan["id"])["superseded_cards"][0]["unit"]["state"] == "done"
+
+
+def test_project_map_expires_a_changed_source_even_when_catalog_id_is_the_same(
+    test_settings,
+):
+    _seed_ledger(test_settings)
+    service = ProjectMapService(test_settings)
+    plan = service.create(ProjectMapCreateRequest())
+    plan["units"][0].update(state="done", overview={"title": "旧项目卡"})
+    service._save(plan)
+    source = test_settings.project_root / "workspace" / "demo" / "README.md"
+    source.write_text("demo project changed and expanded", encoding="utf-8")
+    stale = service.refresh(plan["id"])
+    assert stale["refresh_summary"]["stale"] == 1
+    assert stale["units"][0]["state"] == "stale"
+
+    stat = source.stat()
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    with ledger.connect() as db:
+        db.execute(
+            "UPDATE entries SET byte_size=?,modified_ns=? WHERE catalog_file_id=1",
+            (stat.st_size, stat.st_mtime_ns),
+        )
+    refreshed = service.refresh(plan["id"])
+    assert refreshed["refresh_summary"]["changed"] == 1
+    assert refreshed["units"][0]["state"] == "pending"
+    assert refreshed["units"][0]["evidence_revision"] != plan["units"][0]["evidence_revision"]
 
 
 def test_project_map_refresh_route_returns_incremental_summary(test_settings):

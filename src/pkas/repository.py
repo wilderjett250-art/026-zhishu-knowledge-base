@@ -17,6 +17,7 @@ CODEX_TURN_EVIDENCE_WARNING = (
 )
 CODEX_USER_TASK_MIGRATION_KEY = "codex_turn_user_task_only_v1"
 CODEX_TURN_ARCHIVE_MIGRATION_KEY = "codex_turn_archive_v1"
+PROCESSING_LEVEL_RANK = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
 
 
 def _extract_codex_user_task_text(text: str) -> str | None:
@@ -526,10 +527,14 @@ class Repository:
         if byte_size < 0:
             raise ValueError("资料别名文件大小无效。")
         now = utc_now()
-        serialized_metadata = json.dumps(metadata or {}, ensure_ascii=False)
+        alias_metadata = metadata or {}
+        requested_level = alias_metadata.get("requested_processing_level")
+        if requested_level is not None and requested_level not in PROCESSING_LEVEL_RANK:
+            raise ValueError("资料处理级别无效。")
+        serialized_metadata = json.dumps(alias_metadata, ensure_ascii=False)
         with self.database.connect() as connection:
             canonical = connection.execute(
-                "SELECT id, content_hash FROM sources WHERE id = ?",
+                "SELECT id, content_hash, metadata_json FROM sources WHERE id = ?",
                 (source_id,),
             ).fetchone()
             if not canonical:
@@ -541,7 +546,51 @@ class Repository:
             if source_at_uri:
                 if source_at_uri["content_hash"] != canonical["content_hash"]:
                     raise ValueError("原始路径已有不同内容版本，需重新预览后处理。")
-                return {"status": "canonical", "source_id": source_at_uri["id"]}
+                # The selected path may already be the canonical URI.  Promote
+                # that row (not merely an alias) before returning below.
+                target_source_id = source_at_uri["id"]
+                target = connection.execute(
+                    "SELECT metadata_json FROM sources WHERE id = ?",
+                    (target_source_id,),
+                ).fetchone()
+            else:
+                target_source_id = source_id
+                target = canonical
+            if requested_level is not None:
+                target_metadata = json.loads(target["metadata_json"] or "{}")
+                if not isinstance(target_metadata, dict):
+                    target_metadata = {}
+                current_level = target_metadata.get("requested_processing_level")
+                if PROCESSING_LEVEL_RANK[requested_level] > PROCESSING_LEVEL_RANK.get(
+                    current_level if isinstance(current_level, str) else "", -1
+                ):
+                    target_metadata["requested_processing_level"] = requested_level
+                    connection.execute(
+                        "UPDATE sources SET metadata_json=? WHERE id=?",
+                        (json.dumps(target_metadata, ensure_ascii=False), target_source_id),
+                    )
+            if requested_level == "L3":
+                # A duplicate L3 selection must make the canonical chunks eligible
+                # again; alias metadata alone is invisible to VectorIndex._candidates.
+                # Reusing each chunk's durable event key makes this safe to retry.
+                connection.execute(
+                    """INSERT INTO index_outbox(
+                           event_key,operation,entity_type,entity_id,status,attempts,
+                           available_at,created_at,updated_at
+                       )
+                       SELECT 'vector:upsert:'||c.id,'upsert','chunk',c.id,'pending',0,
+                           strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                           strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                           strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                       FROM chunks AS c WHERE c.source_id=?
+                       ON CONFLICT(event_key) DO UPDATE SET
+                           status='pending',attempts=0,last_error_code=NULL,
+                           available_at=excluded.available_at,updated_at=excluded.updated_at""",
+                    (target_source_id,),
+                )
+            if source_at_uri:
+                connection.commit()
+                return {"status": "canonical", "source_id": target_source_id}
             current = connection.execute(
                 "SELECT source_id FROM source_aliases WHERE original_uri = ?",
                 (original_uri,),

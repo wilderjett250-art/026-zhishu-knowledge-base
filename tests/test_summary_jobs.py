@@ -1,5 +1,6 @@
 import errno
 import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -34,6 +35,8 @@ def seed_catalog(settings, source: Path):
             category TEXT,byte_size INTEGER,modified_ns INTEGER,state TEXT,last_job_id TEXT,
             first_seen_at TEXT,last_seen_at TEXT)"""
         )
+        db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,state TEXT,started_at TEXT)")
+        db.execute("INSERT INTO jobs VALUES('test','completed','now')")
         stat = source.stat()
         db.execute(
             "INSERT INTO files VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -43,6 +46,46 @@ def seed_catalog(settings, source: Path):
                 "active", "test", "now", "now",
             ),
         )
+
+
+def test_classification_ledger_attaches_a_catalog_read_only(test_settings, tmp_path):
+    source = tmp_path / "README.md"
+    source.write_text("项目说明", encoding="utf-8")
+    seed_catalog(test_settings, source)
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    with ledger.connect() as db:
+        ledger._attach_catalog(db)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                db.execute("UPDATE catalog.files SET name='changed' WHERE id=1")
+        finally:
+            ledger._detach_catalog(db)
+
+
+def test_existing_preflight_rows_gain_explicit_privacy_and_review_fields(test_settings):
+    home = test_settings.data_root / "catalog-classification"
+    home.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(home / "ledger.sqlite") as db:
+        db.execute(
+            """CREATE TABLE local_preflight(
+                catalog_file_id INTEGER PRIMARY KEY, byte_size INTEGER NOT NULL,
+                modified_ns INTEGER NOT NULL, prefix_sha256 TEXT, detected_type TEXT,
+                coverage TEXT NOT NULL, category_id TEXT NOT NULL,
+                classification_basis TEXT NOT NULL, confidence REAL NOT NULL,
+                outcome TEXT NOT NULL, reason TEXT NOT NULL, inspected_at TEXT NOT NULL
+            )"""
+        )
+        db.execute(
+            "INSERT INTO local_preflight VALUES(1,20,10,NULL,'text','partial',"
+            "'unresolved_other','local',0,'sampled','bounded_content_sample','now')"
+        )
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    with ledger.connect() as db:
+        row = db.execute(
+            "SELECT privacy_classification,review_status,taxonomy_revision "
+            "FROM local_preflight"
+        ).fetchone()
+    assert tuple(row) == ("restricted", "unreviewed", "")
 
 
 def test_catalog_batch_reserves_a_files_and_records_derived_result(
@@ -80,6 +123,7 @@ def test_catalog_batch_reserves_a_files_and_records_derived_result(
     assert len(unfiltered["items"]) == 1
     with pytest.raises(ValueError, match="没有待分类"):
         jobs.create(SummaryJobRequest(scope="catalog_batch"), start=False)
+    assert len(list(jobs.home.glob("*/queue.sqlite"))) == 1
     source.write_text("甲方乙方约定（已更新）", encoding="utf-8")
     stat = source.stat()
     with sqlite3.connect(test_settings.data_root / "machine-catalog" / "catalog.sqlite") as db:
@@ -87,6 +131,7 @@ def test_catalog_batch_reserves_a_files_and_records_derived_result(
             "UPDATE files SET byte_size=?,modified_ns=? WHERE id=1",
             (stat.st_size, stat.st_mtime_ns),
         )
+        db.execute("INSERT INTO jobs VALUES('test-rescan','completed','now2')")
     next_job = jobs.create(SummaryJobRequest(scope="catalog_batch"), start=False)
     assert next_job["catalog_batch"]["reserved"] == 1
     with sqlite3.connect(jobs.catalog_ledger.path) as db:
@@ -137,6 +182,96 @@ def test_catalog_reservation_can_be_limited_to_auto_selected_directory(test_sett
         directory_units=[{"scope_path": str(wanted.parent), "top_group": "_root"}],
     )
     assert [row["path"] for row in rows] == [str(wanted)]
+
+
+def test_auto_scope_batch_samples_distinct_directories_first(test_settings, tmp_path):
+    first_group = tmp_path / "first"
+    second_group = tmp_path / "second"
+    first_group.mkdir()
+    second_group.mkdir()
+    files = [
+        first_group / "a.md", first_group / "README.md",
+        second_group / "c.md", second_group / "d.md",
+    ]
+    for path in files:
+        path.write_text("项目背景与用途", encoding="utf-8")
+    seed_catalog(test_settings, files[0])
+    catalog = test_settings.data_root / "machine-catalog" / "catalog.sqlite"
+    with sqlite3.connect(catalog) as db:
+        db.execute(
+            "UPDATE files SET scope_path=?,top_group=? WHERE id=1",
+            (str(tmp_path), "first"),
+        )
+        for identifier, path in enumerate(files[1:], start=2):
+            stat = path.stat()
+            db.execute(
+                "INSERT INTO files VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    identifier, str(tmp_path), str(path), path.name,
+                    str(path.parent), path.parent.name, path.name, path.suffix,
+                    "document", stat.st_size, stat.st_mtime_ns,
+                    "active", "test", "now", "now",
+                ),
+            )
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    units = [
+        {"scope_path": str(tmp_path), "top_group": "first"},
+        {"scope_path": str(tmp_path), "top_group": "second"},
+    ]
+    rows = ledger.reserve(
+        "e" * 32, 2, directory_units=units, automatic_only=True
+    )
+    assert [Path(row["path"]).parent.name for row in rows] == ["first", "second"]
+    assert Path(rows[0]["path"]).name == "README.md"
+
+
+def test_catalog_batch_can_select_a_current_provisional_category(
+    test_settings, tmp_path, monkeypatch
+):
+    contract = tmp_path / "contract.md"
+    requirements = tmp_path / "requirements.md"
+    contract.write_text("甲方乙方签订合同", encoding="utf-8")
+    requirements.write_text("功能需求与验收标准", encoding="utf-8")
+    seed_catalog(test_settings, contract)
+    stat = requirements.stat()
+    with sqlite3.connect(test_settings.data_root / "machine-catalog" / "catalog.sqlite") as db:
+        db.execute(
+            "INSERT INTO files VALUES(2,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(requirements.parent), str(requirements), requirements.name,
+                str(requirements.parent), "_root", requirements.name,
+                requirements.suffix, "document", stat.st_size,
+                stat.st_mtime_ns, "active", "test", "now", "now",
+            ),
+        )
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    monkeypatch.setattr(ledger, "_safe_preflight_path", lambda path, scope: True)
+    assert ledger.preflight_batch(2)["sampled"] == 2
+    jobs = SummaryJobs(test_settings)
+    selected = jobs.create(
+        SummaryJobRequest(
+            scope="catalog_batch", provider="external", allow_remote_processing=True,
+            local_category_id="work_requirements",
+        ), start=False,
+    )
+    assert [Path(item["path"]).name for item in selected["records"]] == [
+        "requirements.md"
+    ]
+    assert selected["request"]["local_category_id"] == "work_requirements"
+    before = set(jobs.home.glob("*/queue.sqlite"))
+    with pytest.raises(ValueError, match="没有待分类"):
+        jobs.create(
+            SummaryJobRequest(
+                scope="catalog_batch", provider="external",
+                allow_remote_processing=True,
+                local_category_id="work_requirements",
+            ), start=False,
+        )
+    assert set(jobs.home.glob("*/queue.sqlite")) == before
+    assert ledger.reserve(
+        "f" * 32, 1, automatic_only=True, remote_processing=True,
+        local_category_id="finance_contract",
+    )[0]["path"] == str(contract)
 
 
 def test_catalog_reservation_prioritizes_readable_material_before_binary_files(
@@ -190,7 +325,46 @@ def test_auto_reservation_keeps_runtime_logs_in_catalog_only(test_settings, tmp_
     rows = CatalogClassificationLedger(test_settings.data_root).reserve(
         "d" * 32, 50, automatic_only=True
     )
-    assert [Path(row["path"]).name for row in rows] == ["requirements.md", "library.so"]
+    assert [Path(row["path"]).name for row in rows] == ["requirements.md"]
+
+
+def test_scoped_auto_reservation_reaches_document_after_many_l0_files(
+    test_settings, tmp_path
+):
+    first_log = tmp_path / "run-000.log"
+    first_log.write_text("generated", encoding="utf-8")
+    seed_catalog(test_settings, first_log)
+    document = tmp_path / "PROJECT.md"
+    document.write_text("项目背景、做法和交付边界。", encoding="utf-8")
+    with sqlite3.connect(test_settings.data_root / "machine-catalog" / "catalog.sqlite") as db:
+        for identifier in range(2, 82):
+            path = tmp_path / f"run-{identifier:03d}.log"
+            path.write_text("generated", encoding="utf-8")
+            stat = path.stat()
+            db.execute(
+                "INSERT INTO files VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    identifier, str(tmp_path), str(path), path.name, str(tmp_path),
+                    "_root", path.name, path.suffix, "document", stat.st_size,
+                    stat.st_mtime_ns, "active", "test", "now", "now",
+                ),
+            )
+        stat = document.stat()
+        db.execute(
+            "INSERT INTO files VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                82, str(tmp_path), str(document), document.name, str(tmp_path),
+                "_root", document.name, document.suffix, "document", stat.st_size,
+                stat.st_mtime_ns, "active", "test", "now", "now",
+            ),
+        )
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    rows = ledger.reserve(
+        "e" * 32, 1,
+        directory_units=[{"scope_path": str(tmp_path), "top_group": "_root"}],
+        automatic_only=True,
+    )
+    assert [Path(row["path"]).name for row in rows] == ["PROJECT.md"]
 
 
 def test_catalog_progress_distinguishes_ai_decisions_from_local_skips(
@@ -232,6 +406,374 @@ def test_catalog_progress_distinguishes_ai_decisions_from_local_skips(
     assert progress["local_skipped"] == 1
     assert progress["decision_done"] == 1
     assert progress["decision_coverage_percent"] == 50.0
+
+
+def test_catalog_ledger_reinitialization_preserves_audited_ai_state(test_settings, tmp_path):
+    source = tmp_path / "README.md"
+    source.write_text("项目说明：背景、做法与交付。", encoding="utf-8")
+    seed_catalog(test_settings, source)
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    ledger.reserve("a" * 32, 1, automatic_only=True)
+    with ledger.connect() as db:
+        db.execute(
+            "UPDATE entries SET state='inspected',ai_state='local_l0' WHERE catalog_file_id=1"
+        )
+    reopened = CatalogClassificationLedger(test_settings.data_root)
+    with reopened.connect() as db:
+        state = db.execute("SELECT ai_state FROM entries WHERE catalog_file_id=1").fetchone()[0]
+        assert state == "local_l0"
+
+
+def test_catalog_scope_retry_route_stays_local_and_reports_progress(test_settings, tmp_path):
+    source = tmp_path / "README.md"
+    source.write_text("项目背景与说明。", encoding="utf-8")
+    seed_catalog(test_settings, source)
+    with TestClient(create_app(test_settings)) as client:
+        response = client.post("/api/foundation/summary-jobs/catalog-progress/retry", json={})
+        assert response.status_code == 200
+        assert response.json()["data"]["scope_state"] in {"building", "ready"}
+        denied = client.post(
+            "/api/foundation/summary-jobs/catalog-progress/retry",
+            json={}, headers={"origin": "https://external.example"},
+        )
+        assert denied.status_code == 403
+
+
+def test_local_preflight_is_resumable_and_keeps_body_out_of_ledger(
+    test_settings, tmp_path, monkeypatch
+):
+    source = tmp_path / "contract.md"
+    source.write_text("甲方乙方项目交付合同。", encoding="utf-8")
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"%PDF-1.4\nnot a readable document")
+    seed_catalog(test_settings, source)
+    stat = broken.stat()
+    catalog = test_settings.data_root / "machine-catalog" / "catalog.sqlite"
+    with sqlite3.connect(catalog) as db:
+        db.execute(
+            "INSERT INTO files VALUES(2,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(broken.parent), str(broken), broken.name, str(broken.parent),
+                "_root", broken.name, broken.suffix, "document", stat.st_size,
+                stat.st_mtime_ns, "active", "test", "now", "now",
+            ),
+        )
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    monkeypatch.setattr(ledger, "_safe_preflight_path", lambda path, scope: True)
+    result = ledger.preflight_batch(2)
+    assert result["processed"] == 2
+    assert result["sampled"] == 1
+    assert result["needs_review"] == 1
+    assert ledger.preflight_batch(2)["processed"] == 0
+    progress = ledger.progress()
+    assert progress["local_read_done"] == 2
+    assert progress["local_read_pending"] == 0
+    assert progress["ai_done"] == 0
+    assert progress["ai_failed"] == 0
+    assert progress["review_pending"] == 1
+    categories = ledger.preflight_categories()
+    assert categories["status"] == "local_provisional_not_ai"
+    assert categories["total"] == 1
+    assert categories["categories"][0]["id"] == "finance_contract"
+    reviews = ledger.preflight_reviews()
+    assert reviews["total"] == 1
+    assert reviews["reasons"] == [{"reason": "structure_parse_failed", "total": 1}]
+    assert Path(reviews["items"][0]["path"]).name == "broken.pdf"
+    with ledger.connect() as db:
+        row = db.execute(
+            "SELECT category_id,outcome,reason,privacy_classification,review_status "
+            "FROM local_preflight "
+            "WHERE catalog_file_id=1"
+        ).fetchone()
+        assert dict(row) == {
+            "category_id": "finance_contract", "outcome": "sampled",
+            "reason": "bounded_content_sample",
+            "privacy_classification": "restricted", "review_status": "unreviewed",
+        }
+        rows = db.execute("SELECT * FROM local_preflight").fetchall()
+        assert "甲方乙方" not in json.dumps([tuple(row) for row in rows], ensure_ascii=False)
+
+    # Rebuilding the profile gate must preserve a matching content version.
+    config = test_settings.data_root / "config" / "processing_profile.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        json.dumps({
+            "rules": {"markdown": "full", "documents": "extract", "code": "catalog",
+                      "images": "catalog", "other": "catalog"},
+            "exclusions": ["unused-folder"],
+        }), encoding="utf-8",
+    )
+    ledger.refresh_auto_scope()
+    assert ledger.progress()["local_read_done"] == 2
+    jobs = SummaryJobs(test_settings)
+    queued = jobs.create(
+        SummaryJobRequest(
+            scope="catalog_batch", provider="external", allow_remote_processing=True
+        ), start=False,
+    )
+    assert queued["catalog_batch"]["reserved"] == 1
+    assert Path(queued["records"][0]["path"]).name == "contract.md"
+
+
+def test_local_preflight_never_classifies_a_stale_catalog_version(
+    test_settings, tmp_path, monkeypatch
+):
+    source = tmp_path / "notes.md"
+    source.write_text("旧内容", encoding="utf-8")
+    seed_catalog(test_settings, source)
+    source.write_text("新的文件内容，与目录索引时不同", encoding="utf-8")
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    monkeypatch.setattr(ledger, "_safe_preflight_path", lambda path, scope: True)
+    assert ledger.preflight_batch(1)["needs_review"] == 1
+    with ledger.connect() as db:
+        row = db.execute(
+            "SELECT outcome,reason,category_id FROM local_preflight"
+        ).fetchone()
+    assert tuple(row) == (
+        "needs_review", "source_changed_since_catalog", "unresolved_other"
+    )
+    assert ledger.preflight_reviews()["reasons"] == [
+        {"reason": "source_changed_since_catalog", "total": 1}
+    ]
+
+
+def test_local_preflight_flushes_a_partial_batch_before_pause(
+    test_settings, tmp_path, monkeypatch
+):
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("第一份项目需求说明", encoding="utf-8")
+    second.write_text("第二份项目需求说明", encoding="utf-8")
+    seed_catalog(test_settings, first)
+    stat = second.stat()
+    with sqlite3.connect(test_settings.data_root / "machine-catalog" / "catalog.sqlite") as db:
+        db.execute(
+            "INSERT INTO files VALUES(2,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(second.parent), str(second), second.name, str(second.parent),
+                "_root", second.name, second.suffix, "document", stat.st_size,
+                stat.st_mtime_ns, "active", "test", "now", "now",
+            ),
+        )
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    monkeypatch.setattr(ledger, "_safe_preflight_path", lambda path, scope: True)
+    from pkas.file_inspector import inspect_file as original_inspect
+
+    stop = threading.Event()
+
+    def inspect_then_pause(path):
+        result = original_inspect(path)
+        stop.set()
+        return result
+
+    monkeypatch.setattr("pkas.catalog_classification.inspect_file", inspect_then_pause)
+    assert ledger.preflight_batch(2, stop=stop)["processed"] == 1
+    with ledger.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM local_preflight").fetchone()[0] == 1
+    monkeypatch.setattr("pkas.catalog_classification.inspect_file", original_inspect)
+    assert ledger.preflight_batch(2)["processed"] == 1
+    assert ledger.progress()["local_read_pending"] == 0
+
+
+def test_taxonomy_edit_marks_old_local_classification_stale_and_rereads(
+    test_settings, tmp_path, monkeypatch
+):
+    from pkas.content_taxonomy import defaults
+
+    source = tmp_path / "contract.md"
+    source.write_text("甲方乙方签字确认", encoding="utf-8")
+    seed_catalog(test_settings, source)
+    ledger = CatalogClassificationLedger(test_settings.data_root)
+    monkeypatch.setattr(ledger, "_safe_preflight_path", lambda path, scope: True)
+    assert ledger.preflight_batch(1)["sampled"] == 1
+    assert ledger.preflight_categories()["categories"][0]["id"] == "finance_contract"
+
+    categories = defaults()
+    for category in categories:
+        if category["id"] == "finance_contract":
+            category["keywords"] = []
+        elif category["id"] == "work_requirements":
+            category["keywords"].append("甲方乙方")
+    config = test_settings.data_root / "config" / "content-taxonomy.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps(categories, ensure_ascii=False), encoding="utf-8")
+    stale = ledger.preflight_categories()
+    assert stale["total"] == 0
+    assert stale["stale_total"] == 1
+    assert ledger.preflight_files("finance_contract")["total"] == 0
+    assert ledger.preflight_batch(1)["sampled"] == 1
+    current = ledger.preflight_categories()
+    assert current["stale_total"] == 0
+    assert current["categories"][0]["id"] == "work_requirements"
+    assert ledger.preflight_files("work_requirements")["total"] == 1
+    assert ledger.preflight_batch(1)["processed"] == 0
+
+
+def test_catalog_preflight_api_is_local_only_and_reads_on_request(
+    test_settings, tmp_path, monkeypatch
+):
+    source = tmp_path / "spec.md"
+    source.write_text("功能需求：交付功能。", encoding="utf-8")
+    seed_catalog(test_settings, source)
+    with TestClient(create_app(test_settings)) as client:
+        monkeypatch.setattr(
+            client.app.state.summary_jobs.catalog_ledger,
+            "_safe_preflight_path", lambda path, scope: True,
+        )
+        before = client.get("/api/foundation/summary-jobs/catalog-progress").json()["data"]
+        assert before["local_read_done"] == 0
+        for _ in range(100):
+            scope = client.get(
+                "/api/foundation/summary-jobs/catalog-progress"
+            ).json()["data"]
+            if scope["scope_state"] == "ready":
+                break
+            time.sleep(0.05)
+        assert scope["scope_state"] == "ready"
+        denied = client.post(
+            "/api/foundation/summary-jobs/catalog-preflight/start",
+            json={}, headers={"origin": "https://external.example"},
+        )
+        assert denied.status_code == 403
+        assert client.post(
+            "/api/foundation/summary-jobs/catalog-preflight/start", json={}
+        ).status_code == 200
+        for _ in range(100):
+            state = client.get(
+                "/api/foundation/summary-jobs/catalog-preflight"
+            ).json()["data"]
+            if not state["running"]:
+                break
+            time.sleep(0.05)
+        assert state["state"] == "completed"
+        after = client.get("/api/foundation/summary-jobs/catalog-progress").json()["data"]
+        assert after["local_read_done"] == 1
+        assert after["ai_done"] == 0
+        categories = client.get(
+            "/api/foundation/summary-jobs/catalog-preflight/categories"
+        ).json()["data"]
+        assert categories["total"] == 1
+        files = client.get(
+            "/api/foundation/summary-jobs/catalog-preflight/files",
+            params={"category_id": "work_requirements", "limit": 1},
+        ).json()["data"]
+        assert files["total"] == 1
+        assert files["items"][0]["path"] == str(source)
+        assert files["items"][0]["classification_basis"] == "content_keywords"
+        assert files["items"][0]["source_current"] is True
+        assert "text_preview" not in files["items"][0]
+        parent_files = client.get(
+            "/api/foundation/summary-jobs/catalog-preflight/files",
+            params={"category_id": "work", "offset": 1, "limit": 1},
+        ).json()["data"]
+        assert parent_files["total"] == 1
+        assert parent_files["items"] == []
+        assert client.get(
+            "/api/foundation/summary-jobs/catalog-preflight/files",
+            params={"category_id": "work"},
+            headers={"origin": "https://external.example"},
+        ).status_code == 403
+        assert client.get(
+            "/api/foundation/summary-jobs/catalog-preflight/files",
+            params={"category_id": "deleted_category"},
+        ).status_code == 409
+        source.write_text("原文件随后发生了变化", encoding="utf-8")
+        stale_file = client.get(
+            "/api/foundation/summary-jobs/catalog-preflight/files",
+            params={"category_id": "work_requirements"},
+        ).json()["data"]["items"][0]
+        assert stale_file["source_current"] is False
+        assert client.get(
+            "/api/foundation/summary-jobs/catalog-preflight/reviews"
+        ).json()["data"]["total"] == 0
+
+
+def test_unreadable_document_is_not_counted_as_ai_understood(
+    test_settings, tmp_path, monkeypatch
+):
+    source = tmp_path / "broken.pdf"
+    source.write_bytes(b"%PDF-1.4\nnot a readable document")
+    seed_catalog(test_settings, source)
+    jobs = SummaryJobs(test_settings)
+    monkeypatch.setattr(jobs, "_safe", lambda path, roots: True)
+    job_id = jobs.create(
+        SummaryJobRequest(
+            scope="catalog_batch", provider="external", allow_remote_processing=True
+        )
+    )["id"]
+    result = wait(jobs, job_id)
+    assert result["stage"] == "done"
+    assert result["records"][0]["ai_state"] == "unavailable"
+    progress = jobs.catalog_progress()
+    assert progress["ai_done"] == 0
+    assert progress["ai_failed"] == 0
+    assert progress["review_pending"] == 1
+
+
+def test_catalog_agent_packet_hides_parent_directories(test_settings, tmp_path, monkeypatch):
+    first_dir = tmp_path / "private-work"
+    second_dir = tmp_path / "other-work"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = first_dir / "README.md"
+    second = second_dir / "PROJECT.md"
+    first.write_text("第一份项目背景与方案。", encoding="utf-8")
+    second.write_text("第二份项目背景与方案。", encoding="utf-8")
+    seed_catalog(test_settings, first)
+    stat = second.stat()
+    with sqlite3.connect(test_settings.data_root / "machine-catalog" / "catalog.sqlite") as db:
+        db.execute(
+            "INSERT INTO files VALUES(2,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(second_dir), str(second), second.name, str(second_dir), "_root",
+                second.name, second.suffix, "document", stat.st_size, stat.st_mtime_ns,
+                "active", "test", "now", "now",
+            ),
+        )
+    jobs = SummaryJobs(test_settings)
+    monkeypatch.setattr(jobs, "_safe", lambda path, roots: True)
+    job_id = jobs.create(
+        SummaryJobRequest(
+            scope="catalog_batch", provider="external", allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
+            catalog_batch_size=2,
+        )
+    )["id"]
+    assert wait(jobs, job_id)["state"] == "awaiting_agent"
+    packet = jobs.packet(job_id)
+    assert {item["name"] for item in packet["items"]} == {"README.md", "PROJECT.md"}
+    assert all("private-work" not in item["name"] for item in packet["items"])
+
+
+@pytest.mark.parametrize("allow_restricted", [False, True])
+@pytest.mark.parametrize("body", ["甲方乙方项目交付合同", "普通资料的具体用途尚未辨明"])
+def test_restricted_file_requires_separate_remote_consent_and_redacts_sample(
+    test_settings, tmp_path, monkeypatch, allow_restricted, body
+):
+    source = tmp_path / "contract.md"
+    synthetic_token = "sk-" + "A" * 24
+    source.write_text(f"{body}，token={synthetic_token}", encoding="utf-8")
+    seed_catalog(test_settings, source)
+    jobs = SummaryJobs(test_settings)
+    monkeypatch.setattr(jobs, "_safe", lambda path, roots: True)
+    job_id = jobs.create(
+        SummaryJobRequest(
+            scope="catalog_batch", provider="external", allow_remote_processing=True,
+            allow_restricted_remote_processing=allow_restricted,
+        ), start=False,
+    )["id"]
+    jobs._inspect(job_id, threading.Event())
+    record = jobs.view(job_id)["records"][0]
+    assert record["record"]["privacy_classification"] == "restricted"
+    packet = jobs.packet(job_id)
+    if not allow_restricted:
+        assert record["ai_state"] == "restricted_local_only"
+        assert packet is None
+    else:
+        assert record["ai_state"] == "pending"
+        assert packet is not None
+        assert synthetic_token not in json.dumps(packet)
+        assert "[REDACTED]" in packet["items"][0]["sample"]
 
 
 def test_remote_triage_keeps_no_text_file_in_agent_queue(test_settings, source_root):
@@ -401,7 +943,10 @@ def test_resume_rechecks_changed_versions_and_invalidates_packet(
         (source_root / f"{n}.txt").write_text("甲方乙方", encoding="utf-8")
     jobs = SummaryJobs(test_settings)
     job = jobs.create(
-        SummaryJobRequest(path=str(source_root), provider="external", allow_remote_processing=True)
+        SummaryJobRequest(
+            path=str(source_root), provider="external", allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
+        )
     )["id"]
     wait(jobs, job)
     old = jobs.packet(job)
@@ -470,7 +1015,10 @@ def test_external_agent_validates_evidence_and_deduplicates(test_settings, sourc
     (source_root / "data.txt").write_text("甲方乙方约定", encoding="utf-8")
     jobs = SummaryJobs(test_settings)
     job = jobs.create(
-        SummaryJobRequest(path=str(source_root), provider="external", allow_remote_processing=True)
+        SummaryJobRequest(
+            path=str(source_root), provider="external", allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
+        )
     )["id"]
     assert wait(jobs, job)["state"] == "awaiting_agent"
     packet = jobs.packet(job)
@@ -511,6 +1059,7 @@ def test_ai_understanding_profile_supports_multi_category_and_unfiltered_promoti
     job_id = jobs.create(
         SummaryJobRequest(
             scope="catalog_batch", provider="external", allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
             catalog_batch_size=1,
         )
     )["id"]
@@ -540,7 +1089,9 @@ def test_ai_understanding_profile_supports_multi_category_and_unfiltered_promoti
     result = wait(jobs, job_id)
     record = result["records"][0]["record"]
     assert record["understanding"]["purpose"] == "说明项目交付方案和验收范围"
-    assert record["understanding"]["recommended_mode"] == "semantic"
+    assert record["understanding"]["recommended_mode"] == "full"
+    assert record["understanding"]["model_recommended_mode"] == "semantic"
+    assert record["understanding"]["profile_cap_applied"] is True
     assert record["classification"]["secondary_category_ids"] == ["finance_contract"]
 
     secondary = jobs.promotion_selection(
@@ -552,12 +1103,12 @@ def test_ai_understanding_profile_supports_multi_category_and_unfiltered_promoti
     )
     preview = IntakeService(KnowledgeSystem.create(test_settings)).preview_classified(recommended)
     assert preview["request"]["mode"] == "recommended"
-    assert preview["actions"] == {"semantic": 1}
+    assert preview["actions"] == {"full": 1}
     assert preview["items"][0]["state"] == "pending"
     catalog_recommended = jobs.catalog_promotion_selection(
         SummaryPromotion(category_ids=["work_requirements"], mode="recommended")
     )
-    assert catalog_recommended["items"][0]["recommended_action"] == "semantic"
+    assert catalog_recommended["items"][0]["recommended_action"] == "full"
     all_checked = jobs.promotion_selection(
         job_id,
         SummaryPromotion(category_ids=[ALL_INSPECTED_SELECTION_ID], mode="full"),
@@ -583,7 +1134,10 @@ def test_stale_agent_result_not_used(test_settings, source_root):
     file.write_text("甲方乙方约定", encoding="utf-8")
     jobs = SummaryJobs(test_settings)
     job = jobs.create(
-        SummaryJobRequest(path=str(source_root), provider="external", allow_remote_processing=True)
+        SummaryJobRequest(
+            path=str(source_root), provider="external", allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
+        )
     )["id"]
     wait(jobs, job)
     packet = jobs.packet(job)
@@ -634,7 +1188,7 @@ def test_cloud_worker_with_fake_adapter(test_settings, source_root, monkeypatch)
     class FakeAgent:
         thread_id = None
 
-        def __init__(self, *args):
+        def __init__(self, *args, **_kwargs):
             pass
 
         def __enter__(self):
@@ -661,7 +1215,10 @@ def test_cloud_worker_with_fake_adapter(test_settings, source_root, monkeypatch)
     monkeypatch.setattr("pkas.summary_agent.codex_binary", lambda _: Path("test.exe"))
     jobs = SummaryJobs(test_settings)
     job = jobs.create(
-        SummaryJobRequest(path=str(source_root), provider="codex", allow_remote_processing=True)
+        SummaryJobRequest(
+            path=str(source_root), provider="codex", allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
+        )
     )["id"]
     result = wait(jobs, job)
     assert result["stage"] == "done", result["message"]
@@ -675,7 +1232,7 @@ def test_cloud_worker_retries_invalid_evidence_once(test_settings, source_root, 
         thread_id = None
         calls = 0
 
-        def __init__(self, *args):
+        def __init__(self, *args, **_kwargs):
             pass
 
         def __enter__(self):
@@ -705,7 +1262,8 @@ def test_cloud_worker_retries_invalid_evidence_once(test_settings, source_root, 
     jobs = SummaryJobs(test_settings)
     ident = jobs.create(
         SummaryJobRequest(
-            path=str(source_root), provider="codex", allow_remote_processing=True
+            path=str(source_root), provider="codex", allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
         )
     )["id"]
     result = wait(jobs, ident)
@@ -723,7 +1281,7 @@ def test_cloud_worker_keeps_local_result_after_second_invalid_evidence(
     class InvalidEvidenceAgent:
         thread_id = None
 
-        def __init__(self, *args):
+        def __init__(self, *args, **_kwargs):
             pass
 
         def __enter__(self):
@@ -753,6 +1311,7 @@ def test_cloud_worker_keeps_local_result_after_second_invalid_evidence(
             scope="catalog_batch",
             provider="codex",
             allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
             catalog_batch_size=1,
         )
     )["id"]
@@ -774,7 +1333,7 @@ def test_cloud_worker_keeps_local_result_after_second_invalid_item_count(
     class MissingItemAgent:
         thread_id = None
 
-        def __init__(self, *args):
+        def __init__(self, *args, **_kwargs):
             pass
 
         def __enter__(self):
@@ -796,6 +1355,7 @@ def test_cloud_worker_keeps_local_result_after_second_invalid_item_count(
             scope="catalog_batch",
             provider="codex",
             allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
             catalog_batch_size=1,
         )
     )["id"]
@@ -842,6 +1402,7 @@ def test_deepseek_worker_uses_same_packet_validation(test_settings, source_root,
             scope="catalog_batch",
             provider="deepseek",
             allow_remote_processing=True,
+            allow_restricted_remote_processing=True,
             catalog_batch_size=1,
         )
     )

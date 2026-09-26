@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pkas.api import create_app
+from pkas.ingest import sha256_file
 from pkas.intake import DEFAULT_RULES, IntakeRequest, IntakeService, extraction_quality
 
 
@@ -81,6 +83,65 @@ def test_semantic_mode_requires_separate_confirmation_and_runs_vector_sync(
     assert result["items"][0]["vector"] == "向量同步已完成"
     assert result["vector_coverage"]["coverage"] == 1.0
     assert called == [5000]
+
+
+def test_semantic_intake_drains_vector_outbox_in_bounded_batches(
+    knowledge_system, monkeypatch
+):
+    service = IntakeService(knowledge_system)
+    pending = 8626
+    calls = []
+
+    def process(*, limit):
+        nonlocal pending
+        calls.append(limit)
+        pending -= min(limit, pending)
+        return {"status": "completed", "claimed": limit, "completed": limit}
+
+    def coverage():
+        return {"eligible": 8626, "indexed": 8626 - pending, "pending": pending}
+
+    monkeypatch.setattr(knowledge_system.outbox, "process", process)
+    monkeypatch.setattr(knowledge_system.rag.vector_index, "coverage", coverage)
+
+    result, final_coverage, batches = service._sync_semantic_vectors()
+
+    assert calls == [5000, 5000]
+    assert result["status"] == "completed"
+    assert batches == 2
+    assert final_coverage["pending"] == 0
+
+
+def test_retry_reuses_verified_recovery_point_when_drive_has_no_snapshot_space(
+    knowledge_system, tmp_path, monkeypatch
+):
+    service = IntakeService(knowledge_system)
+    plan_id = "a" * 32
+    recovery_root = tmp_path / "recovery"
+    recovery_file = recovery_root / plan_id / "pkas.sqlite"
+    recovery_file.parent.mkdir(parents=True)
+    with sqlite3.connect(recovery_file) as database:
+        database.execute("CREATE TABLE recovery_marker(value TEXT)")
+        database.execute("INSERT INTO recovery_marker VALUES ('verified')")
+    plan = {
+        "id": plan_id,
+        "recovery_root": str(recovery_root),
+        "recovery": str(recovery_file),
+        "recovery_sha256": sha256_file(recovery_file),
+        "items": [{"state": "pending", "action": "semantic", "bytes": 10}],
+    }
+    monkeypatch.setattr(
+        "pkas.intake.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=100, used=100, free=0),
+    )
+
+    capacity = service._recovery_capacity(plan, plan["items"])
+    service._backup(plan)
+
+    assert capacity["ready"] is True
+    assert capacity["required_free_bytes"] == 0
+    assert capacity["existing_recovery_reused"] is True
+    assert sha256_file(recovery_file) == plan["recovery_sha256"]
 
 
 def test_semantic_preflight_is_aggregate_only_and_does_not_call_embedding(

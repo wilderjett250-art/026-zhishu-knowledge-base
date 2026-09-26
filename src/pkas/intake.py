@@ -12,7 +12,7 @@ from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -55,6 +55,8 @@ DEFAULT_RULES: dict[str, Mode] = {
     "images": "catalog",
     "other": "catalog",
 }
+VECTOR_SYNC_BATCH_SIZE = 5000
+MAX_VECTOR_SYNC_BATCHES_PER_INTAKE = 100
 
 
 class IntakeRequest(BaseModel):
@@ -879,6 +881,16 @@ class IntakeService:
         )
         try:
             recovery_root = self._recovery_root(plan.get("recovery_root"))
+            expected_recovery = recovery_root / plan["id"] / "pkas.sqlite"
+            recorded_recovery = Path(plan.get("recovery") or "")
+            existing_recovery = bool(
+                plan.get("recovery_sha256")
+                and len(str(plan["recovery_sha256"])) == 64
+                and recorded_recovery.resolve(strict=False)
+                == expected_recovery.resolve(strict=False)
+                and expected_recovery.is_file()
+                and not linked(expected_recovery)
+            )
             usage_root = recovery_root if recovery_root.exists() else recovery_root.parent
             available_free_bytes = shutil.disk_usage(usage_root).free
         except OSError:
@@ -892,13 +904,15 @@ class IntakeService:
                 "reason": "无法读取恢复副本所在磁盘的可用空间",
                 "recovery_root": str(plan.get("recovery_root") or self.home / "recovery"),
             }
+        required_for_run = 0 if existing_recovery else required_free_bytes
         return {
-            "ready": available_free_bytes >= required_free_bytes,
+            "ready": existing_recovery or available_free_bytes >= required_free_bytes,
             "database_bytes": database_bytes,
             "pending_source_bytes": pending_source_bytes,
-            "required_free_bytes": required_free_bytes,
+            "required_free_bytes": required_for_run,
             "available_free_bytes": available_free_bytes,
-            "shortfall_bytes": max(0, required_free_bytes - available_free_bytes),
+            "shortfall_bytes": max(0, required_for_run - available_free_bytes),
+            "existing_recovery_reused": existing_recovery,
             "reason": None,
             "recovery_root": str(recovery_root),
         }
@@ -907,10 +921,23 @@ class IntakeService:
         directory = self._recovery_root(plan.get("recovery_root")) / plan["id"]
         target = directory / "pkas.sqlite"
         if target.exists():
-            # Keep the first recovery point on retries, never overwrite it.
-            with closing(sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True)) as check:
-                if check.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                    raise ValueError("恢复点损坏，停止写入")
+            # A retry reuses its first pre-write point. Verify the recorded
+            # digest instead of demanding another full-size copy or rescanning
+            # the same multi-gigabyte SQLite file with quick_check.
+            recorded = plan.get("recovery")
+            expected = plan.get("recovery_sha256")
+            if recorded:
+                if Path(recorded).resolve(strict=False) != target.resolve(strict=False):
+                    raise ValueError("恢复点路径与任务记录不一致，停止写入")
+                if not expected or sha256_file(target) != expected:
+                    raise ValueError("恢复点校验失败，停止写入")
+            else:
+                with closing(sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True)) as check:
+                    if check.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                        raise ValueError("恢复点损坏，停止写入")
+                plan["recovery"] = str(target)
+                plan["recovery_sha256"] = sha256_file(target)
+                self._save(plan)
             return
         source = self.settings.database_path
         capacity = self._recovery_capacity(plan, plan["items"])
@@ -1088,6 +1115,25 @@ class IntakeService:
             ),
         }
 
+    def _sync_semantic_vectors(self):
+        vector_result: dict[str, Any] = {
+            "status": "warning", "error_code": "vector_sync_not_run"
+        }
+        coverage = self.system.rag.vector_index.coverage()
+        vector_batches = 0
+        while vector_batches < MAX_VECTOR_SYNC_BATCHES_PER_INTAKE:
+            pending_before = int(coverage.get("pending", 0))
+            vector_result = self.system.outbox.process(limit=VECTOR_SYNC_BATCH_SIZE)
+            vector_batches += 1
+            coverage = self.system.rag.vector_index.coverage()
+            if vector_result.get("status") != "completed":
+                break
+            pending_after = int(coverage.get("pending", 0))
+            if pending_after == 0 or pending_after >= pending_before:
+                break
+        vector_result["drain_batches"] = vector_batches
+        return vector_result, coverage, vector_batches
+
     def _execute(self, plan):
         # Prevent concurrent intake writers from another desktop/API instance.
         with WindowsFileLock(self.home / "writer.lock"):
@@ -1161,8 +1207,7 @@ class IntakeService:
                 plan["stage"] = "vectorizing"
                 plan["message"] = "正文切块已入库，正在同步向量"
                 self._save(plan)
-                vector_result = self.system.outbox.process(limit=5000)
-                coverage = self.system.rag.vector_index.coverage()
+                vector_result, coverage, _ = self._sync_semantic_vectors()
                 vector_ok = (
                     vector_result.get("status") == "completed"
                     and not vector_result.get("deferred")

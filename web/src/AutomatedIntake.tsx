@@ -20,6 +20,15 @@ const modeOptions = [
   ["md_fallback", "优先 Markdown，缺失时建目录说明"],
   ["exclude", "不接入"],
 ] as const;
+const reviewReasons: Record<string, string> = {
+  source_changed_since_catalog: "索引后文件已变化，先更新资料地图",
+  structure_parse_failed: "正文结构解析失败",
+  no_text_sample: "未取得可用文字样本",
+  boundary_or_sensitive_path: "路径边界或敏感范围已变化",
+  missing: "文件已不存在",
+  permission_denied: "没有读取权限",
+  io_error: "本地读取异常",
+};
 
 function messageFrom(error: unknown, fallback: string) {
   if (error instanceof ApiError) return error.problem.message ?? error.message;
@@ -39,6 +48,9 @@ export default function AutomatedIntake({ onNext, onLedger }: { onNext?: () => v
   const [sourceData, setSourceData] = useState<Data | null>(null);
   const [catalog, setCatalog] = useState<Data | null>(null);
   const [coverage, setCoverage] = useState<Data | null>(null);
+  const [preflight, setPreflight] = useState<Data | null>(null);
+  const [preflightCategories, setPreflightCategories] = useState<Data | null>(null);
+  const [reviewPage, setReviewPage] = useState<Data | null>(null);
   const [editing, setEditing] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const [customRules, setCustomRules] = useState<Record<string, string>>({});
@@ -48,16 +60,18 @@ export default function AutomatedIntake({ onNext, onLedger }: { onNext?: () => v
 
   const load = async () => {
     setError("");
-    const [profiles, sources, catalogResult, progress] = await Promise.all([
+    const [profiles, sources, catalogResult, progress, localRead] = await Promise.all([
       api<Data>("/api/foundation/processing-profiles"),
       api<Data>("/api/foundation/auto-sources"),
       api<Data>("/api/foundation/machine-catalog").catch(() => ({ data: { state: "not_started" } } as Data)),
       api<Data>("/api/foundation/summary-jobs/catalog-progress").catch(() => ({ data: null } as Data)),
+      api<Data>("/api/foundation/summary-jobs/catalog-preflight").catch(() => ({ data: null } as Data)),
     ]);
     setProfileData(profiles.data);
     setSourceData(sources.data);
     setCatalog(catalogResult.data);
     setCoverage(progress.data);
+    setPreflight(localRead.data);
     setEditing(Boolean(profiles.data.first_run_required));
     const current = profiles.data.current ?? {};
     setCustomRules(current.rules ?? {});
@@ -67,18 +81,26 @@ export default function AutomatedIntake({ onNext, onLedger }: { onNext?: () => v
 
   useEffect(() => { void load().catch(exception => setError(messageFrom(exception, "读取自动接入状态失败"))); }, []);
   useEffect(() => {
-    if (catalog?.state !== "running") return;
+    if (preflight?.running) return;
+    void api<Data>("/api/foundation/summary-jobs/catalog-preflight/categories")
+      .then(result => setPreflightCategories(result.data))
+      .catch(() => undefined);
+  }, [preflight?.running]);
+  useEffect(() => {
+    if (catalog?.state !== "running" && coverage?.scope_state !== "building" && !preflight?.running) return;
     const timer = window.setInterval(() => {
       Promise.all([
         api<Data>("/api/foundation/machine-catalog"),
         api<Data>("/api/foundation/summary-jobs/catalog-progress"),
-      ]).then(([catalogResult, progress]) => {
+        api<Data>("/api/foundation/summary-jobs/catalog-preflight"),
+      ]).then(([catalogResult, progress, localRead]) => {
         setCatalog(catalogResult.data);
         setCoverage(progress.data);
+        setPreflight(localRead.data);
       }).catch(() => undefined);
     }, 4000);
     return () => window.clearInterval(timer);
-  }, [catalog?.state]);
+  }, [catalog?.state, coverage?.scope_state, preflight?.running]);
 
   const current = profileData?.current;
   const scopes: Data[] = sourceData?.scopes ?? [];
@@ -160,6 +182,26 @@ export default function AutomatedIntake({ onNext, onLedger }: { onNext?: () => v
   };
   const scopeText = scopes.map((item: Data) => item.path).join("、");
   const aiFailed = Number(coverage?.ai_failed ?? 0);
+  const reviewPending = Number(coverage?.review_pending ?? 0);
+
+  const toggleLocalRead = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const action = preflight?.running ? "pause" : "start";
+      const result = await post<Data>(`/api/foundation/summary-jobs/catalog-preflight/${action}`, {});
+      setPreflight(result.data);
+      const progress = await api<Data>("/api/foundation/summary-jobs/catalog-progress");
+      setCoverage(progress.data);
+    } catch (exception) { setError(messageFrom(exception, "本地逐文件轻读失败")); }
+    finally { setBusy(false); }
+  };
+  const loadReviewPage = async (offset = 0) => {
+    try {
+      const result = await api<Data>(`/api/foundation/summary-jobs/catalog-preflight/reviews?offset=${offset}&limit=20`);
+      setReviewPage(result.data);
+    } catch (exception) { setError(messageFrom(exception, "读取待复查明细失败")); }
+  };
 
   return <section className="foundation-panel automated-intake-panel">
     <header className="intake-page-head">
@@ -205,11 +247,16 @@ export default function AutomatedIntake({ onNext, onLedger }: { onNext?: () => v
 
     {coverage && <section className="intake-progress-board" aria-label="资料整理进度">
       <header><div><small>当前进度</small><h3>资料地图、内容理解、知识库，分别看</h3><p>这三个数字不是一回事：文件地图可覆盖全部文件；AI 只看需要理解的内容；进入知识库需要另行确认。</p></div><span>不会自动深读全盘</span></header>
-      <div className="intake-progress-grid">
-        <ProgressRing label="文件处置结论" value={Number(coverage.decision_coverage_percent ?? 0)} detail="AI 速判 + 本地规则明确跳过。" />
+      {coverage.scope_state === "building" ? <p role="status">正在按当前方案计算需要轻读的文件范围。A库目录索引不会被当作已理解内容。</p> : coverage.scope_state === "error" ? <p role="alert">候选范围计算失败（{coverage.scope_error}）。已保留之前的台账。<button type="button" disabled={busy} onClick={() => { setBusy(true); void post<Data>("/api/foundation/summary-jobs/catalog-progress/retry", {}).then(result => setCoverage(result.data)).catch(exception => setError(messageFrom(exception, "重新计算失败"))).finally(() => setBusy(false)); }}>重新计算</button></p> : <div className="intake-progress-grid">
+        <ProgressRing label="文件处置结论" value={Number(coverage.decision_coverage_percent ?? 0)} detail="按规则保留L0 + AI已完成；L0不代表已读正文。" />
+        <ProgressRing label="逐文件本地轻读" value={Number(coverage.local_read_coverage_percent ?? 0)} detail={`${Number(coverage.local_read_done ?? 0).toLocaleString()} / ${Number(coverage.ai_candidates_total ?? 0).toLocaleString()} 个候选已核对文件内容或读取状态。`} tone="amber" />
         <ProgressRing label="AI 内容理解" value={Number(coverage.ai_coverage_percent ?? 0)} detail={`${Number(coverage.ai_done ?? 0).toLocaleString()} / ${Number(coverage.ai_eligible ?? 0).toLocaleString()} 个需要理解的文件。`} tone="blue" />
-        <article className="intake-progress-queue"><small>下一步候选</small><strong>{Number(coverage.ai_pending ?? 0).toLocaleString()}</strong><span>等待 AI 速判</span><p>按批次处理，可以暂停和续跑；不代表要把它们全部放进知识库。</p>{aiFailed > 0 && <button type="button" onClick={onLedger}>查看 {aiFailed.toLocaleString()} 个需复查项</button>}</article>
-      </div>
+        <article className="intake-progress-queue"><small>下一步候选</small><strong>{Number(coverage.ai_pending ?? 0).toLocaleString()}</strong><span>尚无可信 AI 结论</span><p>其中 {reviewPending.toLocaleString()} 个正文未抽出或读取异常，须单独复查；其余可按批交给 AI。入库仍须预览确认。</p>{reviewPending > 0 && <button type="button" onClick={() => reviewPage ? setReviewPage(null) : void loadReviewPage()}>查看本地待复查明细</button>}{aiFailed > 0 && <button type="button" onClick={onLedger}>查看 AI 失败任务</button>}</article>
+      </div>}
+      {reviewPage && <section className="intake-preflight-reviews"><h4>本地轻读待复查 · {Number(reviewPage.total ?? 0).toLocaleString()} 个</h4><p>这里只列本地逐文件轻读产生的异常；其他 AI 整理任务的失败请到任务页查看。</p><div className="intake-review-reasons">{(reviewPage.reasons ?? []).map((item: Data) => <span key={item.reason}>{reviewReasons[item.reason] ?? item.reason}：{Number(item.total).toLocaleString()}</span>)}</div><ul>{(reviewPage.items ?? []).map((item: Data) => <li key={`${item.path}:${item.inspected_at}`}><code>{item.path}</code><span>{reviewReasons[item.reason] ?? item.reason}</span></li>)}</ul><footer><button type="button" disabled={Number(reviewPage.offset ?? 0) === 0} onClick={() => void loadReviewPage(Math.max(0, Number(reviewPage.offset) - 20))}>上一页</button><span>{Number(reviewPage.offset ?? 0) + 1}–{Math.min(Number(reviewPage.total ?? 0), Number(reviewPage.offset ?? 0) + Number(reviewPage.items?.length ?? 0))} / {Number(reviewPage.total ?? 0)}</span><button type="button" disabled={Number(reviewPage.offset ?? 0) + Number(reviewPage.items?.length ?? 0) >= Number(reviewPage.total ?? 0)} onClick={() => void loadReviewPage(Number(reviewPage.offset) + 20)}>下一页</button></footer></section>}
+      {coverage.scope_state === "ready" && <div className="intake-preflight-actions"><button type="button" disabled={busy || state === "running"} onClick={() => void toggleLocalRead()}>{preflight?.running ? "暂停本地逐文件轻读" : "继续本地逐文件轻读"}</button><span>只读原件，保存轻量分类依据；不会调用模型、生成大批 MD 或自动入库。{preflight?.state === "low_disk" ? "磁盘空间不足，已安全暂停。" : preflight?.state === "error" ? `发生 ${preflight.error_kind}，可检查后重试。` : preflight?.running ? `本轮已处理 ${Number(preflight.processed_this_run ?? 0).toLocaleString()} 个。` : "可随时暂停并从台账续跑。"}</span></div>}
+      {Number(preflightCategories?.total ?? 0) > 0 && <details className="intake-preflight-categories"><summary>看本地暂定分类 · {Number(preflightCategories?.total ?? 0).toLocaleString()} 个已抽样文件</summary><p>这是本地关键词初判，不是 Luna 复核结果；未读到正文的文件不会被猜进某一类，也不能从这里直接入库。</p><div>{(preflightCategories?.categories ?? []).slice(0, 12).map((item: Data) => <article key={item.id}><span>{item.parent} / {item.name}</span><strong>{Number(item.count).toLocaleString()}</strong><i style={{ width: `${Math.max(2, Number(item.count) / Number(preflightCategories?.total ?? 1) * 100)}%` }} /></article>)}</div></details>}
+      {Number(preflightCategories?.stale_total ?? 0) > 0 && <p className="intake-preflight-stale" role="status">另有 {Number(preflightCategories?.stale_total).toLocaleString()} 个文件仍沿用旧分类规则；继续本地轻读会按当前规则重新判断，不会把旧建议混入当前统计。</p>}
       <details><summary>为什么“文件处置结论”和“AI 内容理解”不是同一个百分比？</summary><p>系统临时文件、缓存、构建输出等会按本地规则明确跳过，这也算完成了处置判断；而 AI 内容理解只统计真正需要判断用途、分类和摘要的文件。两者分开显示，才不会把“跳过”误说成“读懂”。</p></details>
     </section>}
 

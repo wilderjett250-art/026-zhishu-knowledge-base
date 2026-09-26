@@ -1124,7 +1124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/foundation/project-map/{project_map_id}", response_model=Envelope)
     def project_map_read(project_map_id: str, request: Request) -> Envelope:
         try:
-            result = ProjectMapService(system_from(request).settings).read(project_map_id)
+            result = ProjectMapService(system_from(request).settings).public_read(project_map_id)
         except (ValueError, OSError):
             raise HTTPException(404, "项目总览候选不存在") from None
         return success("已读取项目总览候选", result)

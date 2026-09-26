@@ -7,7 +7,7 @@ import re
 import sqlite3
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from ctypes import windll
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +21,12 @@ from pkas.catalog_classification import (
     ALL_INSPECTED_SELECTION_ID,
     CatalogClassificationLedger,
     trusted_recommended_mode,
+)
+from pkas.catalog_scope import (
+    DOCUMENT_SUFFIXES,
+    IMAGE_SUFFIXES,
+    MARKDOWN_SUFFIXES,
+    load_auto_policy,
 )
 from pkas.codex_capture import redact_secrets
 from pkas.content_taxonomy import atomic_write, classify, load_taxonomy
@@ -81,9 +87,11 @@ class SummaryJobRequest(BaseModel):
     model: str = Field(default="gpt-5.6-luna", max_length=100)
     codex_executable: str = Field(default="", max_length=1000)
     allow_remote_processing: bool = False
+    allow_restricted_remote_processing: bool = False
     batch_size: int = Field(default=5, ge=1, le=20)
     max_ai_batches: int = Field(default=20, ge=1, le=10000)
     catalog_batch_size: int = Field(default=50, ge=1, le=500)
+    local_category_id: str = Field(default="", max_length=64)
     auto_promotion_id: str = Field(default="", max_length=32)
 
 
@@ -155,6 +163,11 @@ class SummaryJobs:
         self.guard = threading.RLock()
         self.catalog_ledger = CatalogClassificationLedger(settings.data_root)
         self.auto_promotion = AutoPromotionService(settings)
+        self._preflight_thread: threading.Thread | None = None
+        self._preflight_stop = threading.Event()
+        self._preflight_state = "idle"
+        self._preflight_processed = 0
+        self._preflight_error: str | None = None
 
     def directory(self, job):
         if len(job) != 32 or any(c not in "0123456789abcdef" for c in job):
@@ -209,6 +222,8 @@ class SummaryJobs:
         return str(root), [root]
 
     def create(self, request: SummaryJobRequest, start=True):
+        if self._preflight_thread and self._preflight_thread.is_alive():
+            raise ValueError("本地逐文件轻读正在运行，请先暂停后再创建AI批次")
         root_label, roots = self.request_roots(request)
         auto_scope = None
         if request.scope == "auto_promotion_batch":
@@ -217,6 +232,8 @@ class SummaryJobs:
             if request.provider != "codex" or not request.allow_remote_processing:
                 raise ValueError("自动选择后的文件复核必须明确使用Luna并开启云端处理")
             auto_scope = self.auto_promotion.inspection_scope(request.auto_promotion_id)
+        if request.local_category_id and request.scope != "catalog_batch":
+            raise ValueError("按暂定分类筛选仅适用于A库分类批次")
         data = self.settings.data_root.resolve()
         if any(root == data or data in root.parents for root in roots):
             raise ValueError("不能整理知识库自身派生数据")
@@ -238,11 +255,15 @@ class SummaryJobs:
             # directory plan.  One malformed multi-file reply must not reject
             # otherwise useful documents in the same packet.
             request = request.model_copy(update={"batch_size": 1})
+        if request.scope == "catalog_batch":
+            # Resolve the current profile and catalog generation before creating
+            # a task directory. Building the candidate table never reads bodies.
+            self.catalog_ledger.refresh_auto_scope()
         job = uuid.uuid4().hex
         folder = self.directory(job)
         folder.mkdir(parents=True)
         # Independent DB: no migrations, triggers, cascades or main DB writes.
-        with sqlite3.connect(folder / "queue.sqlite") as db:
+        with closing(sqlite3.connect(folder / "queue.sqlite")) as db, db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
                 CREATE TABLE meta(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
@@ -290,14 +311,26 @@ class SummaryJobs:
             if request.scope not in {"catalog_batch", "auto_promotion_batch"}:
                 db.executemany("INSERT INTO dirs(path) VALUES(?)", [(str(root),) for root in roots])
         if request.scope in {"catalog_batch", "auto_promotion_batch"}:
-            rows = self.catalog_ledger.reserve(
-                job,
-                request.catalog_batch_size,
-                directory_units=auto_scope["units"] if auto_scope else None,
-                automatic_only=request.scope == "auto_promotion_batch",
-            )
-            if not rows:
-                raise ValueError("所选A库范围没有待分类或已变化的文件；无需新建批次")
+            try:
+                rows = self.catalog_ledger.reserve(
+                    job,
+                    request.catalog_batch_size,
+                    directory_units=auto_scope["units"] if auto_scope else None,
+                    automatic_only=True,
+                    remote_processing=request.provider != "local",
+                    local_category_id=request.local_category_id,
+                )
+                if not rows:
+                    raise ValueError("所选A库范围没有待分类或已变化的文件；无需新建批次")
+            except Exception:
+                # This exact UUID folder was created by this call and has only
+                # the empty queue DB. Do not leave ghost tasks in the sidebar.
+                if folder.parent.resolve() == self.home.resolve() and folder.name == job:
+                    queue = folder / "queue.sqlite"
+                    for suffix in ("", "-wal", "-shm"):
+                        Path(str(queue) + suffix).unlink(missing_ok=True)
+                    folder.rmdir()  # Refuses to remove unexpected user files.
+                raise
             with self.db(job) as db:
                 db.execute("ALTER TABLE files ADD COLUMN catalog_file_id INTEGER")
                 db.execute("CREATE UNIQUE INDEX files_catalog_file_id ON files(catalog_file_id)")
@@ -333,6 +366,87 @@ class SummaryJobs:
         return [self.view(p.name, limit=0) for p in folders[:30] if (p / "queue.sqlite").is_file()]
 
     def catalog_progress(self):
+        self.catalog_ledger.schedule_auto_scope_refresh()
+        return self.catalog_ledger.progress()
+
+    def catalog_preflight_status(self):
+        with self.guard:
+            return {
+                "state": self._preflight_state,
+                "running": bool(self._preflight_thread and self._preflight_thread.is_alive()),
+                "processed_this_run": self._preflight_processed,
+                "error_kind": self._preflight_error,
+            }
+
+    def catalog_preflight_categories(self):
+        return self.catalog_ledger.preflight_categories()
+
+    def catalog_preflight_files(self, category_id, *, offset=0, limit=20):
+        return self.catalog_ledger.preflight_files(
+            category_id, offset=offset, limit=limit
+        )
+
+    def catalog_preflight_reviews(self, *, offset=0, limit=20):
+        return self.catalog_ledger.preflight_reviews(offset=offset, limit=limit)
+
+    def start_catalog_preflight(self):
+        # Explicit user action only: no file body is read on page load/startup.
+        self.catalog_ledger.refresh_auto_scope()
+        with self.guard:
+            if self._preflight_thread and self._preflight_thread.is_alive():
+                return self.catalog_preflight_status()
+            if any(
+                not finished.is_set() and (thread.is_alive() or not started.is_set())
+                for thread, _, started, finished in self.active.values()
+            ):
+                raise ValueError("已有AI整理任务运行，请完成或暂停后再本地轻读")
+            self._preflight_stop = threading.Event()
+            self._preflight_state = "running"
+            self._preflight_processed = 0
+            self._preflight_error = None
+            self._preflight_thread = threading.Thread(
+                target=self._run_catalog_preflight, daemon=True
+            )
+            self._preflight_thread.start()
+            return self.catalog_preflight_status()
+
+    def pause_catalog_preflight(self):
+        with self.guard:
+            if self._preflight_thread and self._preflight_thread.is_alive():
+                self._preflight_stop.set()
+            return self.catalog_preflight_status()
+
+    def _run_catalog_preflight(self):
+        try:
+            while not self._preflight_stop.is_set():
+                batch = self.catalog_ledger.preflight_batch(
+                    100, stop=self._preflight_stop
+                )
+                with self.guard:
+                    self._preflight_processed += batch["processed"]
+                if batch["paused_reason"]:
+                    with self.guard:
+                        self._preflight_state = "low_disk"
+                    return
+                if not batch["processed"]:
+                    progress = self.catalog_ledger.progress()
+                    with self.guard:
+                        self._preflight_state = (
+                            "completed" if progress["local_read_pending"] == 0
+                            else "waiting_for_catalog_or_job"
+                        )
+                    return
+        except Exception as error:
+            with self.guard:
+                self._preflight_state = "error"
+                self._preflight_error = type(error).__name__
+        finally:
+            if self._preflight_stop.is_set():
+                with self.guard:
+                    self._preflight_state = "paused"
+
+    def retry_catalog_progress(self):
+        self.catalog_ledger.retry_auto_scope_refresh()
         return self.catalog_ledger.progress()
 
     def catalog_classification_counts(self):
@@ -506,6 +620,8 @@ class SummaryJobs:
 
     def resume(self, job):
         with self.guard:
+            if self._preflight_thread and self._preflight_thread.is_alive():
+                raise ValueError("本地逐文件轻读正在运行，请先暂停后再启动AI整理")
             if any(
                 not finished.is_set()
                 and (thread.is_alive() or not started.is_set())
@@ -565,6 +681,9 @@ class SummaryJobs:
             self.resume(job)
 
     def close(self):
+        self._preflight_stop.set()
+        if self._preflight_thread is not None:
+            self._preflight_thread.join(timeout=8)
         for _, stop, _, _ in self.active.values():
             stop.set()
         for thread, _, _, _ in self.active.values():
@@ -715,6 +834,20 @@ class SummaryJobs:
                     else str(path)
                 )
                 record["inspected_at"] = datetime.now(UTC).isoformat()
+                classification = record["classification"]
+                restricted = (
+                    path.suffix.casefold() in {".msg", ".eml"}
+                    or classification.get("parent_id") in {
+                        "communication", "personal", "finance"
+                    }
+                    or (
+                        classification.get("parent_id") == "unresolved"
+                        and bool(record.get("text_preview"))
+                    )
+                )
+                record["privacy_classification"] = (
+                    "restricted" if restricted else "private"
+                )
                 summary = {
                     "text": "本地内容抽样已完成，等待AI理解用途与建议处理深度。",
                     "origin": "local",
@@ -727,8 +860,26 @@ class SummaryJobs:
                     }
                     # Keep only the immediate predecessor rather than nesting indefinitely.
                     record["previous_version"]["record"].pop("previous_version", None)
+                automatic_batch = meta.get("scanner") == "machine_catalog_batch"
+                no_sample = not record.get("text_preview")
                 if state == "missing":
                     ai_state = "not_requested"
+                elif automatic_batch and no_sample:
+                    # A signature is not an understanding of a document. Mark
+                    # unsupported body extraction for review; media remain L0.
+                    if path.suffix.casefold() in IMAGE_SUFFIXES:
+                        ai_state = "local_l0"
+                        record["tier_basis"] = "signature_only_media"
+                    else:
+                        ai_state = "unavailable"
+                        record["tier_basis"] = "body_sample_unavailable"
+                elif (
+                    restricted
+                    and meta["request"]["provider"] != "local"
+                    and not meta["request"].get("allow_restricted_remote_processing")
+                ):
+                    ai_state = "restricted_local_only"
+                    record["tier_basis"] = "restricted_remote_consent_missing"
                 else:
                     # Remote quick triage may conclude "metadata only / catalog"
                     # for binary, media, archive, empty, or otherwise non-text
@@ -776,14 +927,23 @@ class SummaryJobs:
                 items.append(
                     {
                         "id": str(row["id"]),
-                        "name": record["relative"],
-                        "sample": (record.get("text_preview") or "")[:2000],
+                        # Keep local placement in the ledger/UI, but do not send
+                        # full drive paths or parent names to a remote model.
+                        "name": redact_secrets(
+                            str(record.get("name") or Path(record["relative"]).name)
+                        )[0],
+                        "sample": redact_secrets(
+                            (record.get("text_preview") or "")[:2000]
+                        )[0],
                         "coverage": record.get("coverage", "partial"),
                         "metadata": {
                             "extension": record.get("extension") or record.get("suffix", ""),
                             "detected_type": record.get("detected_type", ""),
                             "bytes": record.get("bytes", 0),
-                            "notes": record.get("notes", [])[:5]
+                            "notes": [
+                                redact_secrets(str(note))[0]
+                                for note in record.get("notes", [])[:5]
+                            ]
                             if isinstance(record.get("notes"), list)
                             else [],
                             "sample_available": bool(record.get("text_preview")),
@@ -792,10 +952,26 @@ class SummaryJobs:
                             "category_id": record.get("classification", {}).get("category_id"),
                             "label": record.get("classification", {}).get("label"),
                             "basis": record.get("classification", {}).get("basis"),
-                            "evidence": record.get("classification", {}).get("evidence", []),
-                            "candidates": record.get("classification", {}).get(
-                                "candidates", []
-                            )[:3],
+                            "evidence": [
+                                redact_secrets(str(evidence))[0]
+                                for evidence in record.get("classification", {}).get(
+                                    "evidence", []
+                                )
+                            ],
+                            "candidates": [
+                                {
+                                    "category_id": candidate.get("category_id"),
+                                    "score": candidate.get("score"),
+                                    "evidence": [
+                                        redact_secrets(str(value))[0]
+                                        for value in candidate.get("evidence", [])
+                                    ],
+                                }
+                                for candidate in record.get("classification", {}).get(
+                                    "candidates", []
+                                )[:3]
+                                if isinstance(candidate, dict)
+                            ],
                             "confidence": record.get("classification", {}).get("confidence", 0),
                             "review_reason": record.get("classification", {}).get("review_reason"),
                         },
@@ -923,6 +1099,24 @@ class SummaryJobs:
                     db.execute("UPDATE files SET ai_state='done' WHERE id=?", (int(ident),))
                     continue  # never overwrite user's confirmed correction
                 c = categories[item["category_id"]]
+                recommended_mode = item["recommended_mode"]
+                model_mode = recommended_mode
+                if meta.get("scanner") == "machine_catalog_batch":
+                    suffix = path.suffix.casefold()
+                    kind = (
+                        "markdown" if suffix in MARKDOWN_SUFFIXES else
+                        "documents" if suffix in DOCUMENT_SUFFIXES else
+                        "images" if suffix in IMAGE_SUFFIXES else "other"
+                    )
+                    selected_rule = load_auto_policy(self.settings.data_root)["rules"][kind]
+                    max_mode = {
+                        "catalog": "catalog", "exclude": "catalog",
+                        "extract": "extract", "md_fallback": "extract",
+                        "md_only": "full", "full": "full", "semantic": "semantic",
+                    }[selected_rule]
+                    levels = ("catalog", "extract", "full", "semantic")
+                    if levels.index(recommended_mode) > levels.index(max_mode):
+                        recommended_mode = max_mode
                 secondary = [
                     categories[category_id]
                     for category_id in item["secondary_category_ids"]
@@ -943,7 +1137,9 @@ class SummaryJobs:
                 record["understanding"] = {
                     "purpose": redact_secrets(item["purpose"])[0],
                     "importance": item["importance"],
-                    "recommended_mode": item["recommended_mode"],
+                    "recommended_mode": recommended_mode,
+                    "model_recommended_mode": model_mode,
+                    "profile_cap_applied": recommended_mode != model_mode,
                     "recommendation_reason": redact_secrets(item["recommendation_reason"])[0],
                     "evidence": redact_secrets(evidence)[0],
                     "uncertainty": redact_secrets(item["uncertainty"])[0],
@@ -955,7 +1151,7 @@ class SummaryJobs:
                     "text": redact_secrets(item["summary"])[0],
                     "purpose": redact_secrets(item["purpose"])[0],
                     "importance": item["importance"],
-                    "recommended_mode": item["recommended_mode"],
+                    "recommended_mode": recommended_mode,
                     "origin": "agent",
                     "evidence": redact_secrets(evidence)[0],
                     "uncertainty": redact_secrets(item["uncertainty"])[0],
@@ -1109,7 +1305,16 @@ class SummaryJobs:
         request = meta["request"]
         cwd = self.directory(job) / "agent-work"
         cwd.mkdir(exist_ok=True)
-        with CodexAgent(cwd, request["model"], request["codex_executable"], stop) as agent:
+        with self.db(job) as db:
+            last_thread = db.execute(
+                "SELECT thread_id FROM packets WHERE thread_id IS NOT NULL "
+                "ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        resume_thread_id = str(last_thread[0]) if last_thread else None
+        with CodexAgent(
+            cwd, request["model"], request["codex_executable"], stop,
+            resume_thread_id=resume_thread_id,
+        ) as agent:
             for _ in range(request["max_ai_batches"]):
                 if stop.is_set():
                     return

@@ -208,6 +208,98 @@ def test_included_files_counts_deduplicated_original_paths(knowledge_system, sou
     assert included["canonical_level_counts"] == {"fulltext": 1}
 
 
+def test_l3_alias_promotes_canonical_source_and_requeues_existing_chunks(
+    knowledge_system, source_root
+):
+    source = source_root / "canonical.md"
+    alias_path = source_root / "copy" / "same-content.md"
+    lower_level_alias = source_root / "copy" / "lower-level.md"
+    alias_path.parent.mkdir()
+    payload = "重复来源被选为L3后，规范资料也必须进入向量候选。"
+    source.write_text(payload, encoding="utf-8")
+    alias_path.write_text(payload, encoding="utf-8")
+    lower_level_alias.write_text(payload, encoding="utf-8")
+    stored = knowledge_system.ingestion.import_file(source, domain="work", privacy="private")
+
+    with knowledge_system.database.connect() as connection:
+        chunks = [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM chunks WHERE source_id=?", (stored["source_id"],)
+            )
+        ]
+        connection.execute(
+            "UPDATE index_outbox SET status='deferred',last_error_code='outside_embedding_scope' "
+            "WHERE entity_type='chunk' AND entity_id IN ("
+            + ",".join("?" for _ in chunks)
+            + ")",
+            chunks,
+        )
+        connection.commit()
+
+    canonical_result = knowledge_system.repository.register_source_alias(
+        source_id=stored["source_id"],
+        original_uri=str(source),
+        original_name=source.name,
+        vault_path=str(source),
+        source_type="md",
+        byte_size=source.stat().st_size,
+        metadata={"requested_processing_level": "L3"},
+    )
+    with knowledge_system.database.connect() as connection:
+        canonical_after_same_path = connection.execute(
+            "SELECT metadata_json FROM sources WHERE id=?", (stored["source_id"],)
+        ).fetchone()
+        queued_after_same_path = connection.execute(
+            "SELECT COUNT(*) FROM index_outbox WHERE event_key LIKE 'vector:upsert:%' "
+            "AND entity_id IN (" + ",".join("?" for _ in chunks) + ") "
+            "AND status='pending'",
+            chunks,
+        ).fetchone()[0]
+
+    assert json.loads(canonical_after_same_path["metadata_json"])[
+        "requested_processing_level"
+    ] == "L3"
+    assert queued_after_same_path == len(chunks)
+    knowledge_system.repository.register_source_alias(
+        source_id=stored["source_id"],
+        original_uri=str(alias_path),
+        original_name=alias_path.name,
+        vault_path=str(alias_path),
+        source_type="md",
+        byte_size=alias_path.stat().st_size,
+        metadata={"requested_processing_level": "L3"},
+    )
+    knowledge_system.repository.register_source_alias(
+        source_id=stored["source_id"],
+        original_uri=str(lower_level_alias),
+        original_name=lower_level_alias.name,
+        vault_path=str(lower_level_alias),
+        source_type="md",
+        byte_size=lower_level_alias.stat().st_size,
+        metadata={"requested_processing_level": "L1"},
+    )
+
+    with knowledge_system.database.connect() as connection:
+        canonical = connection.execute(
+            "SELECT metadata_json FROM sources WHERE id=?", (stored["source_id"],)
+        ).fetchone()
+        queued = connection.execute(
+            "SELECT COUNT(*) FROM index_outbox WHERE event_key LIKE 'vector:upsert:%' "
+            "AND entity_id IN (" + ",".join("?" for _ in chunks) + ") "
+            "AND status='pending'",
+            chunks,
+        ).fetchone()[0]
+        chunk_count = connection.execute(
+            "SELECT COUNT(*) FROM chunks WHERE source_id=?", (stored["source_id"],)
+        ).fetchone()[0]
+
+    assert canonical_result == {"status": "canonical", "source_id": stored["source_id"]}
+    assert json.loads(canonical["metadata_json"])["requested_processing_level"] == "L3"
+    assert queued == len(chunks)
+    assert chunk_count == len(chunks)
+
+
 def test_parse_failure_and_filters(knowledge_system, source_root):
     sync = knowledge_system.sync
     root = sync.register_root(
