@@ -5,6 +5,7 @@ import "./runtime-center.css";
 type Service = { id: string; name: string; status: string; owned: boolean; controllable: boolean; detail: string };
 type Operation = { channel: string; operation: string; calls: number; failures: number; warnings: number; average_ms: number };
 type FailureDetail = { channel: string; operation: string; reason: string; calls: number; last_seen_at: string | null };
+type RunReceipt = { recorded_at: string; status: string; counts: Record<string, number>; issues: { code: string; count: number; action: string; root_id?: string }[] };
 type ThreadJournal = {
   enabled: boolean; running: boolean; interval_days: number; last_status: string;
   last_completed_at: string | null; last_result: { summaries_written?: number; pending_files?: number; completed_files?: number } | null;
@@ -17,8 +18,15 @@ type State = {
   };
   queues: Record<string, Record<string, number>>;
   thread_journal: ThreadJournal;
+  sync_diagnostics?: Record<string, { latest: RunReceipt | null; recent_issues: RunReceipt[] }>;
+  sync_root_names?: Record<string, string>;
 };
 type BriefState = Pick<State, "services" | "thread_journal">;
+type StorageUsage = {
+  free_bytes: number; total_bytes: number; space_level: "ok" | "warning" | "critical";
+  incomplete: boolean; cleanup_policy: string;
+  categories: { id: string; label: string; bytes: number; files: number; scan_errors: number }[];
+};
 type ConnectionState = "checking" | "connected" | "offline";
 type CachedState = { savedAt: number; data: State };
 
@@ -54,6 +62,39 @@ function formatRecordedTime(value: string | null) {
   if (!value) return "时间未记录";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "时间未记录" : date.toLocaleString();
+}
+
+function formatGiB(bytes: number) {
+  return `${(bytes / (1024 ** 3)).toFixed(2)} GiB`;
+}
+
+function syncRunLabel(run: RunReceipt | null | undefined) {
+  if (!run) return "未运行";
+  const selected = run.counts.selected_roots;
+  const disabled = run.counts.disabled_roots ?? 0;
+  if (selected === 0) return "无资料源";
+  if (selected > 0 && disabled === selected) return "未启用";
+  if (run.status === "failed") return "未完成";
+  if (disabled > 0 || run.status === "warning") return "部分完成";
+  return run.status === "completed" ? "完成" : "未完成";
+}
+
+function scheduledRunLabel(run: RunReceipt | null | undefined) {
+  if (!run) return "未运行";
+  if (run.counts.full_sync_due && !run.counts.weflow_enabled &&
+      run.counts.selected_roots === run.counts.disabled_roots) return "无任务";
+  if (run.status === "completed" ||
+      (run.status === "deferred" && (run.counts.weflow_imported_messages ?? 0) > 0)) return "完成";
+  return run.status === "deferred" ? "本轮无需刷新" : "需检查";
+}
+
+function weflowRunLabel(run: RunReceipt | null | undefined) {
+  if (!run) return "未运行";
+  if (!run.counts.weflow_enabled) return "未启用";
+  if (run.counts.weflow_export_failed || run.counts.weflow_failed_sessions || run.counts.weflow_import_failed) return "需检查";
+  if (run.counts.weflow_imported_messages) return `新增 ${run.counts.weflow_imported_messages} 条`;
+  if (run.counts.weflow_export_skipped) return "导出跳过";
+  return "无新增入库";
 }
 
 function total(states: Record<string, number> | undefined, names: string[]) {
@@ -93,6 +134,8 @@ export default function RuntimeCenter() {
   const [connectionError, setConnectionError] = useState("");
   const [detailError, setDetailError] = useState("");
   const [detailsLoading, setDetailsLoading] = useState(true);
+  const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null);
+  const [storageError, setStorageError] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<{ id: string; action: string } | null>(null);
 
@@ -101,11 +144,16 @@ export default function RuntimeCenter() {
     setConnectionError("");
     setDetailError("");
     setDetailsLoading(true);
+    setStorageError("");
+    setStorageUsage(null);
 
     // Start both calls together. The small endpoint gives an immediate usable state;
     // the historical queue query is intentionally allowed to finish later.
     const briefRequest = api<BriefState>("/api/runtime/brief", { signal: requestSignal(signal, 3000) });
     const overviewRequest = api<State>("/api/runtime/overview", { signal: requestSignal(signal, 25000) });
+    void api<StorageUsage>("/api/runtime/storage/usage", { signal: requestSignal(signal, 25000) })
+      .then(result => { if (!signal?.aborted) setStorageUsage(result.data); })
+      .catch(exception => { if (!signal?.aborted) setStorageError(exception instanceof Error ? exception.message : "占用统计暂不可用"); });
 
     try {
       const result = await briefRequest;
@@ -158,6 +206,13 @@ export default function RuntimeCenter() {
   const backgroundPending = total(backgroundQueue, ["pending", "processing", "failed"]);
   const usageFailureCount = data?.usage.failure_count ?? data?.usage.operations.reduce((sum, item) => sum + item.failures, 0) ?? 0;
   const usageFailureDetails = data?.usage.failure_details ?? [];
+  const latestSync = data?.sync_diagnostics?.sync?.latest;
+  const latestScheduled = data?.sync_diagnostics?.["scheduled-sync"]?.latest;
+  const recentSyncIssues = [
+    ...(data?.sync_diagnostics?.sync?.recent_issues ?? []),
+    ...(data?.sync_diagnostics?.["scheduled-sync"]?.recent_issues ?? []),
+  ].flatMap(run => run.issues.map(item => ({ ...item, recorded_at: run.recorded_at })))
+    .sort((a, b) => b.recorded_at.localeCompare(a.recorded_at)).slice(0, 8);
   const threadJournal = serviceState?.thread_journal;
   const systemState = connection === "offline" ? "本机服务需要检查" : connection === "connected" ? (detailsLoading ? "本机服务已连接" : "知识库状态已更新") : "正在连接本机服务";
   const systemDescription = connection === "offline"
@@ -221,6 +276,20 @@ export default function RuntimeCenter() {
       {detailsLoading && !data && <div className="runtime-detail-loading" role="status"><i />正在读取资料处理统计与历史任务…</div>}
 
       {data && <>
+        <section className="runtime-usage runtime-storage" aria-label="知识库磁盘占用">
+          <header><div><small>本机空间</small><h2>资料库与恢复点占用</h2></div><p>只读统计；不会自动清理恢复点，也不读取资料内容。</p></header>
+          {storageUsage ? <>
+            <div className="runtime-metrics"><article className={storageUsage.space_level !== "ok" ? "attention" : ""}><strong>{formatGiB(storageUsage.free_bytes)}</strong><span>所在磁盘剩余空间</span></article><article><strong>{formatGiB(storageUsage.categories.filter(item => item.id.endsWith("recovery")).reduce((sum, item) => sum + item.bytes, 0))}</strong><span>旧恢复点</span></article><article><strong>{formatGiB(storageUsage.categories.find(item => item.id === "historical_backups")?.bytes ?? 0)}</strong><span>历史备份</span></article><article><strong>{formatGiB(storageUsage.categories.find(item => item.id === "weflow_copies")?.bytes ?? 0)}</strong><span>微信原文快照</span></article></div>
+            {storageUsage.space_level !== "ok" && <p className="runtime-storage-warning" role="status">{storageUsage.space_level === "critical" ? "磁盘空间紧张：请先核实并迁移旧恢复点，避免资料同步写满磁盘。" : "磁盘空间偏低：建议检查旧恢复点和历史备份。"}</p>}
+            <details><summary>查看分类占用与文件数</summary><table><thead><tr><th>用途</th><th>文件数</th><th>占用</th></tr></thead><tbody>{storageUsage.categories.map(item => <tr key={item.id}><td>{item.label}{item.scan_errors ? "（部分文件无法统计）" : ""}</td><td>{item.files.toLocaleString()}</td><td>{formatGiB(item.bytes)}</td></tr>)}</tbody></table><p className="runtime-footnote">{storageUsage.cleanup_policy}{storageUsage.incomplete ? " 部分目录统计不完整。" : ""}以上仅涵盖列出的知域数据目录；其它盘上的受管导出副本和恢复点不在这里，并非整盘占用。</p></details>
+          </> : <p className="runtime-footnote">{storageError ? `占用统计失败：${storageError}` : "正在统计本应用管理的目录…"}</p>}
+        </section>
+        <section className="runtime-usage" aria-label="资料同步与故障摘要">
+          <header><div><small>自动任务与资料源</small><h2>最近同步是否真的完成</h2></div><p>只显示新版本的精简运行回执；未启用任务不等于已自动同步。</p></header>
+          <div className="runtime-metrics"><article><strong>{syncRunLabel(latestSync)}</strong><span>资料源同步</span></article><article><strong>{scheduledRunLabel(latestScheduled)}</strong><span>定时任务</span></article><article><strong>{weflowRunLabel(latestScheduled)}</strong><span>微信聊天</span></article></div>
+          <p className="runtime-footnote">资料源最近回执：{formatRecordedTime(latestSync?.recorded_at ?? null)}；定时任务最近回执：{formatRecordedTime(latestScheduled?.recorded_at ?? null)}。成功回执不代表新增文件都完成 AI 分类。</p>
+          {recentSyncIssues.length > 0 && <details><summary>查看同步异常与处理建议</summary><div className="runtime-failure-list">{recentSyncIssues.map((item, index) => <article key={`${item.recorded_at}:${index}`}><div><strong>{item.root_id ? (data.sync_root_names?.[item.root_id] ?? "已停用的资料源") : "后台增量处理"}</strong><span>{formatRecordedTime(item.recorded_at)} · {item.code}</span></div><p>{item.action}</p><b>{item.count} 项</b></article>)}</div></details>}
+        </section>
         <section className="runtime-usage">
           <header><div><small>最近 {data.usage.days ?? 7} 天</small><h2>使用情况</h2></div><p>这里只表示系统调用是否成功，不代表回答一定准确。</p></header>
           <div className="runtime-metrics"><article><strong>{data.usage.calls ?? "—"}</strong><span>已观测调用</span></article><article><strong>{data.usage.success_rate === null ? "—" : `${(data.usage.success_rate * 100).toFixed(1)}%`}</strong><span>技术调用成功</span></article><article><strong>{data.usage.operations.length}</strong><span>使用过的功能</span></article><article className={usageFailureCount ? "attention" : ""}><strong>{usageFailureCount}</strong><span>需要说明的失败</span></article></div>

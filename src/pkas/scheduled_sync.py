@@ -1,5 +1,6 @@
 import ctypes
 import json
+import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,15 @@ FULL_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000
 BOOT_ID_GRANULARITY_MS = 60 * 1000
 
 SyncRunner = Callable[[KnowledgeSystem], dict[str, Any]]
+MIN_FREE_BYTES_FOR_SYNC = 2 * 1024 * 1024 * 1024
+
+
+def run_registered_local_sync(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
+    """Refresh only authorized local roots; do not start cloud vector work."""
+    return run_sync(
+        knowledge_system, local_only=True, process_outbox=False,
+        minimum_free_bytes=MIN_FREE_BYTES_FOR_SYNC,
+    )
 
 
 def _now_ms() -> int:
@@ -65,14 +75,14 @@ def run_scheduled_sync(
     *,
     now_ms: int | None = None,
     boot_id: int | None = None,
-    full_sync_runner: SyncRunner = run_sync,
+    full_sync_runner: SyncRunner = run_registered_local_sync,
     weflow_import_runner: SyncRunner = run_daily_import,
+    weflow_export_status: str = "ready",
 ) -> dict[str, Any]:
-    """Import completed WeFlow exports and gate full refreshes to six hours."""
+    """Import completed exports and refresh authorized local roots when due."""
+    if weflow_export_status not in {"ready", "skipped", "error", "timeout"}:
+        raise ValueError("Unsupported WeFlow export status")
     current_ms = _now_ms() if now_ms is None else int(now_ms)
-    # Test calls inject a deterministic clock; production calls should record
-    # the successful watermark at the end of the cycle, not at its start.
-    completion_ms = _now_ms() if now_ms is None else current_ms
     current_boot = current_boot_id(now_ms=current_ms) if boot_id is None else int(boot_id)
     state = _load_state(knowledge_system)
     last_success = int(state.get("last_success_at_ms") or 0)
@@ -84,27 +94,42 @@ def run_scheduled_sync(
     # This local import is intentionally checked on every lightweight poll. It
     # does not call an LLM and only sees exports newer than the persisted
     # authorization watermark.
-    weflow_result = weflow_import_runner(knowledge_system)
-    full_result = full_sync_runner(knowledge_system) if full_sync_due else None
+    try:
+        weflow_result = weflow_import_runner(knowledge_system)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        weflow_result = {"status": "failed", "error_type": type(exc).__name__}
+    try:
+        full_result = full_sync_runner(knowledge_system) if full_sync_due else None
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        full_result = {"status": "failed", "error_type": type(exc).__name__}
 
     weflow_status = str(weflow_result.get("status") or "failed")
     full_status = str(full_result.get("status") or "deferred") if full_result else "deferred"
-    completed = weflow_status in {"completed", "disabled"} and (
-        full_result is None or full_status == "completed"
+    warning = (
+        full_status == "warning"
+        or weflow_status == "warning"
+        or int(weflow_result.get("failed_sessions") or 0) > 0
     )
-    warning = full_status == "warning" or int(weflow_result.get("failed_sessions") or 0) > 0
-    failed = weflow_status == "failed" or full_status == "failed"
+    export_failed = weflow_export_status in {"error", "timeout"}
+    failed = weflow_status == "failed" or full_status == "failed" or export_failed
+    weflow_work_done = any(
+        int(weflow_result.get(key) or 0) > 0
+        for key in ("candidate_sessions", "imported_messages", "pruned_files")
+    )
 
     if failed:
         status = "failed"
     elif warning:
         status = "warning"
-    elif full_result is None:
+    elif full_result is None and not weflow_work_done:
         status = "deferred"
     else:
         status = "completed"
 
-    if completed and full_result is not None:
+    # The local-root watermark is independent of WeFlow's own export/import
+    # watermark. A WeFlow failure must not repeat an already finished disk scan.
+    if full_result is not None and full_status == "completed":
+        completion_ms = _now_ms() if now_ms is None else current_ms
         state["last_success_at_ms"] = completion_ms
         state["last_completed_at_ms"] = completion_ms
         if current_boot > 0:
@@ -124,6 +149,7 @@ def run_scheduled_sync(
         "full_sync_due": full_sync_due,
         "full_sync": full_result,
         "weflow_import": weflow_result,
+        "weflow_export_status": weflow_export_status,
         "last_success_at_ms": effective_success or None,
         "next_full_sync_at_ms": (
             effective_success + FULL_SYNC_INTERVAL_MS if effective_success else None

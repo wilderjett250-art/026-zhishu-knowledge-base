@@ -291,7 +291,7 @@ function Knowledge({ sources, syncRoots, run, setEvidence, busy }: { sources: Js
     </section>
     <div className="section-divider"><span>持续资料</span><b>资料地图与增量同步</b></div>
     <section className="sync-overview">
-      <Panel title={`持续资料源 · ${syncRoots.length}`} code="AUTO REFRESH / 03:30">
+      <Panel title={`持续资料源 · ${syncRoots.length}`} code="MANUAL REFRESH / SCHEDULE OPTIONAL">
         <div className="sync-root-list">
           {syncRoots.length ? syncRoots.map((root) => <article className="sync-root-card" key={root.id}>
             <header><span className={`status-dot ${root.error_count ? "warning" : "completed"}`} /><div><strong>{root.name}</strong><small>{root.connector_type === "codex_sessions" ? "Codex 任务记录" : root.sync_mode === "index" ? "全文检索" : "目录索引"}</small></div><button disabled={busy} onClick={() => scanRoot(root.id)}>增量刷新</button></header>

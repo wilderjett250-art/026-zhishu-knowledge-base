@@ -186,6 +186,29 @@ def test_runtime_storage_endpoint_marks_runtime_path_on_system_drive(test_settin
     assert storage["on_system_drive"] is bool(system_drive)
 
 
+def test_runtime_storage_usage_counts_only_managed_areas(test_settings):
+    root = Path(test_settings.data_root)
+    recovery = root / "intake" / "recovery"
+    recovery.mkdir(parents=True)
+    (recovery / "old.sqlite").write_bytes(b"old")
+    unrelated = root / "personal-notes"
+    unrelated.mkdir()
+    (unrelated / "private.txt").write_bytes(b"not counted")
+
+    with TestClient(create_app(test_settings)) as client:
+        response = client.get("/api/runtime/storage/usage")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    categories = {item["id"]: item for item in data["categories"]}
+    assert categories["intake_recovery"]["bytes"] == 3
+    assert categories["intake_recovery"]["files"] == 1
+    assert categories["intake_recovery"]["scan_errors"] == 0
+    assert data["free_bytes"] <= data["total_bytes"]
+    assert data["space_level"] in {"ok", "warning", "critical"}
+    assert "personal-notes" not in str(data)
+
+
 def test_display_path_removes_local_windows_device_prefix_but_keeps_unc_prefix():
     assert _display_path(Path(r"\\?\C:\Zhishu\data")) == r"C:\Zhishu\data"
     assert _display_path(Path(r"\\?\UNC\server\share\Zhishu")) == (

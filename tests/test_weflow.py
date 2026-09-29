@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -109,12 +110,16 @@ def test_weflow_xlsx_export_discovery_import_deduplication_and_context(
     source_root: Path,
 ) -> None:
     records, _ = create_xlsx_export_fixture(source_root)
+    adjacent_media = source_root / "photo.jpg"
+    adjacent_media.write_bytes(b"synthetic-image-not-chat-data")
     catalog = knowledge_system.weflow.discover_exports(records_path=str(records))
     assert catalog["api_required"] is False
     assert catalog["key_accessed"] is False
     assert catalog["total_sessions"] == 1
     assert catalog["existing_sessions"] == 1
     assert catalog["existing_record_count"] == 1
+    assert catalog["items"][0]["export_time_ms"] == 1738713900000
+    assert catalog["items"][0]["export_time"] == 1738713900
 
     inspection = knowledge_system.weflow.inspect_export_selection(
         records_path=str(records),
@@ -188,6 +193,12 @@ def test_weflow_xlsx_export_discovery_import_deduplication_and_context(
     )
     assert duplicate["result"]["imported"] == 0
     assert duplicate["result"]["duplicates"] == 3
+    assert duplicate["result"]["snapshot_paths"] == imported["result"]["snapshot_paths"]
+    snapshots = (knowledge_system.settings.data_root / "raw" / "weflow-xlsx").rglob(
+        "*.xlsx"
+    )
+    assert len(list(snapshots)) == 1
+    assert not list((knowledge_system.settings.data_root / "raw").rglob("photo.jpg"))
 
     with knowledge_system.database.connect() as connection:
         connector = connection.execute(
@@ -195,6 +206,31 @@ def test_weflow_xlsx_export_discovery_import_deduplication_and_context(
         ).fetchone()
     assert '"api_required":false' in connector["config_json"]
     assert '"key_accessed":false' in connector["config_json"]
+
+
+def test_weflow_xlsx_embedded_media_is_rejected_without_copying(
+    knowledge_system: KnowledgeSystem,
+    source_root: Path,
+) -> None:
+    records, xlsx = create_xlsx_export_fixture(source_root)
+    with ZipFile(xlsx, "a") as workbook:
+        workbook.writestr("xl/media/synthetic-photo.png", b"synthetic-image")
+
+    inspection = knowledge_system.weflow.inspect_export_selection(
+        records_path=str(records), session_ids=["wxid_customer_demo"]
+    )
+    result = knowledge_system.customer_workflows.import_weflow_exports(
+        records_path=str(records),
+        session_ids=["wxid_customer_demo"],
+        inspection_token=inspection["inspection_token"],
+        privacy="restricted",
+    )
+
+    assert result["status"] == "failed"
+    assert result["result"]["failed_sessions"] == 1
+    assert result["result"]["imported"] == 0
+    assert result["result"]["session_errors"][0]["error_type"] == "WeFlowFormatError"
+    assert not list((knowledge_system.settings.data_root / "raw").rglob("*.xlsx"))
 
 
 def test_weflow_xlsx_inspection_token_detects_file_change(

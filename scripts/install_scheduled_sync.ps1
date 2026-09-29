@@ -3,6 +3,8 @@ param(
     [string]$DataRoot = '',
     [string]$QdrantUrl = 'http://127.0.0.1:6333',
     [string]$WeFlowRoot = '',
+    [string]$WeFlowExportRoot = '',
+    [switch]$LocalOnly,
     [string]$TaskName = 'PKAS-Knowledge-Sync',
     [string]$DailyAt = '00:00'
 )
@@ -14,7 +16,13 @@ if ([string]::IsNullOrWhiteSpace($DataRoot)) {
 }
 & (Join-Path $resolvedRoot 'scripts\assert_windows_autostart_allowed.ps1') `
     -ProjectRoot $resolvedRoot -DataRoot $DataRoot
-if ([string]::IsNullOrWhiteSpace($WeFlowRoot) -or -not (Test-Path -LiteralPath $WeFlowRoot)) {
+if ($LocalOnly -and -not [string]::IsNullOrWhiteSpace($WeFlowRoot)) {
+    throw 'Choose either LocalOnly or an explicit WeFlowRoot, not both.'
+}
+if (-not $LocalOnly -and (
+    [string]::IsNullOrWhiteSpace($WeFlowRoot) -or
+    -not (Test-Path -LiteralPath $WeFlowRoot)
+)) {
     throw 'WeFlowRoot must be an existing, explicitly supplied directory.'
 }
 $runnerPath = Join-Path $resolvedRoot 'scripts\run_scheduled_sync.ps1'
@@ -34,7 +42,15 @@ try {
 
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $powershellPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runnerPath`" -ProjectRoot `"$resolvedRoot`" -DataRoot `"$DataRoot`" -QdrantUrl `"$QdrantUrl`" -WeFlowRoot `"$WeFlowRoot`""
+$arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runnerPath`" -ProjectRoot `"$resolvedRoot`" -DataRoot `"$DataRoot`" -QdrantUrl `"$QdrantUrl`""
+if ($LocalOnly) {
+    $arguments += ' -LocalOnly'
+} else {
+    $arguments += " -WeFlowRoot `"$WeFlowRoot`""
+    if (-not [string]::IsNullOrWhiteSpace($WeFlowExportRoot)) {
+        $arguments += " -WeFlowExportRoot `"$WeFlowExportRoot`""
+    }
+}
 $action = New-ScheduledTaskAction -Execute $powershellPath -Argument $arguments -WorkingDirectory $resolvedRoot
 
 # The task is intentionally once per day. The Python coordinator remains
@@ -48,7 +64,7 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 4)
 $task = New-ScheduledTask -Action $action -Trigger @($dailyTrigger) `
     -Principal $principal -Settings $settings `
-    -Description "PKAS: daily WeFlow incremental sync at $DailyAt; no visible console."
+    -Description "PKAS: daily authorized local-root refresh$(if ($LocalOnly) { '' } else { ' and enabled WeFlow import' }) at $DailyAt; hidden."
 Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null
 
 $registered = Get-ScheduledTask -TaskName $TaskName

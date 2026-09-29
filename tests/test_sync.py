@@ -6,8 +6,10 @@ import pytest
 import pkas.mcp_server as mcp_server
 from pkas.codex_capture import capture_notification
 from pkas.daily_closeout import plan_daily_closeouts
+from pkas.file_inspector import inspect_file as real_inspect_file
 from pkas.ingest import ImportBoundaryError
 from pkas.repository import CODEX_USER_TASK_MIGRATION_KEY, Repository
+from pkas.run_diagnostics import read_run_receipts
 from pkas.sync_worker import run_sync
 from pkas.system import KnowledgeSystem
 
@@ -458,6 +460,7 @@ def test_sync_worker_reports_codex_history_as_disabled(
 
     assert report["status"] == "completed"
     assert report["results"][0]["status"] == "disabled"
+    assert report["disabled_roots"] == 1
     assert report["results"][0]["result"]["reason"] == "codex_history_sync_disabled"
 
 
@@ -537,3 +540,124 @@ def test_sync_worker_refreshes_authorized_roots_and_writes_report(
     assert report["selected_roots"] == 1
     assert Path(report["report_path"]).is_file()
     assert knowledge_system.sync.search_catalog("worker.txt")
+    receipt = read_run_receipts(knowledge_system.settings.data_root)["sync"]["latest"]
+    assert receipt["status"] == "completed"
+    assert str(source_root) not in Path(report["report_path"]).read_text(encoding="utf-8")
+
+
+def test_new_indexed_file_gets_reviewable_local_classification(
+    knowledge_system: KnowledgeSystem, source_root: Path, monkeypatch,
+) -> None:
+    root = knowledge_system.sync.register_root(
+        name="明确允许读取正文的资料源", root_path=str(source_root),
+        connector_type="local_files", sync_mode="index",
+    )
+    knowledge_system.sync.scan_root(root["id"])
+    note = source_root / "misleading-name.md"
+    note.write_text("功能需求与验收标准：先核对真实内容。", encoding="utf-8")
+
+    fresh = knowledge_system.sync.scan_root(root["id"])
+    assert fresh["indexed"] == 1
+    assert fresh["classification_suggested"] == 1
+    with knowledge_system.database.connect() as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM sync_items WHERE root_id=? AND relative_path=?",
+            (root["id"], note.name),
+        ).fetchone()
+    suggestion = json.loads(row["metadata_json"])["classification"]
+    assert suggestion["category_id"] == "work_requirements"
+    assert suggestion["method"] == "local_content_rules_v1"
+    assert suggestion["review_status"] == "suggested"
+    assert "功能需求" not in json.dumps(suggestion, ensure_ascii=False)
+
+    def no_second_read(_path):
+        raise AssertionError("unchanged indexed file should not be resampled")
+
+    monkeypatch.setattr("pkas.sync.inspect_file", no_second_read)
+    unchanged = knowledge_system.sync.scan_root(root["id"])
+    assert unchanged["unchanged"] == 1
+
+
+def test_catalog_only_root_never_reads_file_for_classification(
+    knowledge_system: KnowledgeSystem, source_root: Path, monkeypatch,
+) -> None:
+    (source_root / "private.md").write_text("个人日记内容", encoding="utf-8")
+    root = knowledge_system.sync.register_root(
+        name="只登记路径", root_path=str(source_root),
+        connector_type="local_files", sync_mode="catalog",
+    )
+
+    def forbidden(_path):
+        raise AssertionError("catalog-only must not read content")
+
+    monkeypatch.setattr("pkas.sync.inspect_file", forbidden)
+    result = knowledge_system.sync.scan_root(root["id"])
+    assert result["cataloged"] == 1
+    with knowledge_system.database.connect() as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM sync_items WHERE root_id=?", (root["id"],)
+        ).fetchone()
+    assert "classification" not in json.loads(row["metadata_json"])
+
+
+def test_file_disappearing_between_enumeration_and_stat_is_not_unreadable(
+    knowledge_system: KnowledgeSystem, source_root: Path, monkeypatch,
+) -> None:
+    note = source_root / "rotating.tmp"
+    note.write_text("temporary", encoding="utf-8")
+    root = knowledge_system.sync.register_root(
+        name="rotating", root_path=str(source_root), connector_type="local_files",
+        sync_mode="catalog",
+    )
+    knowledge_system.sync.scan_root(root["id"])
+    original_stat = Path.stat
+
+    def vanished_stat(path: Path, *args, **kwargs):
+        if path == note and kwargs.get("follow_symlinks", True):
+            raise FileNotFoundError(3, "path disappeared")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", vanished_stat)
+    result = knowledge_system.sync.scan_root(root["id"])
+    assert result["vanished"] == 1
+    assert result["unreadable"] == 0
+    assert result["missing"] == 1
+    with knowledge_system.database.connect() as connection:
+        item = connection.execute(
+            "SELECT state FROM sync_items WHERE root_id=? AND relative_path=?",
+            (root["id"], note.name),
+        ).fetchone()
+    assert item["state"] == "missing"
+
+
+def test_classification_failure_is_visible_and_does_not_claim_success(
+    knowledge_system: KnowledgeSystem, source_root: Path, monkeypatch,
+) -> None:
+    note = source_root / "unstable.md"
+    note.write_text("功能需求", encoding="utf-8")
+    root = knowledge_system.sync.register_root(
+        name="需要重试的资料源", root_path=str(source_root),
+        connector_type="local_files", sync_mode="index",
+    )
+
+    def unavailable(_path):
+        raise OSError("secret raw filesystem error")
+
+    monkeypatch.setattr("pkas.sync.inspect_file", unavailable)
+    report = run_sync(knowledge_system, connector_type="local_files")
+    assert report["status"] == "warning"
+    assert report["results"][0]["result"]["classification_failed"] == 1
+    receipt = Path(report["report_path"]).read_text(encoding="utf-8")
+    assert "classification_retry" in receipt
+    assert "secret raw filesystem error" not in receipt
+    assert str(source_root) not in receipt
+    with knowledge_system.database.connect() as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM sync_items WHERE root_id=?", (root["id"],)
+        ).fetchone()
+    assert json.loads(row["metadata_json"])["classification"]["review_status"] == "retry_required"
+
+    monkeypatch.setattr("pkas.sync.inspect_file", real_inspect_file)
+    retried = knowledge_system.sync.scan_root(root["id"])
+    assert retried["unchanged"] == 1
+    assert retried["classification_suggested"] == 1

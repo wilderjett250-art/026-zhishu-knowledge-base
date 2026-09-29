@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import stat
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
@@ -32,6 +34,14 @@ CRITICAL_TABLES = (
 
 class BackupError(RuntimeError):
     pass
+
+
+def _retry_readonly_cleanup(function: Any, path: str, exc_info: Any) -> None:
+    error = exc_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(path, stat.S_IRWXU)
+    function(path)
 
 
 def sha256_file(path: Path) -> str:
@@ -173,6 +183,7 @@ class BackupManager:
                 "label": label,
                 "database": database_record,
                 "agent_checkpoint": checkpoint_record,
+                "source_raw_root": str((self.settings.data_root / "raw").resolve()),
                 "raw": {
                     "file_count": len(raw_records),
                     "bytes": sum(int(item["bytes"]) for item in raw_records),
@@ -294,6 +305,12 @@ class BackupManager:
         manifest = json.loads(
             (resolved_bundle / "manifest.json").read_text(encoding="utf-8")
         )
+        # Sources may intentionally link to originals outside the managed raw
+        # vault. Keep those references as-is; only copied vault files can be
+        # remapped into the restored data root.
+        source_raw_root = Path(
+            manifest.get("source_raw_root") or self.settings.data_root / "raw"
+        )
         staging = target.parent / f".partial-restore-{uuid.uuid4().hex}"
         try:
             (staging / "index").mkdir(parents=True)
@@ -311,18 +328,27 @@ class BackupManager:
             with closing(sqlite3.connect(database_path)) as connection:
                 remapped = 0
                 missing_vault_files = 0
+                external_source_refs = 0
+                unavailable_external_source_refs = 0
                 for table in ("sources", "connector_snapshots"):
                     rows = connection.execute(
                         f'SELECT id, vault_path FROM "{table}"'
                     ).fetchall()
                     for record_id, vault_path in rows:
-                        parts = Path(str(vault_path)).parts
-                        lower = [part.lower() for part in parts]
-                        if "raw" not in lower:
+                        source_path = Path(str(vault_path))
+                        try:
+                            relative = source_path.relative_to(source_raw_root)
+                        except ValueError:
+                            if table == "sources":
+                                external_source_refs += 1
+                                if not source_path.is_file():
+                                    unavailable_external_source_refs += 1
+                                continue
                             missing_vault_files += 1
                             continue
-                        raw_index = len(lower) - 1 - lower[::-1].index("raw")
-                        relative = Path(*parts[raw_index + 1 :])
+                        if not relative.parts or ".." in relative.parts:
+                            missing_vault_files += 1
+                            continue
                         restored_path = target / "raw" / relative
                         staged_path = staging / "raw" / relative
                         if not staged_path.is_file():
@@ -347,15 +373,25 @@ class BackupManager:
                     connection.execute("SELECT COUNT(1) FROM chunks").fetchone()[0]
                 )
             if quick_check != "ok" or missing_vault_files:
-                raise BackupError("Restored database or raw-vault verification failed.")
+                raise BackupError(
+                    "Restored database or raw-vault verification failed: "
+                    f"quick_check={quick_check}, "
+                    f"missing_vault_files={missing_vault_files}."
+                )
             if fts_count != chunk_count:
                 raise BackupError("Restored FTS row count does not match chunks.")
             if target.exists():
                 target.rmdir()
             staging.replace(target)
-        except Exception:
+        except Exception as error:
             if staging.exists():
-                shutil.rmtree(staging)
+                try:
+                    shutil.rmtree(staging, onerror=_retry_readonly_cleanup)
+                except Exception:
+                    error.add_note(
+                        "Cleanup of the isolated restore staging directory also "
+                        f"failed; it remains at {staging}."
+                    )
             raise
 
         report = {
@@ -367,6 +403,8 @@ class BackupManager:
             "quick_check": quick_check,
             "vault_paths_remapped": remapped,
             "missing_vault_files": missing_vault_files,
+            "external_source_refs": external_source_refs,
+            "unavailable_external_source_refs": unavailable_external_source_refs,
             "chunks": chunk_count,
             "fts_rows": fts_count,
             "sync_roots_disabled": disable_sync_roots,

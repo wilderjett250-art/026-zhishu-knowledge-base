@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile, ZipFile
 
 from openpyxl import load_workbook
 
@@ -126,6 +127,15 @@ def _record_timestamp(value: Any) -> int:
     return numeric // 1000 if numeric > 10_000_000_000 else numeric
 
 
+def _record_timestamp_ms(value: Any) -> int:
+    """Preserve export ordering within a second for the daily import watermark."""
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return numeric if numeric > 10_000_000_000 else numeric * 1000
+
+
 def _row_value(row: tuple[Any, ...], indexes: dict[str, int], name: str) -> Any:
     position = indexes.get(name)
     if position is None or position >= len(row):
@@ -183,6 +193,7 @@ class WeFlowService:
                     ),
                     "format": "xlsx",
                     "export_time": _record_timestamp(selected.get("exportTime")),
+                    "export_time_ms": _record_timestamp_ms(selected.get("exportTime")),
                     "message_count": int(selected.get("messageCount") or 0),
                     "output_path": str(source),
                     "byte_size": source.stat().st_size,
@@ -191,7 +202,7 @@ class WeFlowService:
                     ),
                 }
             )
-        items.sort(key=lambda item: (item["export_time"], item["session_id"]), reverse=True)
+        items.sort(key=lambda item: (item["export_time_ms"], item["session_id"]), reverse=True)
         return {
             "records_path": str(catalog_path),
             "total_sessions": len(payload),
@@ -611,7 +622,7 @@ class WeFlowService:
     def _latest_existing_record(self, records: list[dict[str, Any]]) -> dict[str, Any] | None:
         ordered = sorted(
             records,
-            key=lambda item: _record_timestamp(item.get("exportTime")),
+            key=lambda item: _record_timestamp_ms(item.get("exportTime")),
             reverse=True,
         )
         for record in ordered:
@@ -747,6 +758,22 @@ class WeFlowService:
         content_hash = _file_hash(source)
         if content_hash != expected_hash:
             raise ImportBoundaryError("WeFlow XLSX 在检查后发生了变化，请重新检查。")
+        # Keep the original chat workbook for provenance, but never copy an
+        # export that embeds image or attachment binaries inside the XLSX ZIP.
+        # Ordinary image-message placeholders remain plain chat rows.
+        try:
+            with ZipFile(source) as workbook:
+                for entry in workbook.infolist():
+                    name = entry.filename.replace("\\", "/").lstrip("/").casefold()
+                    if not entry.is_dir() and name.startswith(
+                        ("xl/media/", "xl/embeddings/", "media/", "attachments/")
+                    ):
+                        raise WeFlowFormatError(
+                            "WeFlow XLSX 内嵌图片或附件；本次未复制或导入该会话。"
+                            "请导出不含媒体原件的聊天记录。"
+                        )
+        except BadZipFile as exc:
+            raise WeFlowFormatError("WeFlow XLSX 不是有效的工作簿。") from exc
         vault_dir = (
             self.settings.data_root / "raw" / "weflow-xlsx" / "sha256" / content_hash[:2]
         )

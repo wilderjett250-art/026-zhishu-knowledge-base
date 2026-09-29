@@ -6,7 +6,9 @@ from typing import Any
 
 from pkas.codex_capture import build_codex_turn, is_internal_codex_turn, redact_secrets
 from pkas.config import Settings, get_settings
+from pkas.content_taxonomy import classify, load_taxonomy
 from pkas.db import Database
+from pkas.file_inspector import inspect_file
 from pkas.ingest import SKIP_DIRECTORIES, IngestionService, is_sensitive_path
 from pkas.parsers import SUPPORTED_EXTENSIONS, ParseError
 from pkas.repository import Repository, new_id, utc_now
@@ -16,6 +18,24 @@ SYNC_MODES = {"catalog", "index"}
 DOMAINS = {"work", "self", "shared", "distill"}
 PRIVACY_LEVELS = {"public", "private", "restricted"}
 OBSIDIAN_SKIPPED_DIRECTORIES = {".obsidian", ".trash", ".git"}
+
+
+def local_classification(path: Path, stat: os.stat_result, taxonomy: dict[str, Any]) -> dict:
+    """Classify bounded local evidence; do not persist the sampled body."""
+    sample = inspect_file(path)
+    if sample["changed_during_read"] or (
+        sample["bytes"], sample["mtime_ns"]
+    ) != (stat.st_size, stat.st_mtime_ns):
+        raise OSError("file_changed_during_inspection")
+    suggestion = classify(sample, taxonomy)
+    result = {
+        key: suggestion[key] for key in (
+            "category_id", "parent_id", "label", "basis", "review_status",
+            "taxonomy_revision", "method", "confidence", "review_reason", "needs_ai_review",
+        )
+    }
+    result["coverage"] = sample["coverage"]
+    return result
 
 
 class SyncBoundaryError(ValueError):
@@ -443,10 +463,24 @@ class SyncService:
             "duplicates": 0,
             "unchanged": 0,
             "skipped": 0,
+            "vanished": 0,
             "unreadable": 0,
             "errors": 0,
             "bytes_seen": 0,
+            "classification_suggested": 0,
+            "classification_needs_review": 0,
+            "classification_failed": 0,
         }
+        # A catalog-only root is a metadata permission, not consent to read
+        # content. Index-mode roots already authorize a bounded local read.
+        try:
+            taxonomy = (
+                load_taxonomy(self.settings.data_root)
+                if root["sync_mode"] == "index" else None
+            )
+        except (OSError, ValueError):
+            # Broken custom category settings must not stop file indexing.
+            taxonomy = None
         existing_items = self._existing_items(root["id"])
         pending_items: list[dict[str, Any]] = []
         additional_skips = (
@@ -464,9 +498,14 @@ class SyncService:
             try:
                 stat = path.stat()
             except OSError as exc:
+                error_code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+                if isinstance(exc, FileNotFoundError) or error_code in {2, 3}:
+                    # A file enumerated by os.walk can disappear before stat.
+                    # It is absent, not an unreadable document to retry forever.
+                    counts["vanished"] += 1
+                    continue
                 counts["unreadable"] += 1
                 external_id = self._external_id(relative)
-                error_code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
                 pending_items.append(
                     {
                         "root_id": root["id"],
@@ -496,6 +535,7 @@ class SyncService:
             reason: str | None = None
             source_id = existing.get("source_id") if existing else None
             indexed_at: str | None = None
+            metadata: dict[str, Any] = {"extension": path.suffix.lower()}
 
             if is_sensitive_path(path):
                 state = "skipped"
@@ -509,6 +549,38 @@ class SyncService:
                 ):
                     state = "indexed"
                     counts["unchanged"] += 1
+                    # Do not reread old files just because the application was
+                    # upgraded. Existing suggestions remain explicitly versioned.
+                    try:
+                        previous = json.loads(existing.get("metadata_json") or "{}")
+                    except (TypeError, ValueError):
+                        previous = {}
+                    if isinstance(previous, dict) and isinstance(
+                        previous.get("classification"), dict
+                    ):
+                        metadata["classification"] = previous["classification"]
+                    prior = metadata.get("classification") or {}
+                    if prior.get("review_status") == "retry_required":
+                        try:
+                            if taxonomy is None:
+                                raise ValueError("taxonomy_unavailable")
+                            metadata["classification"] = local_classification(path, stat, taxonomy)
+                            counter = (
+                                "classification_needs_review"
+                                if metadata["classification"]["review_status"] == "needs_review"
+                                else "classification_suggested"
+                            )
+                            counts[counter] += 1
+                        except (OSError, ValueError, RuntimeError):
+                            counts["classification_failed"] += 1
+                    elif taxonomy and prior.get("taxonomy_revision") not in {
+                        None, taxonomy["revision"]
+                    }:
+                        metadata["classification"] = {
+                            **prior,
+                            "review_status": "stale_taxonomy",
+                            "review_reason": "分类规则已变化，需重新抽样或等待文件更新",
+                        }
                 else:
                     try:
                         imported = self.ingestion.import_file(
@@ -527,6 +599,22 @@ class SyncService:
                             counts["indexed"] += 1
                         else:
                             counts["duplicates"] += 1
+                        try:
+                            if taxonomy is None:
+                                raise ValueError("taxonomy_unavailable")
+                            metadata["classification"] = local_classification(path, stat, taxonomy)
+                            counter = (
+                                "classification_needs_review"
+                                if metadata["classification"]["review_status"] == "needs_review"
+                                else "classification_suggested"
+                            )
+                            counts[counter] += 1
+                        except (OSError, ValueError, RuntimeError):
+                            metadata["classification"] = {
+                                "review_status": "retry_required",
+                                "review_reason": "本地抽样失败或文件在读取期间变化，稍后重试",
+                            }
+                            counts["classification_failed"] += 1
                     except ParseError:
                         state = "skipped"
                         reason = "no_indexable_text"
@@ -554,7 +642,7 @@ class SyncService:
                     "state": state,
                     "reason": reason,
                     "source_id": source_id,
-                    "metadata": {"extension": path.suffix.lower()},
+                    "metadata": metadata,
                     "scan_time": scan_time,
                     "indexed_at": indexed_at,
                 }

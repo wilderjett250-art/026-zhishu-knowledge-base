@@ -81,6 +81,7 @@ from pkas.rpa_bridge import (
     is_loopback_host,
 )
 from pkas.rpa_routes import router as rpa_router
+from pkas.run_diagnostics import issue, read_run_receipts, root_scan_issues, write_run_receipt
 from pkas.runtime_manager import RuntimeManager
 from pkas.schemas import (
     AgentCloseoutRequest,
@@ -508,10 +509,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.app.state.runtime_manager.storage_status(),
         )
 
+    @app.get("/api/runtime/storage/usage", response_model=Envelope)
+    def runtime_storage_usage(request: Request) -> Envelope:
+        return success(
+            "知识库磁盘占用；仅统计本应用管理的目录",
+            request.app.state.runtime_manager.storage_usage_status(),
+        )
+
     @app.get("/api/runtime/overview", response_model=Envelope)
     def runtime_overview(request: Request):
         data = request.app.state.runtime_manager.status()
         data["thread_journal"] = request.app.state.thread_journal.status()
+        data["sync_diagnostics"] = read_run_receipts(resolved_settings.data_root)
         try:
             data["usage"] = request.app.state.usage_metrics.summary()
         except Exception:
@@ -522,6 +531,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "coverage": "使用统计暂不可用，不代表零调用",
             }
         with request.app.state.system.database.connect() as connection:
+            data["sync_root_names"] = {
+                row[0]: row[1]
+                for row in connection.execute("SELECT id,name FROM sync_roots").fetchall()
+            }
             queues = {
                 table: {
                     row[0]: row[1]
@@ -1432,11 +1445,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def scan_sync_root(root_id: str, request: Request) -> Envelope:
         try:
             result = system_from(request).sync.scan_root(root_id)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if result.get("errors"):
-            return warning("资料源刷新完成，部分正文未能索引", result)
-        return success("资料源增量刷新完成", result)
+        except (OSError, ValueError):
+            write_run_receipt(
+                resolved_settings.data_root,
+                kind="sync", status="failed", counts={"selected_roots": 1},
+                issues=[issue("root_failed", root_id=root_id)],
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="资料源刷新失败：检查原目录是否仍存在、权限是否允许，并查看运行状态中的建议。",
+            ) from None
+        issues = root_scan_issues(result, root_id)
+        disabled = result.get("status") == "disabled"
+        receipt = write_run_receipt(
+            resolved_settings.data_root,
+            kind="sync", status="deferred" if disabled else "warning" if issues else "completed",
+            counts={
+                "selected_roots": 1,
+                "disabled_roots": int(disabled),
+                "files_seen": int(result.get("files_seen") or 0),
+                "classification_failed": int(result.get("classification_failed") or 0),
+            },
+            issues=issues,
+        )
+        result["report_path"] = str(receipt)
+        if disabled:
+            return warning("资料源同步尚未启用，不代表已刷新", result)
+        if issues:
+            return warning("资料源刷新完成，但有文件需要重试或复核", result)
+        return success("资料源增量刷新完成；本地分类仅为待复核建议", result)
 
     @app.post("/api/sync/catalog/search", response_model=Envelope)
     def search_source_catalog(payload: CatalogSearchRequest, request: Request) -> Envelope:

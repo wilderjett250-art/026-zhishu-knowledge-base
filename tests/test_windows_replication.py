@@ -78,6 +78,12 @@ def test_scheduled_sync_is_a_hidden_daily_trigger() -> None:
     assert "$dailyImportEnabled -and $weflowProcesses.Count -eq 0" in runner
     assert "$env:WEFLOW_ROOT = $WeFlowRoot" in runner
     assert "D:\\wx\\xwechat_files\\tools\\WeFlow" not in runner
+    assert "Get-WeFlowDailyExportStatus" in runner
+    assert "--weflow-export-status $exportStatus" in runner
+    assert "[ValidateRange(0, 7200)][int]$WeFlowWaitSeconds = 7200" in runner
+    assert "WEFLOW_BACKGROUND_EXPORT'] = '1'" in runner
+    assert "[switch]$LocalOnly" in installer
+    assert "--local-only" in runner
     bootstrap = (ROOT / "scripts" / "bootstrap_windows.ps1").read_text(encoding="utf-8")
     assert "[string]$DailyAt = '00:00'" in bootstrap
     assert "-DailyAt $DailyAt" in bootstrap
@@ -141,6 +147,30 @@ def test_autostart_policy_gate_fails_closed(tmp_path: Path) -> None:
     )
     assert disabled.returncode != 0
     assert "is disabled by local user policy" in (disabled.stdout + disabled.stderr)
+
+
+def test_local_only_runner_needs_no_weflow_and_reports_missing_roots(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    assert powershell is not None
+    data_root = tmp_path / "data"
+    completed = subprocess.run(
+        [
+            powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(ROOT / "scripts" / "run_scheduled_sync.ps1"),
+            "-ProjectRoot", str(ROOT), "-DataRoot", str(data_root), "-LocalOnly",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    receipt = json.loads(
+        (data_root / "runs" / "diagnostics" / "scheduled-sync" / "latest.json")
+        .read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "warning"
+    assert receipt["counts"]["no_local_roots"] == 1
+    assert receipt["counts"]["weflow_enabled"] == 0
 
 
 def test_autostart_policy_gate_accepts_explicit_enabled_policy(tmp_path: Path) -> None:

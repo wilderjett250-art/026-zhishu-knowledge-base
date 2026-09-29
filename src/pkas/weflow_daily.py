@@ -1,15 +1,23 @@
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pkas.system import KnowledgeSystem
+from pkas.weflow_retention import prune_verified_exports
 
 STATE_VERSION = 1
+MIN_FREE_BYTES_FOR_IMPORT = 2 * 1024 * 1024 * 1024
 
 
 def _now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
+
+
+def _export_time_ms(item: dict[str, Any]) -> int:
+    # discover_exports keeps export_time in seconds for older callers.
+    return int(item.get("export_time_ms") or 0) or int(item.get("export_time") or 0) * 1000
 
 
 def _state_path(knowledge_system: KnowledgeSystem) -> Path:
@@ -113,6 +121,14 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
         records_path=records_path,
         limit=1000,
     )
+    if int(catalog["matched_sessions"]) > len(catalog["items"]):
+        return {
+            "status": "failed",
+            "error_code": "export_catalog_truncated",
+            "candidate_sessions": 0,
+            "imported_messages": 0,
+            "failed_sessions": 0,
+        }
     cutoff = max(
         int(state.get("authorized_at_ms") or 0),
         int(state.get("last_completed_export_time_ms") or 0),
@@ -120,15 +136,23 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     candidates = [
         item
         for item in catalog["items"]
-        if int(item.get("export_time") or 0) > cutoff
+        if _export_time_ms(item) > cutoff
         and int(item.get("byte_size") or 0) > 0
     ]
     now = _now_ms()
     if not candidates:
+        retention = prune_verified_exports(
+            records_path=Path(records_path),
+            database_path=knowledge_system.settings.database_path,
+            data_root=knowledge_system.settings.data_root,
+            watermark_ms=int(state.get("last_completed_export_time_ms") or 0),
+            now_ms=now,
+        )
         state["last_run_at_ms"] = now
+        state["last_status"] = "warning" if retention["retention_errors"] else "completed"
         _save_state(knowledge_system, state)
         return {
-            "status": "completed",
+            "status": state["last_status"],
             "discovered_sessions": int(catalog["existing_sessions"]),
             "candidate_sessions": 0,
             "inspected_sessions": 0,
@@ -137,6 +161,21 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
             "failed_sessions": 0,
             "api_required": False,
             "key_accessed": False,
+            **retention,
+        }
+
+    # A nightly import must not turn a nearly full data drive into a broken DB.
+    # Keep the watermark unchanged so the same exports can be retried later.
+    if shutil.disk_usage(knowledge_system.settings.data_root).free < (
+        MIN_FREE_BYTES_FOR_IMPORT
+        + 2 * sum(int(item.get("byte_size") or 0) for item in candidates)
+    ):
+        return {
+            "status": "failed",
+            "error_code": "low_disk_space",
+            "candidate_sessions": len(candidates),
+            "imported_messages": 0,
+            "failed_sessions": 0,
         }
 
     session_ids = [str(item["session_id"]) for item in candidates]
@@ -155,12 +194,12 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     status = str(result.get("status") or "failed")
     if status == "completed" and failed_sessions == 0:
         state["last_completed_export_time_ms"] = max(
-            int(item.get("export_time") or 0) for item in candidates
+            _export_time_ms(item) for item in candidates
         )
     state["last_run_at_ms"] = now
     state["last_status"] = status
     _save_state(knowledge_system, state)
-    return {
+    report = {
         "status": status,
         "discovered_sessions": int(catalog["existing_sessions"]),
         "candidate_sessions": len(candidates),
@@ -171,3 +210,17 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
         "api_required": False,
         "key_accessed": False,
     }
+    if status == "completed" and failed_sessions == 0:
+        retention = prune_verified_exports(
+            records_path=Path(records_path),
+            database_path=knowledge_system.settings.database_path,
+            data_root=knowledge_system.settings.data_root,
+            watermark_ms=int(state["last_completed_export_time_ms"]),
+            now_ms=now,
+        )
+        report.update(retention)
+        if retention["retention_errors"]:
+            report["status"] = "warning"
+            state["last_status"] = "warning"
+            _save_state(knowledge_system, state)
+    return report

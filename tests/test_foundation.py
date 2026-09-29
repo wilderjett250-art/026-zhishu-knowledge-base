@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pkas.api import create_app
-from pkas.foundation import FoundationService, processing_state
+from pkas.foundation import FoundationService, file_next_action, processing_state
 
 
 def test_stage_does_not_invent_pending_or_success():
@@ -14,6 +14,8 @@ def test_stage_does_not_invent_pending_or_success():
     assert processing_state("skipped", "unsupported_format")[0] == "excluded"
     assert processing_state("error", "PermissionError")[0] == "failed"
     assert processing_state("indexed", None)[0] == "index_recorded"
+    assert "权限" in file_next_action("error", "os_error_5")
+    assert "OCR" in file_next_action("skipped", "no_indexable_text")
 
 
 def test_readonly_connection_cannot_write(knowledge_system):

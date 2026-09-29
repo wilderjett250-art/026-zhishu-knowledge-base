@@ -42,7 +42,7 @@ Codex 接入需要单独配置。知域也提供受限的本机接口，方便�
 
 知域仍处于技术预览阶段。Windows 安装包尚未签名，首次运行可能出现系统的“未知发布者”提示；另一台实体电脑上的完整安装体验仍待验证。遇到找不到资料的情况，可以先在应用里检查资料是否已接入、是否只建立了目录，以及解析任务是否失败。
 
-想从源码运行或了解接入方式，可查看 [Windows 安装与恢复](docs/windows-replication.md)、[Codex 与本机知识库的实现说明](docs/architecture.md) 和 [聊天文件接入说明](docs/import-provider-contract.md)。
+想从源码运行或了解接入方式，可查看 [Windows 安装与恢复](docs/windows-replication.md)、[定时同步的范围与限制](docs/scheduled-sync.md)、[Codex 与本机知识库的实现说明](docs/architecture.md) 和 [聊天文件接入说明](docs/import-provider-contract.md)。
 
 ## 授权
 

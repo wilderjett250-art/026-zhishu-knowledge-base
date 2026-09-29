@@ -85,6 +85,23 @@ def processing_state(state: str, reason: str | None) -> tuple[str, str]:
     return "unknown", "状态未知"
 
 
+def file_next_action(state: str, reason: str | None) -> str:
+    """Translate stored safe codes into a useful action, never echo exception text."""
+    if state == "error":
+        if reason in {"PermissionError", "os_error_5", "os_error_13"}:
+            return "检查原文件权限或是否被其他程序占用；不要为了索引而扩大系统权限。"
+        if reason in {"FileNotFoundError", "os_error_2", "os_error_3"}:
+            return "原文件可能已移动或删除；刷新当前资料源后核对。"
+        return "检查该文件是否仍可读取，再对当前资料源重试增量刷新。"
+    if state == "skipped" and reason == "no_indexable_text":
+        return "文件可能是扫描件或加密文档；需要 OCR 或可解密副本，不能当成已读懂。"
+    if state == "missing":
+        return "上次扫描未见到原文件；先确认原路径，再刷新资料源。"
+    if state == "cataloged":
+        return "目前只有路径记录；需明确允许读取正文后才能做内容分类。"
+    return "无需处理；如需更深理解，请在分类后选择处理层级。"
+
+
 class FoundationService:
     # The file manager is a read-only projection of the same SQLite snapshot.
     # Keep its expensive aggregate in-process only while the database/catalog
@@ -772,7 +789,7 @@ class FoundationService:
             if not c.execute("SELECT 1 FROM sync_roots WHERE id=?", (root_id,)).fetchone():
                 raise ValueError("资料源不存在")
             rows = c.execute(
-                "SELECT id,relative_path,state,reason,last_seen_at,source_id "
+                "SELECT id,relative_path,state,reason,last_seen_at,source_id,metadata_json "
                 "FROM sync_items WHERE root_id=? AND state=? ORDER BY rowid "
                 "LIMIT ? OFFSET ?",
                 (root_id, state, limit + 1, offset),
@@ -786,5 +803,17 @@ class FoundationService:
             item["reason"] = (
                 reason if reason.replace("_", "").isalnum() and len(reason) < 64 else "需本机核查"
             )
+            metadata = json.loads(item.pop("metadata_json") or "{}")
+            suggestion = metadata.get("classification") if isinstance(metadata, dict) else None
+            item["classification"] = suggestion if isinstance(suggestion, dict) else None
+            item["next_action"] = file_next_action(item["state"], item["reason"])
+            if isinstance(suggestion, dict):
+                review = suggestion.get("review_status")
+                if review == "retry_required":
+                    item["next_action"] = "文件稳定后重试此资料源；正文索引成功不代表分类抽样成功。"
+                elif review == "stale_taxonomy":
+                    item["next_action"] = "分类规则已变化；需要重新复核，旧建议不代表当前分类。"
+                elif review == "needs_review":
+                    item["next_action"] = "正文证据不足；保留待判断，必要时再交给 AI 或人工复核。"
             items.append(item)
         return {"items": items, "has_more": len(rows) > limit, "offset": offset}

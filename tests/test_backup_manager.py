@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import stat
 from contextlib import closing
 from pathlib import Path
 
@@ -67,6 +68,103 @@ def test_verified_bundle_restores_to_isolated_data_root(
         (target / "runs" / "restore-verification.json").read_text(encoding="utf-8")
     )
     assert report["verified_backup"] is True
+
+
+@pytest.mark.parametrize("legacy_manifest", [False, True])
+def test_restore_keeps_external_source_references_and_reports_missing_originals(
+    knowledge_system: KnowledgeSystem,
+    test_settings: Settings,
+    source_root: Path,
+    tmp_path: Path,
+    legacy_manifest: bool,
+) -> None:
+    vaulted_path = _build_source(knowledge_system, source_root)
+    linked_path = source_root / "linked.md"
+    linked_path.write_text("链接原件由用户保管，不属于知识库原文仓库。", encoding="utf-8")
+    knowledge_system.ingestion.import_file(linked_path, domain="work", privacy="private")
+    missing_path = source_root / "missing-original.md"
+    with closing(sqlite3.connect(test_settings.database_path)) as connection:
+        connection.execute(
+            "UPDATE sources SET vault_path=? WHERE original_uri=?",
+            (str(missing_path), str(linked_path)),
+        )
+        connection.commit()
+
+    manager = BackupManager(test_settings)
+    bundle = Path(manager.create_bundle(label="external", retention=1)["bundle"])
+    if legacy_manifest:
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.pop("source_raw_root")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    restored_root = tmp_path / "external-restored"
+    report = manager.restore_bundle(bundle, restored_root)
+
+    assert report["status"] == "restored"
+    assert report["missing_vault_files"] == 0
+    assert report["vault_paths_remapped"] == 1
+    assert report["external_source_refs"] == 1
+    assert report["unavailable_external_source_refs"] == 1
+    with closing(sqlite3.connect(restored_root / "index" / "pkas.sqlite")) as connection:
+        paths = {
+            original_uri: vault_path
+            for original_uri, vault_path in connection.execute(
+                "SELECT original_uri, vault_path FROM sources"
+            )
+        }
+    assert paths[str(linked_path)] == str(missing_path)
+    assert Path(paths[str(source_root / "恢复验证.md")]).is_file()
+    assert Path(paths[str(source_root / "恢复验证.md")]) != vaulted_path
+
+
+def test_restore_reports_missing_managed_raw_without_masking_readonly_cleanup(
+    knowledge_system: KnowledgeSystem,
+    test_settings: Settings,
+    source_root: Path,
+    tmp_path: Path,
+) -> None:
+    vaulted_path = _build_source(knowledge_system, source_root)
+    vaulted_path.chmod(stat.S_IREAD)
+    missing_path = test_settings.vault_root / "ff" / "not-backed-up.md"
+    with closing(sqlite3.connect(test_settings.database_path)) as connection:
+        connection.execute(
+            "UPDATE sources SET vault_path=?",
+            (str(missing_path),),
+        )
+        connection.commit()
+
+    manager = BackupManager(test_settings)
+    bundle = Path(manager.create_bundle(label="missing-raw", retention=1)["bundle"])
+    target = tmp_path / "missing-raw-restored"
+    with pytest.raises(BackupError, match="missing_vault_files=1"):
+        manager.restore_bundle(bundle, target)
+    assert not target.exists()
+    assert not list(tmp_path.glob(".partial-restore-*"))
+
+
+def test_cleanup_failure_keeps_the_original_restore_error(
+    knowledge_system: KnowledgeSystem,
+    test_settings: Settings,
+    source_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _build_source(knowledge_system, source_root)
+    missing_path = test_settings.vault_root / "ff" / "not-backed-up.md"
+    with closing(sqlite3.connect(test_settings.database_path)) as connection:
+        connection.execute("UPDATE sources SET vault_path=?", (str(missing_path),))
+        connection.commit()
+    manager = BackupManager(test_settings)
+    bundle = Path(manager.create_bundle(label="cleanup-error", retention=1)["bundle"])
+
+    def blocked_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("simulated lock")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("pkas.backup_manager.shutil.rmtree", blocked_cleanup)
+        with pytest.raises(BackupError, match="missing_vault_files=1") as error:
+            manager.restore_bundle(bundle, tmp_path / "cleanup-error-restored")
+    assert any("Cleanup of the isolated restore staging" in note for note in error.value.__notes__)
 
 
 def test_backup_retention_only_prunes_matching_managed_family(

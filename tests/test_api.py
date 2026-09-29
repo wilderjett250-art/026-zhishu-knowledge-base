@@ -474,6 +474,9 @@ def test_sync_root_api_lists_refreshes_and_searches_catalog(
         refreshed = client.post(f"/api/sync/roots/{root['id']}/scan")
         assert refreshed.status_code == 200
         assert refreshed.json()["data"]["files_seen"] == 1
+        receipt = client.get("/api/runtime/overview").json()["data"]["sync_diagnostics"]
+        assert receipt["sync"]["latest"]["status"] == "completed"
+        assert receipt["sync"]["latest"]["counts"]["files_seen"] == 1
 
         roots = client.get("/api/sync/roots").json()["data"]
         assert roots[0]["active_count"] == 1
@@ -485,6 +488,12 @@ def test_sync_root_api_lists_refreshes_and_searches_catalog(
         )
         assert searched.status_code == 200
         assert searched.json()["data"][0]["relative_path"] == "existing-project.md"
+
+        failed = client.post("/api/sync/roots/not-a-real-root/scan")
+        assert failed.status_code == 400
+        receipt = client.get("/api/runtime/overview").json()["data"]["sync_diagnostics"]
+        assert receipt["sync"]["latest"]["status"] == "failed"
+        assert receipt["sync"]["recent_issues"][0]["issues"][0]["code"] == "root_failed"
 
 
 def test_api_rejects_knowledge_project_as_import_source(test_settings: Settings) -> None:

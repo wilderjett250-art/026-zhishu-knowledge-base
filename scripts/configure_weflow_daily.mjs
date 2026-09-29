@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, statfsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -82,11 +82,6 @@ const sessionNames = sessionIds.map((id) => {
   return String(contact.displayName || contact.remark || contact.nickname || id).trim() || id
 })
 
-const outputDir = String(store.get('exportPath', '') || '').trim()
-if (!outputDir) {
-  throw new Error('WeFlow export directory is not configured')
-}
-
 const now = Date.now()
 const automationMap = store.get('exportAutomationTaskMap', {}) || {}
 const currentItem = automationMap[scopeKey]
@@ -94,6 +89,23 @@ const existingTasks = Array.isArray(currentItem?.tasks) ? currentItem.tasks : []
 const existing = existingTasks.find((task) => (
   task?.id === taskId || task?.name === taskName || task?.name === legacyTaskName
 ))
+const requestedRoot = String(process.env.PKAS_WEFLOW_EXPORT_ROOT || '').trim()
+const priorManagedRoot = String(existing?.outputDir || '').trim()
+const stableManagedRoot = path.basename(priorManagedRoot).toLowerCase() === 'pkas-weflow-exports'
+  ? priorManagedRoot : ''
+// A scheduled runner may switch from I: to G: when a drive is unavailable.
+const outputDir = requestedRoot || stableManagedRoot || String(store.get('exportPath', '') || '').trim()
+if (!outputDir || !path.isAbsolute(outputDir)) {
+  throw new Error('An absolute WeFlow export directory is required')
+}
+if (requestedRoot && path.basename(requestedRoot).toLowerCase() !== 'pkas-weflow-exports') {
+  throw new Error('PKAS managed export directory must end in PKAS-WeFlow-Exports')
+}
+mkdirSync(outputDir, { recursive: true })
+const exportSpace = statfsSync(outputDir)
+if (Number(exportSpace.bavail) * Number(exportSpace.bsize) < 2 * 1024 ** 3) {
+  throw new Error('Managed WeFlow export drive has less than 2 GiB free')
+}
 const hasExistingAnchor = Number(existing?.schedule?.firstTriggerAt || 0) > 0
 const requestedAnchor = resetDailyAnchor && requestedDailyAt
   ? resolveLocalDailyAnchor(now, requestedDailyAt)

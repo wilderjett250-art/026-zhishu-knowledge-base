@@ -2,6 +2,8 @@
 
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -55,6 +57,59 @@ class RuntimeManager:
             "runtime_root": runtime_display,
             "runtime_on_system_drive": runtime_on_system_drive,
             "on_system_drive": data_on_system_drive or runtime_on_system_drive,
+        }
+
+    def storage_usage_status(self):
+        """Count only known PKAS-owned areas; never expose private filenames."""
+        root = Path(self.settings.data_root).expanduser().resolve(strict=False)
+        categories = (
+            ("active_index", "正在使用的资料库", root / "index"),
+            ("vector_index", "向量索引", root / "qdrant"),
+            ("catalog_recovery", "目录账本旧恢复点", root / "machine-catalog" / "recovery"),
+            ("intake_recovery", "资料接入旧恢复点", root / "intake" / "recovery"),
+            ("historical_backups", "历史备份", root / "backups"),
+            ("weflow_copies", "微信原文快照（已入库）", root / "raw" / "weflow-xlsx"),
+        )
+        usage = shutil.disk_usage(root)
+        items = []
+        for key, label, directory in categories:
+            size = count = errors = 0
+            pending = [directory] if directory.is_dir() and not directory.is_symlink() else []
+            while pending:
+                current = pending.pop()
+                try:
+                    with os.scandir(current) as entries:
+                        for entry in entries:
+                            try:
+                                info = entry.stat(follow_symlinks=False)
+                                if entry.is_symlink() or (
+                                    getattr(info, "st_file_attributes", 0)
+                                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                                ):
+                                    continue
+                                if stat.S_ISDIR(info.st_mode):
+                                    pending.append(Path(entry.path))
+                                elif stat.S_ISREG(info.st_mode):
+                                    size += info.st_size
+                                    count += 1
+                            except OSError:
+                                errors += 1
+                except OSError:
+                    errors += 1
+            items.append({"id": key, "label": label, "bytes": size,
+                          "files": count, "scan_errors": errors})
+        free = usage.free
+        return {
+            "free_bytes": free,
+            "total_bytes": usage.total,
+            "space_level": (
+                "critical" if free < 1024**3 or free < usage.total * .02
+                else "warning" if free < 5 * 1024**3 or free < usage.total * .05
+                else "ok"
+            ),
+            "categories": items,
+            "incomplete": any(item["scan_errors"] for item in items),
+            "cleanup_policy": "只显示占用；恢复点未经独立恢复验证不会自动删除。",
         }
 
     def _qdrant_ready(self):
