@@ -25,6 +25,6 @@ if ($policy.schema_version -ne 1) {
     throw "PKAS Windows autostart policy schema is unsupported: $policyPath"
 }
 
-if ($policy.autostart_enabled -ne $true) {
+if ($policy.autostart_enabled -isnot [bool] -or $policy.autostart_enabled -ne $true) {
     throw "PKAS Windows autostart is disabled by local user policy: $policyPath. New explicit user approval is required before changing this policy."
 }

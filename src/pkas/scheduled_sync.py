@@ -1,6 +1,5 @@
 import ctypes
 import json
-import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +20,9 @@ MIN_FREE_BYTES_FOR_SYNC = 2 * 1024 * 1024 * 1024
 def run_registered_local_sync(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     """Refresh only authorized local roots; do not start cloud vector work."""
     return run_sync(
-        knowledge_system, local_only=True, process_outbox=False,
+        knowledge_system,
+        local_only=True,
+        process_outbox=False,
         minimum_free_bytes=MIN_FREE_BYTES_FOR_SYNC,
     )
 
@@ -96,11 +97,11 @@ def run_scheduled_sync(
     # authorization watermark.
     try:
         weflow_result = weflow_import_runner(knowledge_system)
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+    except Exception as exc:
         weflow_result = {"status": "failed", "error_type": type(exc).__name__}
     try:
         full_result = full_sync_runner(knowledge_system) if full_sync_due else None
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+    except Exception as exc:
         full_result = {"status": "failed", "error_type": type(exc).__name__}
 
     weflow_status = str(weflow_result.get("status") or "failed")
@@ -136,7 +137,12 @@ def run_scheduled_sync(
             state["last_boot_id"] = current_boot
     state["last_attempt_at_ms"] = current_ms
     state["last_status"] = status
-    state_path = _save_state(knowledge_system, state)
+    try:
+        state_path = str(_save_state(knowledge_system, state))
+    except (OSError, ValueError):
+        # State is retried independently; do not discard successful import counts.
+        status = "failed"
+        state_path = None
     effective_success = int(state.get("last_success_at_ms") or 0)
 
     return {
@@ -154,6 +160,7 @@ def run_scheduled_sync(
         "next_full_sync_at_ms": (
             effective_success + FULL_SYNC_INTERVAL_MS if effective_success else None
         ),
-        "state_path": str(state_path),
+        "state_path": state_path,
+        "state_save_failed": state_path is None,
         "llm_used_for_poll_only": False,
     }

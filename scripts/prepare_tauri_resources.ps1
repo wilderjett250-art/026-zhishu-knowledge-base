@@ -240,11 +240,17 @@ try {
         Remove-Item -LiteralPath $legacyStagedPythonSource -Recurse -Force
     }
 
+    # Hash the same allowlisted helper files that Tauri ships. Never bundle the
+    # entire scripts directory: it can contain local maintenance/private files.
+    $tauriConfig = Get-Content -LiteralPath (Join-Path $resolvedRoot 'desktop\src-tauri\tauri.conf.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $packagedHelpers = @($tauriConfig.bundle.resources.PSObject.Properties |
+        Where-Object { $_.Name.StartsWith('../../scripts/') } |
+        ForEach-Object { Get-Item -LiteralPath (Join-Path $resolvedRoot $_.Name.Substring(6)) })
     $inputs = @(
         Get-Item -LiteralPath (Join-Path $resolvedRoot 'pyproject.toml')
         Get-Item -LiteralPath (Join-Path $resolvedRoot 'uv.lock')
         Get-Item -LiteralPath (Join-Path $resolvedRoot 'README.md')
-    ) + @($pythonSourceFiles)
+    ) + @($pythonSourceFiles) + @($packagedHelpers)
     $sourceParts = @(
         $inputs | Sort-Object FullName | ForEach-Object {
             $relative = $_.FullName.Substring($resolvedRoot.Length).TrimStart('\')
@@ -282,6 +288,9 @@ try {
         everything_sha256 = Get-Sha256 -Path $everythingExecutable
         rpa_loopback_helper_sha256 = Get-Sha256 -Path (Join-Path $resolvedRoot 'scripts\configure_rpa_loopback.ps1')
         manual_weflow_helper_sha256 = Get-Sha256 -Path (Join-Path $resolvedRoot 'scripts\configure_weflow_manual.mjs')
+        packaged_helpers = @($packagedHelpers | Sort-Object Name | ForEach-Object {
+            @{ name = $_.Name; sha256 = Get-Sha256 -Path $_.FullName }
+        })
     }
     $manifestPath = Join-Path $runtimePayload 'desktop-runtime.json'
     $manifestText = ($manifest | ConvertTo-Json -Depth 4) + "`n"

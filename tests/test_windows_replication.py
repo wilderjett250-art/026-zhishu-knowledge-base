@@ -62,7 +62,7 @@ def test_all_task_installers_honor_local_autostart_policy() -> None:
     assert guard_name in bootstrap
 
 
-def test_scheduled_sync_is_a_hidden_daily_trigger() -> None:
+def test_scheduled_sync_has_daily_and_user_logon_catchup_triggers() -> None:
     installer = (ROOT / "scripts" / "install_scheduled_sync.ps1").read_text(
         encoding="utf-8"
     )
@@ -72,18 +72,28 @@ def test_scheduled_sync_is_a_hidden_daily_trigger() -> None:
 
     assert "[string]$DailyAt = '00:00'" in installer
     assert "New-ScheduledTaskTrigger -Daily -At $dailyTime" in installer
-    assert "loginTrigger" not in installer
+    assert "New-ScheduledTaskTrigger -AtLogOn -User $currentUser" in installer
+    assert "$logonTrigger.Delay = 'PT1M'" in installer
+    assert "[int]$BootDelayMinutes = 60" in installer
+    assert "-Scheduled -ScheduledTaskName" in installer
+    assert "pkas.sync_schedule" in runner
+    assert "Register-PkasSyncCatchUp" in runner
+    assert "Threading.Mutex" in runner
     assert "watchdogTrigger" not in installer
     assert "-check-daily-authorization" in runner
     assert "$dailyImportEnabled -and $weflowProcesses.Count -eq 0" in runner
     assert "$env:WEFLOW_ROOT = $WeFlowRoot" in runner
     assert "D:\\wx\\xwechat_files\\tools\\WeFlow" not in runner
     assert "Get-WeFlowDailyExportStatus" in runner
-    assert "--weflow-export-status $exportStatus" in runner
+    assert "'--weflow-export-status', $exportStatus" in runner
+    assert "'--weflow-export-code', $exportFailureCode" in runner
+    assert "write_sync_diagnostic.ps1" in runner
+    assert "-not $LaunchOnly -and $startedByTask" in runner
     assert "[ValidateRange(0, 7200)][int]$WeFlowWaitSeconds = 7200" in runner
     assert "WEFLOW_BACKGROUND_EXPORT'] = '1'" in runner
     assert "[switch]$LocalOnly" in installer
     assert "--local-only" in runner
+    assert "--record-daily-check" in runner
     bootstrap = (ROOT / "scripts" / "bootstrap_windows.ps1").read_text(encoding="utf-8")
     assert "[string]$DailyAt = '00:00'" in bootstrap
     assert "-DailyAt $DailyAt" in bootstrap

@@ -95,7 +95,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   -DailyAt '23:00'
 ```
 
-可选任务为 `PKAS-Qdrant`、`PKAS-Core-Worker`、`PKAS-Dashboard`、`PKAS-Daily-Backup` 和 `PKAS-Knowledge-Sync`。策略文件缺失、损坏、版本不支持或 `autostart_enabled` 未显式设为 `true` 时，安装器会 fail closed，不能注册任何任务。获得目标电脑用户单独授权后，备份任务可每日 03:00 生成不含密钥的恢复包并默认只保留最新三版；`PKAS-Knowledge-Sync` 还需要传入 `-WeFlowRoot`，并且只有 `weflow-daily-import.json` 明确启用时才会在后台启动 WeFlow。所有服务只绑定本机地址；MCP 不会被安装器启用。
+可选任务为 `PKAS-Qdrant`、`PKAS-Core-Worker`、`PKAS-Dashboard`、`PKAS-Daily-Backup` 和 `PKAS-Knowledge-Sync`。策略文件缺失、损坏、版本不支持或 `autostart_enabled` 未显式设为布尔值 `true` 时，安装器会 fail closed，不能注册任何任务。获得目标电脑用户单独授权后，备份任务可每日 03:00 生成不含密钥的恢复包并默认只保留最新三版；`PKAS-Knowledge-Sync` 可用 `-LocalOnly` 只更新已经登记的资料源，也可显式传入 `-WeFlowRoot`，仅在 `weflow-daily-import.json` 明确启用时才会启动对应 WeFlow。0.1.21 安装版包含完整同步脚本和运行环境定位工具，[启用与停用步骤](scheduled-sync.md)无需开发机路径。所有服务只绑定本机地址；MCP 不会被安装器启用。
 
 恢复包不属于无数据安装包。需要迁移个人资料时，应单独复制一个已经通过 `scripts/verify_restore.py` 验证的恢复包，并在目标电脑恢复到空数据目录。恢复后同步根默认关闭、Qdrant 必须重建、API 密钥必须由目标 Windows 用户重新配置。
 

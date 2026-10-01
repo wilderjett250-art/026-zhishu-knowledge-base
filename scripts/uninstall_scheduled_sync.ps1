@@ -5,22 +5,33 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
-$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($null -eq $task) {
+$tasks = @(@($TaskName, ($TaskName + '-CatchUp')) | ForEach-Object {
+    Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue
+})
+if ($tasks.Count -eq 0) {
     [pscustomobject]@{ status = 'not_found'; task_name = $TaskName } |
         ConvertTo-Json -Compress
     exit 0
 }
-$workingDirectory = [string]$task.Actions[0].WorkingDirectory
-if (-not $workingDirectory.Equals($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Task name exists but belongs to another installation; refusing to remove it.'
+foreach ($task in $tasks) {
+    $workingDirectory = [string]$task.Actions[0].WorkingDirectory
+    $runnerPath = Join-Path $resolvedRoot 'scripts\run_scheduled_sync.ps1'
+    if (@($task.Actions).Count -ne 1 -or
+        -not $workingDirectory.Equals($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        ([string]$task.Actions[0].Arguments).IndexOf(
+            '"' + $runnerPath + '"', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw 'Task name exists but belongs to another installation; refusing to remove it.'
+    }
 }
-if ([string]$task.State -eq 'Running') {
-    Stop-ScheduledTask -TaskName $TaskName
+foreach ($task in $tasks) {
+    if ([string]$task.State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $task.TaskName
+    }
+    Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false
 }
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 [pscustomobject]@{
     status = 'removed'
     task_name = $TaskName
+    removed_tasks = @($tasks | ForEach-Object { $_.TaskName })
     data_preserved = $true
 } | ConvertTo-Json -Compress

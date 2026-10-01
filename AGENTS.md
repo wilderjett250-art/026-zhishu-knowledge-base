@@ -18,6 +18,7 @@ This repository is the Personal Knowledge & Agent System（PKAS）at E:\codex-kb
 - Search for an existing canonical entry before creating a new one.
 - Default to read-only retrieval. Long-term profile changes, distillation promotion, deletion, external publishing, and high-impact actions require explicit approval.
 - Do not describe candidate personality observations as established facts.
+- After completing an authorized code change, review and sanitize its scope, commit it with a concrete change description, and push the established `main` branch. Do not publish personal data, local maintenance scripts, secrets, or unrelated work. Changes to shipped behavior also require a versioned installer; distinguish source push, installer publication, and runtime verification.
 
 ## Validation
 

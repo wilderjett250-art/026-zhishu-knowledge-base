@@ -26,10 +26,16 @@ def _state_path(knowledge_system: KnowledgeSystem) -> Path:
 
 def _load_state(knowledge_system: KnowledgeSystem) -> dict[str, Any] | None:
     path = _state_path(knowledge_system)
-    if not path.is_file():
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("version") != STATE_VERSION:
+    payload = json.loads(content)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != STATE_VERSION
+        or not isinstance(payload.get("enabled"), bool)
+    ):
         raise ValueError("WeFlow daily-import authorization state is invalid")
     return payload
 
@@ -104,6 +110,26 @@ def daily_import_is_enabled(knowledge_system: KnowledgeSystem) -> bool:
 
 
 def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
+    # Keep known progress even if saving state or cleaning copies fails after
+    # messages were committed. Never put exception text or session names here.
+    progress: dict[str, Any] = {"error_code": "weflow_authorization_failed"}
+    try:
+        return _run_daily_import(knowledge_system, progress)
+    except Exception as exc:
+        return {
+            **progress,
+            "status": (
+                "warning" if progress["error_code"] == "weflow_retention_warning" else "failed"
+            ),
+            "error_type": type(exc).__name__,
+            "retention_errors": int(progress["error_code"] == "weflow_retention_warning"),
+        }
+
+
+def _run_daily_import(
+    knowledge_system: KnowledgeSystem,
+    progress: dict[str, Any],
+) -> dict[str, Any]:
     state = _load_state(knowledge_system)
     if state is None or not state.get("enabled"):
         return {
@@ -117,6 +143,7 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     if not records_path:
         raise ValueError("WeFlow daily-import authorization has no records path")
 
+    progress["error_code"] = "weflow_catalog_failed"
     catalog = knowledge_system.weflow.discover_exports(
         records_path=records_path,
         limit=1000,
@@ -136,11 +163,12 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     candidates = [
         item
         for item in catalog["items"]
-        if _export_time_ms(item) > cutoff
-        and int(item.get("byte_size") or 0) > 0
+        if _export_time_ms(item) > cutoff and int(item.get("byte_size") or 0) > 0
     ]
+    progress.update(candidate_sessions=len(candidates), imported_messages=0, failed_sessions=0)
     now = _now_ms()
     if not candidates:
+        progress["error_code"] = "weflow_retention_warning"
         retention = prune_verified_exports(
             records_path=Path(records_path),
             database_path=knowledge_system.settings.database_path,
@@ -150,6 +178,7 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
         )
         state["last_run_at_ms"] = now
         state["last_status"] = "warning" if retention["retention_errors"] else "completed"
+        progress["error_code"] = "sync_state_failed"
         _save_state(knowledge_system, state)
         return {
             "status": state["last_status"],
@@ -167,8 +196,7 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     # A nightly import must not turn a nearly full data drive into a broken DB.
     # Keep the watermark unchanged so the same exports can be retried later.
     if shutil.disk_usage(knowledge_system.settings.data_root).free < (
-        MIN_FREE_BYTES_FOR_IMPORT
-        + 2 * sum(int(item.get("byte_size") or 0) for item in candidates)
+        MIN_FREE_BYTES_FOR_IMPORT + 2 * sum(int(item.get("byte_size") or 0) for item in candidates)
     ):
         return {
             "status": "failed",
@@ -178,11 +206,13 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
             "failed_sessions": 0,
         }
 
+    progress["error_code"] = "weflow_inspection_failed"
     session_ids = [str(item["session_id"]) for item in candidates]
     inspection = knowledge_system.weflow.inspect_export_selection(
         records_path=records_path,
         session_ids=session_ids,
     )
+    progress["error_code"] = "weflow_import_failed"
     result = knowledge_system.customer_workflows.import_weflow_exports(
         records_path=records_path,
         session_ids=session_ids,
@@ -192,12 +222,31 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
     import_result = result.get("result") or {}
     failed_sessions = int(import_result.get("failed_sessions") or 0)
     status = str(result.get("status") or "failed")
+    failure_counts: dict[str, int] = {}
+    for item in import_result.get("session_errors") or []:
+        code = {
+            "WeFlowFormatError": "weflow_import_format",
+            "BadZipFile": "weflow_import_format",
+            "ImportBoundaryError": "weflow_import_boundary",
+            "DatabaseError": "weflow_import_database",
+            "OperationalError": "weflow_import_database",
+            "IntegrityError": "weflow_import_database",
+            "OSError": "weflow_import_io",
+            "PermissionError": "weflow_import_io",
+            "FileNotFoundError": "weflow_import_io",
+        }.get(item.get("error_type"), "weflow_import_failed")
+        failure_counts[code] = failure_counts.get(code, 0) + 1
+    progress.update(
+        imported_messages=int(import_result.get("imported") or 0),
+        duplicate_messages=int(import_result.get("duplicates") or 0),
+        failed_sessions=failed_sessions,
+        failure_counts=failure_counts,
+    )
     if status == "completed" and failed_sessions == 0:
-        state["last_completed_export_time_ms"] = max(
-            _export_time_ms(item) for item in candidates
-        )
+        state["last_completed_export_time_ms"] = max(_export_time_ms(item) for item in candidates)
     state["last_run_at_ms"] = now
     state["last_status"] = status
+    progress["error_code"] = "sync_state_failed"
     _save_state(knowledge_system, state)
     report = {
         "status": status,
@@ -207,10 +256,15 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
         "imported_messages": int(import_result.get("imported") or 0),
         "duplicate_messages": int(import_result.get("duplicates") or 0),
         "failed_sessions": failed_sessions,
+        "failure_counts": failure_counts,
         "api_required": False,
         "key_accessed": False,
     }
+    if status == "failed" and result.get("error"):
+        report["error_code"] = "weflow_import_failed"
+        report["error_type"] = str(result["error"].get("type") or "RuntimeError")
     if status == "completed" and failed_sessions == 0:
+        progress["error_code"] = "weflow_retention_warning"
         retention = prune_verified_exports(
             records_path=Path(records_path),
             database_path=knowledge_system.settings.database_path,
@@ -222,5 +276,6 @@ def run_daily_import(knowledge_system: KnowledgeSystem) -> dict[str, Any]:
         if retention["retention_errors"]:
             report["status"] = "warning"
             state["last_status"] = "warning"
+            progress["error_code"] = "sync_state_failed"
             _save_state(knowledge_system, state)
     return report

@@ -5,7 +5,7 @@ import "./runtime-center.css";
 type Service = { id: string; name: string; status: string; owned: boolean; controllable: boolean; detail: string };
 type Operation = { channel: string; operation: string; calls: number; failures: number; warnings: number; average_ms: number };
 type FailureDetail = { channel: string; operation: string; reason: string; calls: number; last_seen_at: string | null };
-type RunReceipt = { recorded_at: string; status: string; counts: Record<string, number>; issues: { code: string; count: number; action: string; root_id?: string }[] };
+type RunReceipt = { recorded_at: string; status: string; counts: Record<string, number>; issues: { code: string; count: number; action: string; root_id?: string; stage?: string; error_type?: string }[] };
 type ThreadJournal = {
   enabled: boolean; running: boolean; interval_days: number; last_status: string;
   last_completed_at: string | null; last_result: { summaries_written?: number; pending_files?: number; completed_files?: number } | null;
@@ -90,6 +90,7 @@ function scheduledRunLabel(run: RunReceipt | null | undefined) {
 
 function weflowRunLabel(run: RunReceipt | null | undefined) {
   if (!run) return "未运行";
+  if (run.issues.some(item => item.code.startsWith("weflow_") || item.code.startsWith("worker_") || item.code.startsWith("sync_"))) return "需检查";
   if (!run.counts.weflow_enabled) return "未启用";
   if (run.counts.weflow_export_failed || run.counts.weflow_failed_sessions || run.counts.weflow_import_failed) return "需检查";
   if (run.counts.weflow_imported_messages) return `新增 ${run.counts.weflow_imported_messages} 条`;
@@ -288,7 +289,7 @@ export default function RuntimeCenter() {
           <header><div><small>自动任务与资料源</small><h2>最近同步是否真的完成</h2></div><p>只显示新版本的精简运行回执；未启用任务不等于已自动同步。</p></header>
           <div className="runtime-metrics"><article><strong>{syncRunLabel(latestSync)}</strong><span>资料源同步</span></article><article><strong>{scheduledRunLabel(latestScheduled)}</strong><span>定时任务</span></article><article><strong>{weflowRunLabel(latestScheduled)}</strong><span>微信聊天</span></article></div>
           <p className="runtime-footnote">资料源最近回执：{formatRecordedTime(latestSync?.recorded_at ?? null)}；定时任务最近回执：{formatRecordedTime(latestScheduled?.recorded_at ?? null)}。成功回执不代表新增文件都完成 AI 分类。</p>
-          {recentSyncIssues.length > 0 && <details><summary>查看同步异常与处理建议</summary><div className="runtime-failure-list">{recentSyncIssues.map((item, index) => <article key={`${item.recorded_at}:${index}`}><div><strong>{item.root_id ? (data.sync_root_names?.[item.root_id] ?? "已停用的资料源") : "后台增量处理"}</strong><span>{formatRecordedTime(item.recorded_at)} · {item.code}</span></div><p>{item.action}</p><b>{item.count} 项</b></article>)}</div></details>}
+          {recentSyncIssues.length > 0 && <details><summary>查看同步异常与处理建议</summary><div className="runtime-failure-list">{recentSyncIssues.map((item, index) => <article key={`${item.recorded_at}:${index}`}><div><strong>{item.root_id ? (data.sync_root_names?.[item.root_id] ?? "已停用的资料源") : (item.stage ?? "后台增量处理")}</strong><span>{formatRecordedTime(item.recorded_at)} · {item.code}{item.error_type ? ` · ${item.error_type}` : ""}</span></div><p>{item.action}</p><b>{item.count} 项</b></article>)}</div></details>}
         </section>
         <section className="runtime-usage">
           <header><div><small>最近 {data.usage.days ?? 7} 天</small><h2>使用情况</h2></div><p>这里只表示系统调用是否成功，不代表回答一定准确。</p></header>

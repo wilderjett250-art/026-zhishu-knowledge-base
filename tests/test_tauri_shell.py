@@ -34,6 +34,15 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
     assert "../../tools/everything/" in resources
     assert resources["icons/icon.ico"] == "pkas-app/app-icon.ico"
     assert "../../scripts/configure_weflow_manual.mjs" in resources
+    for helper in (
+        "configure_scheduled_sync.ps1", "resolve_sync_runtime.ps1",
+        "install_scheduled_sync.ps1", "run_scheduled_sync.ps1",
+        "uninstall_scheduled_sync.ps1", "arm_sync_catchup.ps1",
+        "write_sync_diagnostic.ps1", "assert_windows_autostart_allowed.ps1",
+        "configure_weflow_daily.mjs",
+    ):
+        assert resources[f"../../scripts/{helper}"] == f"pkas-app/scripts/{helper}"
+    assert "../../scripts/" not in resources
     assert config["app"]["windows"] == []
 
 

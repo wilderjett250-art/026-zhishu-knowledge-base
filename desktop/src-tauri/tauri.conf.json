@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "知域",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "identifier": "com.zhishu.pkas",
   "build": {
     "frontendDist": "../../web/dist"
@@ -30,7 +30,16 @@
       "../../tools/everything/": "pkas-app/tools/everything/",
       "icons/icon.ico": "pkas-app/app-icon.ico",
       "../../scripts/configure_rpa_loopback.ps1": "pkas-app/scripts/configure_rpa_loopback.ps1",
-      "../../scripts/configure_weflow_manual.mjs": "pkas-app/scripts/configure_weflow_manual.mjs"
+      "../../scripts/configure_weflow_manual.mjs": "pkas-app/scripts/configure_weflow_manual.mjs",
+      "../../scripts/configure_scheduled_sync.ps1": "pkas-app/scripts/configure_scheduled_sync.ps1",
+      "../../scripts/resolve_sync_runtime.ps1": "pkas-app/scripts/resolve_sync_runtime.ps1",
+      "../../scripts/install_scheduled_sync.ps1": "pkas-app/scripts/install_scheduled_sync.ps1",
+      "../../scripts/run_scheduled_sync.ps1": "pkas-app/scripts/run_scheduled_sync.ps1",
+      "../../scripts/uninstall_scheduled_sync.ps1": "pkas-app/scripts/uninstall_scheduled_sync.ps1",
+      "../../scripts/arm_sync_catchup.ps1": "pkas-app/scripts/arm_sync_catchup.ps1",
+      "../../scripts/write_sync_diagnostic.ps1": "pkas-app/scripts/write_sync_diagnostic.ps1",
+      "../../scripts/assert_windows_autostart_allowed.ps1": "pkas-app/scripts/assert_windows_autostart_allowed.ps1",
+      "../../scripts/configure_weflow_daily.mjs": "pkas-app/scripts/configure_weflow_daily.mjs"
     },
     "useLocalToolsDir": true,
     "windows": {
