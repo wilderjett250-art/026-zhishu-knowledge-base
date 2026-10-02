@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any
 
 MAX_ISSUES = 20
+MAX_COUNTER = 2**53 - 1  # Values remain exact in the desktop's JavaScript UI.
+COUNTER_NAMES = frozenset({
+    "full_sync_due", "selected_roots", "disabled_roots", "weflow_enabled",
+    "weflow_export_skipped", "weflow_candidate_sessions", "weflow_imported_messages",
+    "weflow_import_low_disk", "weflow_import_failed", "failed_roots", "warning_roots",
+    "low_disk", "no_local_roots", "weflow_failed_sessions", "weflow_export_copies_pruned",
+    "weflow_export_bytes_freed", "weflow_retention_errors", "weflow_export_failed",
+    "index_outbox_warnings", "files_seen", "classification_failed",
+})
 ACTION = {
     "root_failed": "检查该资料源是否仍存在且有读取权限，再手动重试；不要扩大扫描范围。",
     "root_partial": "在资料来源台账筛选失败项，按文件原因修复权限或解析后重试。",
@@ -257,34 +266,58 @@ def write_run_receipt(
     return latest
 
 
-def _combine_receipts(rows: list[Any]) -> list[dict[str, Any]]:
+def _safe_receipt(row: Any, *, kind: str) -> dict[str, Any] | None:
+    """Treat old/on-disk history as input, not as an API response template."""
+    if (
+        not isinstance(row, dict)
+        or type(row.get("version")) is not int or row["version"] != 1
+        or row.get("kind") != kind
+        or not isinstance(row.get("status"), str)
+        or row.get("status") not in {"completed", "deferred", "warning", "failed"}
+        or not isinstance(row.get("run_id"), str)
+        or not isinstance(row.get("recorded_at"), str)
+        or not isinstance(row.get("issues"), list)
+        or not isinstance(row.get("counts"), dict)
+    ):
+        return None
+    try:
+        run_id = uuid.UUID(row["run_id"]).hex
+        recorded = datetime.fromisoformat(row["recorded_at"])
+        if recorded.tzinfo is None:
+            return None  # Do not guess the timezone of an ambiguous legacy row.
+        timestamp = recorded.astimezone(UTC).isoformat(timespec="microseconds")
+    except (ValueError, TypeError, OverflowError):
+        return None
+    safe_issues = [
+        issue(
+            item["code"], item.get("count", 1), item.get("root_id"),
+            error_type=item.get("error_type"),
+        )
+        for item in row["issues"][:10]
+        if isinstance(item, dict)
+        and isinstance(item.get("code"), str) and item["code"] in ACTION
+        and type(item.get("count", 1)) is int
+        and 1 <= item.get("count", 1) <= MAX_COUNTER
+    ]
+    return {
+        "version": 1, "kind": kind, "run_id": run_id, "recorded_at": timestamp,
+        "status": row["status"],
+        "counts": {
+            key: value for key, value in row["counts"].items()
+            if key in COUNTER_NAMES and type(value) is int and 0 <= value <= MAX_COUNTER
+        },
+        "issues": safe_issues,
+    }
+
+
+def _combine_receipts(rows: list[Any], *, kind: str) -> list[dict[str, Any]]:
     valid = [
-        row
-        for row in rows
-        if isinstance(row, dict)
-        and isinstance(row.get("recorded_at"), str)
-        and isinstance(row.get("issues"), list)
-        and isinstance(row.get("counts"), dict)
+        safe for row in rows[:MAX_ISSUES * 2]
+        if (safe := _safe_receipt(row, kind=kind)) is not None
     ]
     grouped: dict[str, dict[str, Any]] = {}
     for row in sorted(valid, key=lambda item: item["recorded_at"]):
-        row = {
-            **row,
-            "issues": [
-                issue(
-                    str(item["code"]),
-                    int(item.get("count", 1)),
-                    item.get("root_id"),
-                    error_type=item.get("error_type"),
-                )
-                for item in row["issues"][:10]
-                if isinstance(item, dict)
-                and isinstance(item.get("code"), str)
-                and item["code"] in ACTION
-                and isinstance(item.get("count", 1), int)
-            ],
-        }
-        key = str(row.get("run_id") or row["recorded_at"])
+        key = row["run_id"]
         previous = grouped.get(key)
         if previous is None:
             grouped[key] = row
@@ -323,9 +356,9 @@ def read_run_receipts(data_root: Path) -> dict[str, Any]:
             launcher_recent = _read(home / kind / "launcher-recent-issues.json", [])
             if isinstance(launcher_recent, list):
                 recent_rows = recent_rows + launcher_recent
-        combined_latest = _combine_receipts(latest_rows)
+        combined_latest = _combine_receipts(latest_rows, kind=kind)
         result[kind] = {
             "latest": combined_latest[0] if combined_latest else None,
-            "recent_issues": _combine_receipts(recent_rows)[:MAX_ISSUES],
+            "recent_issues": _combine_receipts(recent_rows, kind=kind)[:MAX_ISSUES],
         }
     return result
