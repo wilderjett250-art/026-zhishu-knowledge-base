@@ -333,7 +333,8 @@ function Get-WeFlowDailyExportStatus {
         -DayStartMs $exportDayStart -NowMs ([DateTimeOffset]::Now.ToUnixTimeMilliseconds())
 }
 
-$script:failureCode = 'weflow_export_failed'
+    $script:failureCode = 'weflow_export_failed'
+    $exportWaitWatch = $null
     $runningWithOldTask = $dailyImportEnabled -and -not $startedByTask -and
         -not (Test-WeFlowManagedTaskConfigured)
     $exportStatus = if ($runningWithOldTask) { 'error' } else { 'ready' }
@@ -343,6 +344,7 @@ $script:failureCode = 'weflow_export_failed'
         # must not discard a run that began on the previous day.
         $exportDayStart = [DateTimeOffset]::new((Get-Date).Date).ToUnixTimeMilliseconds()
         $waitStartedMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+        $exportWaitWatch = [Diagnostics.Stopwatch]::StartNew()
         $deadline = (Get-Date).AddSeconds($WeFlowWaitSeconds)
         $deadlineMs = [DateTimeOffset]::new($deadline).ToUnixTimeMilliseconds()
         $firstErrorTrigger = $null
@@ -407,11 +409,15 @@ $script:failureCode = 'weflow_export_failed'
             }
             Start-Sleep -Seconds 15
         } while ($true)
+        $exportWaitWatch.Stop()
     }
 
     $script:failureCode = 'worker_failed'
     $workerArguments = @('-m', 'pkas.scheduled_sync_worker', '--weflow-export-status', $exportStatus)
     if ($exportFailureCode) { $workerArguments += @('--weflow-export-code', $exportFailureCode) }
+    if ($null -ne $exportWaitWatch) {
+        $workerArguments += @('--weflow-export-wait-ms', [string]$exportWaitWatch.ElapsedMilliseconds)
+    }
     if ($Scheduled) { $workerArguments += '--record-daily-check' }
     & $pythonPath @workerArguments 2>$null
     $workerExitCode = $LASTEXITCODE

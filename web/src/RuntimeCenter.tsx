@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, post } from "./api";
+import { formatSyncDuration, syncTimingStages } from "./sync-timing";
 import "./runtime-center.css";
 
 type Service = { id: string; name: string; status: string; owned: boolean; controllable: boolean; detail: string };
@@ -209,6 +210,7 @@ export default function RuntimeCenter() {
   const usageFailureDetails = data?.usage.failure_details ?? [];
   const latestSync = data?.sync_diagnostics?.sync?.latest;
   const latestScheduled = data?.sync_diagnostics?.["scheduled-sync"]?.latest;
+  const syncTimings = syncTimingStages(latestScheduled?.counts);
   const recentSyncIssues = [
     ...(data?.sync_diagnostics?.sync?.recent_issues ?? []),
     ...(data?.sync_diagnostics?.["scheduled-sync"]?.recent_issues ?? []),
@@ -288,6 +290,13 @@ export default function RuntimeCenter() {
         <section className="runtime-usage" aria-label="资料同步与故障摘要">
           <header><div><small>自动任务与资料源</small><h2>最近同步是否真的完成</h2></div><p>只显示新版本的精简运行回执；未启用任务不等于已自动同步。</p></header>
           <div className="runtime-metrics"><article><strong>{syncRunLabel(latestSync)}</strong><span>资料源同步</span></article><article><strong>{scheduledRunLabel(latestScheduled)}</strong><span>定时任务</span></article><article><strong>{weflowRunLabel(latestScheduled)}</strong><span>微信聊天</span></article></div>
+          {latestScheduled && <div className="runtime-sync-timing" aria-label="同步阶段耗时">
+            <h3>本轮处理用时</h3>
+            {syncTimings.length ? <>
+              <div className="runtime-metrics">{syncTimings.map(stage => <article key={stage.id}><strong>{stage.value}</strong><span>{stage.label}</span></article>)}</div>
+              <p className="runtime-footnote">后台处理：{formatSyncDuration(latestScheduled.counts.worker_total_ms)}。包含准备、聊天入库及资料刷新，不含前面的导出等待；这几项不要相加。</p>
+            </> : <p className="runtime-footnote">这条旧回执没有记录分阶段耗时；升级后下一轮同步会显示，不推算历史用时。</p>}
+          </div>}
           <p className="runtime-footnote">资料源最近回执：{formatRecordedTime(latestSync?.recorded_at ?? null)}；定时任务最近回执：{formatRecordedTime(latestScheduled?.recorded_at ?? null)}。成功回执不代表新增文件都完成 AI 分类。</p>
           {recentSyncIssues.length > 0 && <details><summary>查看同步异常与处理建议</summary><div className="runtime-failure-list">{recentSyncIssues.map((item, index) => <article key={`${item.recorded_at}:${index}`}><div><strong>{item.root_id ? (data.sync_root_names?.[item.root_id] ?? "已停用的资料源") : (item.stage ?? "后台增量处理")}</strong><span>{formatRecordedTime(item.recorded_at)} · {item.code}{item.error_type ? ` · ${item.error_type}` : ""}</span></div><p>{item.action}</p><b>{item.count} 项</b></article>)}</div></details>}
         </section>

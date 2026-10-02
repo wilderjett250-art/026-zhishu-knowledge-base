@@ -1,5 +1,6 @@
 import ctypes
 import json
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -95,14 +96,19 @@ def run_scheduled_sync(
     # This local import is intentionally checked on every lightweight poll. It
     # does not call an LLM and only sees exports newer than the persisted
     # authorization watermark.
+    phase_started = time.perf_counter_ns()
     try:
         weflow_result = weflow_import_runner(knowledge_system)
     except Exception as exc:
         weflow_result = {"status": "failed", "error_type": type(exc).__name__}
+    timings_ms = {"weflow_import": max(0, (time.perf_counter_ns() - phase_started) // 1_000_000)}
+    phase_started = time.perf_counter_ns()
     try:
         full_result = full_sync_runner(knowledge_system) if full_sync_due else None
     except Exception as exc:
         full_result = {"status": "failed", "error_type": type(exc).__name__}
+    if full_sync_due:
+        timings_ms["local_refresh"] = max(0, (time.perf_counter_ns() - phase_started) // 1_000_000)
 
     weflow_status = str(weflow_result.get("status") or "failed")
     full_status = str(full_result.get("status") or "deferred") if full_result else "deferred"
@@ -163,4 +169,5 @@ def run_scheduled_sync(
         "state_path": state_path,
         "state_save_failed": state_path is None,
         "llm_used_for_poll_only": False,
+        "timings_ms": timings_ms,
     }

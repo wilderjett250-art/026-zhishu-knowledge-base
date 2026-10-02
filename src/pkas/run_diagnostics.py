@@ -16,6 +16,7 @@ COUNTER_NAMES = frozenset({
     "low_disk", "no_local_roots", "weflow_failed_sessions", "weflow_export_copies_pruned",
     "weflow_export_bytes_freed", "weflow_retention_errors", "weflow_export_failed",
     "index_outbox_warnings", "files_seen", "classification_failed",
+    "weflow_export_wait_ms", "weflow_import_ms", "local_refresh_ms", "worker_total_ms",
 })
 ACTION = {
     "root_failed": "检查该资料源是否仍存在且有读取权限，再手动重试；不要扩大扫描范围。",

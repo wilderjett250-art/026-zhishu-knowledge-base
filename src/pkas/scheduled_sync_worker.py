@@ -29,6 +29,31 @@ EXPORT_FAILURE_CODES = (
 )
 
 
+def _duration_argument(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Expected milliseconds between 0 and 86400000") from None
+    if not 0 <= number <= 86_400_000:
+        raise argparse.ArgumentTypeError("Expected milliseconds between 0 and 86400000")
+    return number
+
+
+def _timing_counts(report: dict[str, Any], result: dict[str, Any]) -> dict[str, int]:
+    timings = result.get("timings_ms")
+    timings = timings if isinstance(timings, dict) else {}
+    candidates = {
+        "weflow_export_wait_ms": report.get("export_wait_ms"),
+        "weflow_import_ms": timings.get("weflow_import"),
+        "local_refresh_ms": timings.get("local_refresh"),
+        "worker_total_ms": report.get("worker_elapsed_ms"),
+    }
+    return {
+        key: value for key, value in candidates.items()
+        if type(value) is int and 0 <= value <= 86_400_000
+    }
+
+
 def _write_report(knowledge_system: KnowledgeSystem, report: dict[str, Any]) -> str:
     return _write_report_at(knowledge_system.settings.data_root, report)
 
@@ -122,6 +147,7 @@ def _write_report_at(data_root: Path, report: dict[str, Any]) -> str:
             "weflow_export_bytes_freed": int(weflow.get("freed_bytes") or 0),
             "weflow_retention_errors": int(weflow.get("retention_errors") or 0),
             "weflow_export_failed": int(result.get("weflow_export_status") in {"error", "timeout"}),
+            **_timing_counts(report, result),
         },
         issues=issues,
     )
@@ -146,7 +172,12 @@ def _authorization_enabled(data_root: Path) -> bool:
 
 
 def main() -> None:
+    worker_started_ns = time.perf_counter_ns()
     parser = argparse.ArgumentParser(description="Run the PKAS scheduled sync")
+    parser.add_argument(
+        "--weflow-export-wait-ms", type=_duration_argument,
+        help="observed export wait duration, never a message or raw exception",
+    )
     parser.add_argument(
         "--weflow-export-code",
         choices=EXPORT_FAILURE_CODES,
@@ -235,6 +266,10 @@ def main() -> None:
             "failure_code": failure_code,
         }
     report["run_id"] = run_id
+    report["export_wait_ms"] = args.weflow_export_wait_ms
+    report["worker_elapsed_ms"] = max(
+        0, (time.perf_counter_ns() - worker_started_ns) // 1_000_000,
+    )
     try:
         report["report_path"] = _write_report_at(data_root, report)
         if args.record_daily_check and report["status"] in {"completed", "deferred"}:
