@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
+& (Join-Path $PSScriptRoot 'check_release_versions.ps1') -ProjectRoot $resolvedRoot | Out-Null
 $runtimeConfigPath = Join-Path $resolvedRoot 'config\desktop_runtime.json'
 $runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
 $replicationConfig = Get-Content -LiteralPath (Join-Path $resolvedRoot 'config\windows_replication.json') -Raw | ConvertFrom-Json
