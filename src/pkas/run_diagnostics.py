@@ -53,6 +53,13 @@ ACTION = {
         "等待导出期间无法读取 WeFlow 任务状态；检查配置文件格式、权限和写入占用。"
     ),
     "weflow_export_timeout": "等待微信导出超时；查看 WeFlow 自动导出状态，确认完成后重试增量导入。",
+    "weflow_schedule_not_due": (
+        "WeFlow 的下次触发晚于本轮等待上限；其间隔任务可能与零点同步错位。"
+        "保存工作后退出 WeFlow，让已授权定时任务重新启动；已有导出仍会增量导入。"
+    ),
+    "weflow_process_exited": (
+        "本轮启动的 WeFlow 在导出完成前退出；检查导出环境后重试，已有导出仍会导入。"
+    ),
     "weflow_export_sessions": (
         "WeFlow 无法读取当前会话列表；检查其连接状态后重试，不代表没有新消息。"
     ),
@@ -95,6 +102,8 @@ STAGE = {
         (
             "weflow_export_failed",
             "weflow_export_timeout",
+            "weflow_schedule_not_due",
+            "weflow_process_exited",
             "weflow_config_unreadable",
             "weflow_export_sessions",
             "weflow_export_partial",

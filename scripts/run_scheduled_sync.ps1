@@ -49,6 +49,7 @@ function Test-CurrentWorkerReceipt {
 
 try {
 . (Join-Path $PSScriptRoot 'write_sync_diagnostic.ps1')
+. (Join-Path $PSScriptRoot 'weflow_export_status.ps1')
 # Set the requested data scope before the authorization subprocess. A task
 # using a non-default database must never consult another installation's scope.
 if ([string]::IsNullOrWhiteSpace($DataRoot)) {
@@ -252,8 +253,18 @@ if ($startedByTask) {
     # task definition. The Node helper never reads or prints secret fields.
     $env:WEFLOW_ROOT = $WeFlowRoot
     $script:failureCode = 'weflow_configuration_failed'
-    & $nodePath $configureScript 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    $priorForceDue = $env:PKAS_WEFLOW_FORCE_DUE
+    $priorDailyAt = $env:WEFLOW_DAILY_AT
+    try {
+        $env:PKAS_WEFLOW_FORCE_DUE = if ($Scheduled) { '1' } else { '0' }
+        $env:WEFLOW_DAILY_AT = $DailyAt
+        & $nodePath $configureScript 2>$null | Out-Null
+        $configureExitCode = $LASTEXITCODE
+    } finally {
+        [Environment]::SetEnvironmentVariable('PKAS_WEFLOW_FORCE_DUE', $priorForceDue, 'Process')
+        [Environment]::SetEnvironmentVariable('WEFLOW_DAILY_AT', $priorDailyAt, 'Process')
+    }
+    if ($configureExitCode -ne 0) {
         throw 'WeFlow automation configuration failed'
     }
     # Do not launch npm.cmd here. A .cmd launcher creates a child console even
@@ -288,7 +299,7 @@ function Test-WeFlowManagedTaskConfigured {
             if ($entry.Name -cne $scope) { continue }
             foreach ($task in @($entry.Value.tasks)) {
                 if ($task.id -ne 'pkas-weflow-daily-v1') { continue }
-                if (-not $task.enabled) { return $false }
+                if ($task.enabled -isnot [bool] -or -not $task.enabled) { return $false }
                 $configured = [IO.Path]::GetFullPath([string]$task.outputDir).TrimEnd('\')
                 return $configured.Equals(
                     $env:PKAS_WEFLOW_EXPORT_ROOT.TrimEnd('\'),
@@ -318,35 +329,8 @@ if ($LaunchOnly) {
 # account key, session names, messages, or paths from its local config file.
 function Get-WeFlowDailyExportStatus {
     $configPath = Join-Path $env:APPDATA 'weflow\WeFlow-config.json'
-    try {
-        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $dbPath = [string]$config.dbPath
-        $myWxid = [string]$config.myWxid
-        $scope = if ($dbPath -or $myWxid) { "${dbPath}::${myWxid}" } else { 'default' }
-        $dayStart = [DateTimeOffset]::new((Get-Date).Date).ToUnixTimeMilliseconds()
-        foreach ($entry in $config.exportAutomationTaskMap.PSObject.Properties) {
-            if ($entry.Name -cne $scope) { continue }
-            foreach ($task in @($entry.Value.tasks)) {
-                if ($task.id -ne 'pkas-weflow-daily-v1') { continue }
-                if ([long]$task.runState.lastTriggeredAt -lt $dayStart) { continue }
-                $state = [string]$task.runState.lastRunStatus
-                if ($state -in @('success', 'skipped', 'error')) {
-                    return [pscustomobject]@{
-                        Status = $state
-                        TriggeredAt = [long]$task.runState.lastTriggeredAt
-                        ErrorCode = [string]$task.runState.lastError
-                    }
-                }
-            }
-        }
-    } catch {
-        # A concurrent electron-store write can briefly expose incomplete JSON.
-        # Retry until the bounded deadline rather than reading any chat content.
-        return [pscustomobject]@{
-            Status = 'pending'; TriggeredAt = 0; ErrorCode = 'weflow_config_unreadable'
-        }
-    }
-    return [pscustomobject]@{ Status = 'pending'; TriggeredAt = 0; ErrorCode = '' }
+    Get-PkasWeFlowExportState -ConfigPath $configPath -ExportRoot $env:PKAS_WEFLOW_EXPORT_ROOT `
+        -DayStartMs $exportDayStart -NowMs ([DateTimeOffset]::Now.ToUnixTimeMilliseconds())
 }
 
 $script:failureCode = 'weflow_export_failed'
@@ -355,8 +339,14 @@ $script:failureCode = 'weflow_export_failed'
     $exportStatus = if ($runningWithOldTask) { 'error' } else { 'ready' }
     $exportFailureCode = if ($runningWithOldTask) { 'weflow_task_mismatch' } else { '' }
     if ($dailyImportEnabled -and -not $runningWithOldTask) {
+        # Freeze the invocation's day boundary. Crossing midnight while waiting
+        # must not discard a run that began on the previous day.
+        $exportDayStart = [DateTimeOffset]::new((Get-Date).Date).ToUnixTimeMilliseconds()
+        $waitStartedMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
         $deadline = (Get-Date).AddSeconds($WeFlowWaitSeconds)
+        $deadlineMs = [DateTimeOffset]::new($deadline).ToUnixTimeMilliseconds()
         $firstErrorTrigger = $null
+        $configUnreadableSince = 0L
         do {
             $observed = Get-WeFlowDailyExportStatus
             if ($observed.Status -in @('success', 'skipped')) {
@@ -387,6 +377,24 @@ $script:failureCode = 'weflow_export_failed'
                     $exportStatus = 'error'
                     break
                 }
+            }
+            $nowMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+            if ($observed.ErrorCode -eq 'weflow_config_unreadable') {
+                if ($configUnreadableSince -eq 0) { $configUnreadableSince = $nowMs }
+            } else { $configUnreadableSince = 0L }
+            $launcherExited = $startedByTask -and $null -ne $weflowLauncher -and $weflowLauncher.HasExited
+            $waitDecision = Resolve-PkasWeFlowPendingWait -Observed $observed -NowMs $nowMs `
+                -DeadlineMs $deadlineMs -WaitStartedMs $waitStartedMs `
+                -ConfigUnreadableSinceMs $configUnreadableSince `
+                -LauncherExited $launcherExited
+            if ($waitDecision.Stop) {
+                $exportStatus = 'error'
+                $exportFailureCode = $waitDecision.ErrorCode
+                break
+            }
+            if ($launcherExited -and $observed.Status -eq 'error') {
+                $exportStatus = 'error'
+                break
             }
             if ((Get-Date) -ge $deadline) {
                 $exportStatus = if ($observed.Status -eq 'error') { 'error' } else { 'timeout' }

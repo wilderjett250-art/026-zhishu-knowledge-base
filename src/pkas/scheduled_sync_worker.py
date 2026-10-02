@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 EXPORT_FAILURE_CODES = (
     "weflow_export_failed",
     "weflow_export_timeout",
+    "weflow_schedule_not_due",
+    "weflow_process_exited",
     "weflow_config_unreadable",
     "weflow_task_mismatch",
     "weflow_export_directory",

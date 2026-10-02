@@ -40,6 +40,7 @@ def test_tauri_config_builds_a_current_user_windows_installer() -> None:
         "uninstall_scheduled_sync.ps1", "arm_sync_catchup.ps1",
         "write_sync_diagnostic.ps1", "assert_windows_autostart_allowed.ps1",
         "configure_weflow_daily.mjs",
+        "weflow_schedule.mjs", "weflow_export_status.ps1",
     ):
         assert resources[f"../../scripts/{helper}"] == f"pkas-app/scripts/{helper}"
     assert "../../scripts/" not in resources

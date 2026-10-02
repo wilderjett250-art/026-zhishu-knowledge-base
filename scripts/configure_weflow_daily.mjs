@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, statfsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
+import { alignManagedDailyRun } from './weflow_schedule.mjs'
 
 const weflowRoot = String(process.env.WEFLOW_ROOT || '').trim()
 if (!weflowRoot) {
@@ -110,7 +111,10 @@ const hasExistingAnchor = Number(existing?.schedule?.firstTriggerAt || 0) > 0
 const requestedAnchor = resetDailyAnchor && requestedDailyAt
   ? resolveLocalDailyAnchor(now, requestedDailyAt)
   : 0
-const runState = requestedAnchor > 0
+const dueInvocation = process.env.PKAS_WEFLOW_FORCE_DUE === '1'
+  ? alignManagedDailyRun(existing, now, requestedDailyAt || '00:00')
+  : null
+const runState = dueInvocation ? dueInvocation.runState : requestedAnchor > 0
   ? {
       ...(existing?.runState || {}),
       lastTriggeredAt: undefined,
@@ -132,10 +136,10 @@ const task = {
     type: 'interval',
     intervalDays: 1,
     intervalHours: 0,
-    // A newly installed task should run when WeFlow first starts. Once it has
-    // triggered, lastTriggeredAt remains the authoritative daily anchor. An
-    // explicit reset may align the first run to a chosen local daily time.
-    firstTriggerAt: requestedAnchor > 0
+    // firstTriggerAt retains the chosen wall-clock time for a calendar-aware
+    // producer; lastTriggeredAt records whether this day's slot was consumed.
+    // A legacy producer can still use these fields as its interval anchor.
+    firstTriggerAt: dueInvocation ? dueInvocation.firstTriggerAt : requestedAnchor > 0
       ? requestedAnchor
       : (hasExistingAnchor ? existing?.schedule?.firstTriggerAt : now),
   },
@@ -198,5 +202,6 @@ console.log(JSON.stringify({
   lookback_days: task.template.dateRangeConfig.relativeDays,
   condition: task.condition.type,
   session_count: sessionIds.length,
+  invocation_aligned: Boolean(dueInvocation),
   secret_fields_accessed: false,
 }))
